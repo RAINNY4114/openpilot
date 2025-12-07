@@ -220,7 +220,7 @@ def main():
       liveParameters = msg.liveParameters
       liveParameters.posenetValid = True
       liveParameters.sensorValid = sensors_valid
-      liveParameters.steerRatio = float(x[States.STEER_RATIO].item())
+      liveParameters.steerRatio = 19.33
       liveParameters.stiffnessFactor = float(x[States.STIFFNESS].item())
       liveParameters.roll = roll
       liveParameters.angleOffsetAverageDeg = angle_offset_average
