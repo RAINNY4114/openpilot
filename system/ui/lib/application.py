@@ -32,7 +32,9 @@ MOUSE_THREAD_RATE = 140  # touch controller runs at 140Hz
 MAX_TOUCH_SLOTS = 2
 TOUCH_HISTORY_TIMEOUT = 3.0  # Seconds before touch points fade out
 
-BIG_UI = os.getenv("BIG", "0") == "1"
+_BIG_ENV = os.getenv("BIG")
+BIG_UI = _BIG_ENV == "1"
+FORCE_SMALL_UI = os.getenv("SMALL_UI", "0") == "1"
 ENABLE_VSYNC = os.getenv("ENABLE_VSYNC", "0") == "1"
 SHOW_FPS = os.getenv("SHOW_FPS") == "1"
 SHOW_TOUCHES = os.getenv("SHOW_TOUCHES") == "1"
@@ -679,7 +681,18 @@ class GuiApplication:
 
   @staticmethod
   def big_ui() -> bool:
-    return HARDWARE.get_device_type() in ('tici', 'tizi') or BIG_UI
+    if FORCE_SMALL_UI:
+      return False
+
+    if HARDWARE.get_device_type() in ('tici', 'tizi'):
+      return True
+
+    # respect explicit BIG env override before falling back to desktop default
+    if _BIG_ENV is not None:
+      return BIG_UI
+
+    # default to C3-style big UI on desktops unless explicitly overridden
+    return True
 
 
 gui_app = GuiApplication()
