@@ -161,4 +161,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_vag_pq_steering_patch", {PERSISTENT, BOOL, "0"}},
     {"dp_vag_avoid_eps_lockout", {PERSISTENT, BOOL, "0"}},
     {"dp_ui_four", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_bsm_voice_enabled", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_bsm_voice_interval_sec", {PERSISTENT, INT, "3"}},
+    {"dp_lincoln_bsm_voice_volume_pct", {PERSISTENT, INT, "100"}},
 };

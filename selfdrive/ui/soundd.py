@@ -1,8 +1,8 @@
 import math
+import os
 import numpy as np
 import time
 import wave
-
 
 from cereal import car, messaging
 from openpilot.common.basedir import BASEDIR
@@ -63,7 +63,9 @@ def check_selfdrive_timeout_alert(sm):
 
 class Soundd:
   def __init__(self):
+    self._params = Params()
     self.load_sounds()
+    self.load_dp_voice_sounds()
 
     self.current_alert = AudibleAlert.none
     self.current_volume = MIN_VOLUME
@@ -74,9 +76,20 @@ class Soundd:
     self.spl_filter_weighted = FirstOrderFilter(0, 2.5, FILTER_DT, initialized=False)
 
     try:
-      self._dp_dev_audible_alert_mode = int(Params().get("dp_dev_audible_alert_mode"))
-    except:
+      self._dp_dev_audible_alert_mode = int(self._params.get("dp_dev_audible_alert_mode") or 0)
+    except Exception:
       self._dp_dev_audible_alert_mode = 0
+
+    self.dp_voice_enabled = self._params.get_bool("dp_lincoln_bsm_voice_enabled")
+    self.dp_voice_interval = max(1.0, float(self._params.get("dp_lincoln_bsm_voice_interval_sec") or 3))
+    self.dp_voice_volume = np.clip(int(self._params.get("dp_lincoln_bsm_voice_volume_pct") or 100) / 100.0, 0.0, 1.0)
+    self._dp_voice_last_param_check = 0.0
+    self.dp_voice_next_allowed = 0.0
+    self.dp_voice_playing = False
+    self.dp_voice_sound: np.ndarray | None = None
+    self.dp_voice_frame = 0
+    self.dp_voice_prev_left = False
+    self.dp_voice_prev_right = False
 
   def load_sounds(self):
     self.loaded_sounds: dict[int, np.ndarray] = {}
@@ -92,6 +105,24 @@ class Soundd:
 
         length = wavefile.getnframes()
         self.loaded_sounds[sound] = np.frombuffer(wavefile.readframes(length), dtype=np.int16).astype(np.float32) / (2**16/2)
+
+  def load_dp_voice_sounds(self):
+    self.dp_voice_sounds: dict[str, np.ndarray] = {}
+    base = os.path.join(BASEDIR, "selfdrive", "assets", "sounds")
+    for side in ("left", "right"):
+      path = os.path.join(base, f"{side}.wav")
+      try:
+        with wave.open(path, 'r') as wavefile:
+          assert wavefile.getnchannels() == 1
+          assert wavefile.getsampwidth() == 2
+          assert wavefile.getframerate() == SAMPLE_RATE
+          length = wavefile.getnframes()
+          data = np.frombuffer(wavefile.readframes(length), dtype=np.int16).astype(np.float32) / (2**16/2)
+          self.dp_voice_sounds[side] = data
+      except FileNotFoundError:
+        cloudlog.warning(f"Missing blindspot voice file: {path}")
+      except Exception:
+        cloudlog.exception(f"Failed loading blindspot voice file: {path}")
 
   def get_sound_data(self, frames): # get "frames" worth of data from the current alert sound, looping when required
 
@@ -116,7 +147,68 @@ class Soundd:
       if self._dp_dev_audible_alert_mode == 2 or (self._dp_dev_audible_alert_mode == 1 and self.current_alert in [AudibleAlert.engage, AudibleAlert.disengage]):
         self.current_volume = 0
 
-    return ret * self.current_volume
+    base_audio = ret * self.current_volume
+    base_audio += self._dp_voice_get_frames(frames)
+    return np.clip(base_audio, -1.0, 1.0)
+
+  def _refresh_dp_voice_params(self, now: float) -> None:
+    if (now - self._dp_voice_last_param_check) < 1.0:
+      return
+    self._dp_voice_last_param_check = now
+    try:
+      self.dp_voice_enabled = self._params.get_bool("dp_lincoln_bsm_voice_enabled")
+      self.dp_voice_interval = max(1.0, float(self._params.get("dp_lincoln_bsm_voice_interval_sec") or 3))
+      self.dp_voice_volume = np.clip(int(self._params.get("dp_lincoln_bsm_voice_volume_pct") or 100) / 100.0, 0.0, 1.0)
+      if not self.dp_voice_enabled and self.dp_voice_playing:
+        self.dp_voice_playing = False
+        self.dp_voice_sound = None
+    except Exception:
+      cloudlog.exception("Failed refreshing Lincoln BSM voice params")
+
+  def _dp_voice_get_frames(self, frames: int) -> np.ndarray:
+    if not self.dp_voice_playing or self.dp_voice_sound is None:
+      return np.zeros(frames, dtype=np.float32)
+
+    sound = self.dp_voice_sound
+    out = np.zeros(frames, dtype=np.float32)
+    remaining = sound.shape[0] - self.dp_voice_frame
+    to_copy = min(frames, remaining)
+    if to_copy > 0:
+      out[:to_copy] = sound[self.dp_voice_frame:self.dp_voice_frame + to_copy]
+      self.dp_voice_frame += to_copy
+    if self.dp_voice_frame >= sound.shape[0]:
+      self.dp_voice_playing = False
+      self.dp_voice_sound = None
+    return out * self.dp_voice_volume
+
+  def _maybe_start_dp_voice(self, side: str, now: float) -> None:
+    if not self.dp_voice_enabled:
+      return
+    if now < self.dp_voice_next_allowed:
+      return
+    if self.current_alert != AudibleAlert.none or self.dp_voice_playing:
+      return
+    sound = self.dp_voice_sounds.get(side)
+    if sound is None or sound.size == 0:
+      return
+    self.dp_voice_sound = sound
+    self.dp_voice_frame = 0
+    self.dp_voice_playing = True
+    self.dp_voice_next_allowed = now + self.dp_voice_interval
+
+  def _update_dp_voice_state(self, car_state, now: float) -> None:
+    if car_state is None:
+      return
+    left = bool(getattr(car_state, "leftBlindspot", False))
+    right = bool(getattr(car_state, "rightBlindspot", False))
+
+    if left and not self.dp_voice_prev_left:
+      self._maybe_start_dp_voice("left", now)
+    if right and not self.dp_voice_prev_right:
+      self._maybe_start_dp_voice("right", now)
+
+    self.dp_voice_prev_left = left
+    self.dp_voice_prev_right = right
 
   def callback(self, data_out: np.ndarray, frames: int, time, status) -> None:
     if status:
@@ -155,7 +247,7 @@ class Soundd:
     # sounddevice must be imported after forking processes
     import sounddevice as sd
 
-    sm = messaging.SubMaster(['selfdriveState', 'soundPressure'])
+    sm = messaging.SubMaster(['selfdriveState', 'soundPressure', 'carState'])
 
     with self.get_stream(sd) as stream:
       rk = Ratekeeper(20)
@@ -163,12 +255,16 @@ class Soundd:
       cloudlog.info(f"soundd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
       while True:
         sm.update(0)
+        now = time.monotonic()
 
         if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none: # only update volume filter when not playing alert
           self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
           self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
 
         self.get_audible_alert(sm)
+        self._refresh_dp_voice_params(now)
+        if sm.alive['carState']:
+          self._update_dp_voice_state(sm['carState'], now)
 
         rk.keep_time()
 

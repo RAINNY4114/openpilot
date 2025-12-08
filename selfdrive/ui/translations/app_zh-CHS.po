@@ -1436,6 +1436,28 @@ msgstr "comma prime"
 msgid "dashy"
 msgstr "dashy"
 
+# Lincoln blindspot voice alerts
+msgid "### Lincoln Blindspot Voice Alerts ###"
+msgstr "### Lincoln 盲点语音提示 ###"
+
+msgid "Blindspot Voice Alert"
+msgstr "盲点语音提示"
+
+msgid "Play left/right voice prompts when blindspot sensors detect a vehicle."
+msgstr "当盲点传感器检测到车辆时播放左右语音提示。"
+
+msgid "Voice repeat interval"
+msgstr "语音重复间隔"
+
+msgid "Minimum seconds between consecutive blindspot alerts."
+msgstr "连续盲点提示之间的最小时间（秒）。"
+
+msgid "Voice volume"
+msgstr "语音音量"
+
+msgid "Playback volume for blindspot alerts (percentage)."
+msgstr "盲点提示的播放音量（百分比）。"
+
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:258
 #, python-format
 msgid ""
