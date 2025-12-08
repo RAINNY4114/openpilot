@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import json
+import os
 
 import pyray as rl
 
@@ -90,7 +91,8 @@ def _process_font(font_path: Path, codepoints: tuple[int, ...]):
   print(f"Processing {font_path.name}...")
 
   font_size = {
-    "unifont.otf": 16,  # unifont is only 16x8 or 16x16 pixels per glyph
+    # Allow overriding unifont size via env (default to high-res 64px for smoother fallback glyphs)
+    "unifont.otf": int(os.getenv("UNIFONT_SIZE", "64")),
   }.get(font_path.name, 200)
 
   data = font_path.read_bytes()
