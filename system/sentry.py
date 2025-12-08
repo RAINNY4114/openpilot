@@ -1,6 +1,9 @@
 """Install exception handler for process crash."""
-import sentry_sdk
+import os
+from datetime import datetime
 from enum import Enum
+
+import sentry_sdk
 from sentry_sdk.integrations.threading import ThreadingIntegration
 
 from openpilot.common.params import Params
@@ -29,6 +32,25 @@ def report_tombstone(fn: str, message: str, contents: str) -> None:
 def save_exception(exc_text):
   log = "\n".join(exc_text.splitlines()) + "\n"
   Params().put("dp_dev_last_log", log)
+
+  crash_dir = "/data/community/crashes"
+  timestamp = datetime.now()
+  try:
+    os.makedirs(crash_dir, exist_ok=True)
+
+    error_log_path = os.path.join(crash_dir, "error.log")
+    header = f"=== Error Log (Last Updated: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}) ===\n\n"
+    with open(error_log_path, "w", encoding="utf-8") as f:
+      f.write(header)
+      f.write(log)
+
+    history_path = os.path.join(crash_dir, f"error_{timestamp.strftime('%Y%m%d_%H%M%S')}.log")
+    with open(history_path, "w", encoding="utf-8") as f:
+      f.write(log)
+
+    cloudlog.info(f"Error log saved to {error_log_path}")
+  except Exception:
+    cloudlog.exception("Failed to persist error log")
 
 def capture_exception(*args, **kwargs) -> None:
   cloudlog.error("crash", exc_info=kwargs.get('exc_info', 1))

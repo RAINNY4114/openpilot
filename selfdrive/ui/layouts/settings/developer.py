@@ -1,4 +1,7 @@
+import os
+
 from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
@@ -8,11 +11,9 @@ from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import DialogResult
-
-# rick - for show error logs
 from openpilot.system.ui.widgets.html_render import HtmlModal
-import os
-from openpilot.common.basedir import BASEDIR
+
+ERROR_LOG_PATH = "/data/community/crashes/error.log"
 
 # Description constants
 DESCRIPTIONS = {
@@ -192,6 +193,18 @@ class DeveloperLayout(Widget):
       self._update_toggles()
 
   def _on_show_last_errors(self):
-    if not self._last_error_log_dialog:
-      self._last_error_log_dialog = HtmlModal(text=(self._params.get("dp_dev_last_log") or ""))
+    log_text = self._read_persistent_error_log()
+    if not log_text:
+      log_text = self._params.get("dp_dev_last_log") or tr("No saved error logs.")
+
+    self._last_error_log_dialog = HtmlModal(text=log_text)
     gui_app.set_modal_overlay(self._last_error_log_dialog)
+
+  def _read_persistent_error_log(self) -> str:
+    if os.path.exists(ERROR_LOG_PATH):
+      try:
+        with open(ERROR_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+          return f.read()
+      except Exception:
+        cloudlog.exception("Failed to read persistent error log")
+    return ""
