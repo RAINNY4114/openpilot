@@ -1,4 +1,7 @@
+import math
 import os
+import shutil
+import threading
 import time
 import numpy as np
 import pyray as rl
@@ -11,7 +14,9 @@ from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
-from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.multilang import tr
+from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 
@@ -39,6 +44,12 @@ DP_INDICATOR_BLINK_RATE_FAST = int(gui_app.target_fps * 0.25)
 DP_INDICATOR_BLINK_RATE_STD = int(gui_app.target_fps * 0.5)
 DP_INDICATOR_COLOR_BSM = rl.Color(255, 255, 0, 255)
 DP_INDICATOR_COLOR_BLINKER = rl.Color(0, 255, 0, 255)
+PERF_DIRECTION_LABELS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+PERF_FONT_SIZE = 32
+PERF_PADDING = 12
+PERF_MARGIN_BOTTOM = 24
+PERF_ITEM_GAP = 140
+PERF_BG_COLOR = rl.Color(0, 0, 0, 160)
 
 
 class AugmentedRoadView(CameraView):
@@ -69,6 +80,14 @@ class AugmentedRoadView(CameraView):
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
+
+    # Lincoln perf overlay
+    self._perf_font = gui_app.font(FontWeight.MEDIUM)
+    self._perf_stats: dict[str, str] = {"cpu_temp": "N/A", "mem_usage": "N/A", "disk_free": "N/A"}
+    self._perf_lock = threading.Lock()
+    self._perf_running = True
+    self._perf_thread = threading.Thread(target=self._perf_update_loop, daemon=True)
+    self._perf_thread.start()
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -114,6 +133,8 @@ class AugmentedRoadView(CameraView):
     if not LITE:
       if not hide_hud:
         self.driver_state_renderer.render(self._content_rect)
+
+    self._draw_performance_info()
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
@@ -286,6 +307,165 @@ class AugmentedRoadView(CameraView):
     self._dp_indicator_show_right, self._dp_indicator_count_right, self._dp_indicator_color_right = \
       self._update_dp_indicator_side_state(cs.rightBlinker, cs.rightBlindspot,
                                            self._dp_indicator_show_right, self._dp_indicator_count_right)
+
+  def _draw_performance_info(self) -> None:
+    if not ui_state.dp_lincoln_perf_info_enabled:
+      return
+
+    rect = self._content_rect
+    if rect.width <= 0 or rect.height <= 0:
+      return
+
+    stats = self._get_perf_stats()
+    curvature_text, steering_text = self._get_curvature_and_steer()
+    direction_text = self._get_direction_label()
+    control_text = self._get_control_state_text()
+    mem_usage = stats.get("mem_usage", "N/A")
+    cpu_temp = stats.get("cpu_temp", "N/A")
+
+    items = [
+      f"{tr('Curvature')} {curvature_text}/{steering_text}",
+      f"{tr('Direction')} {direction_text}",
+      f"{tr('Control')} {control_text}",
+      f"{tr('Memory')} {mem_usage}",
+      f"{tr('CPU Temp')} {cpu_temp}",
+    ]
+
+    measurements = [measure_text_cached(self._perf_font, text, PERF_FONT_SIZE) for text in items]
+    total_text_width = sum(size.x for size in measurements)
+    gap_count = max(0, len(items) - 1)
+    gap = float(PERF_ITEM_GAP if gap_count else 0)
+    desired_width = total_text_width + 2 * PERF_PADDING + gap * gap_count
+    max_width = max(rect.width - 40, 0)
+    if gap_count > 0 and max_width > 0 and desired_width > max_width:
+      gap = max(20.0, (max_width - 2 * PERF_PADDING - total_text_width) / gap_count)
+      desired_width = total_text_width + 2 * PERF_PADDING + gap * gap_count
+    bar_width = desired_width
+    bar_height = PERF_FONT_SIZE + 2 * PERF_PADDING
+
+    bar_x = rect.x + (rect.width - bar_width) / 2
+    bar_y = rect.y + rect.height - bar_height - PERF_MARGIN_BOTTOM
+    minimum_y = rect.y + PERF_MARGIN_BOTTOM
+    if bar_y < minimum_y:
+      bar_y = minimum_y
+
+    rl.draw_rectangle_rounded(
+      rl.Rectangle(bar_x, bar_y, bar_width, bar_height),
+      0.2,
+      8,
+      PERF_BG_COLOR,
+    )
+
+    cursor_x = bar_x + PERF_PADDING
+    text_y = bar_y + PERF_PADDING
+    for text, measurement in zip(items, measurements):
+      rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
+      cursor_x += measurement.x + gap
+
+  def _get_curvature_and_steer(self) -> tuple[str, str]:
+    curvature_text = "--"
+    steering_text = "--"
+    sm = ui_state.sm
+    try:
+      if getattr(sm, "alive", {}).get("controlsState", False):
+        curvature = sm['controlsState'].curvature
+        if math.isfinite(curvature):
+          curvature_text = f"{abs(curvature):.3f}"
+      if getattr(sm, "alive", {}).get("carState", False):
+        steering = sm['carState'].steeringAngleDeg
+        if math.isfinite(steering):
+          steering_text = f"{steering:.1f}°"
+    except Exception:
+      pass
+    return curvature_text, steering_text
+
+  def _get_direction_label(self) -> str:
+    sm = ui_state.sm
+    try:
+      if getattr(sm, "alive", {}).get("gpsLocationExternal", False):
+        gps = sm['gpsLocationExternal']
+        if getattr(gps, "hasFix", True):
+          bearing = getattr(gps, "bearingDeg", float("nan"))
+          if math.isfinite(bearing):
+            index = int(((bearing % 360) + 22.5) // 45) % len(PERF_DIRECTION_LABELS)
+            return tr(PERF_DIRECTION_LABELS[index])
+    except Exception:
+      pass
+    return "---"
+
+  def _get_control_state_text(self) -> str:
+    status = ui_state.status
+    if status == UIStatus.ENGAGED:
+      return tr("Auto control")
+    return tr("Manual control")
+
+  def _get_perf_stats(self) -> dict[str, str]:
+    with self._perf_lock:
+      return dict(self._perf_stats)
+
+  def _perf_update_loop(self) -> None:
+    time.sleep(5)
+    while self._perf_running:
+      stats = {
+        "cpu_temp": self._read_cpu_temp(),
+        "mem_usage": self._read_mem_usage(),
+        "disk_free": self._read_disk_free(),
+      }
+      with self._perf_lock:
+        self._perf_stats.update(stats)
+      for _ in range(10):
+        if not self._perf_running:
+          return
+        time.sleep(0.1)
+
+  @staticmethod
+  def _read_cpu_temp() -> str:
+    path = "/sys/class/thermal/thermal_zone0/temp"
+    try:
+      with open(path) as f:
+        temp_c = int(f.read().strip()) / 1000.0
+        return f"{temp_c:.0f}°C"
+    except Exception:
+      return "N/A"
+
+  @staticmethod
+  def _read_mem_usage() -> str:
+    try:
+      total_kb = None
+      available_kb = None
+      with open("/proc/meminfo") as f:
+        for line in f:
+          if line.startswith("MemTotal:"):
+            total_kb = float(line.split()[1])
+          elif line.startswith("MemAvailable:"):
+            available_kb = float(line.split()[1])
+          if total_kb is not None and available_kb is not None:
+            break
+      if total_kb and available_kb:
+        used_pct = (total_kb - available_kb) / total_kb * 100.0
+        used_pct = min(max(used_pct, 0.0), 100.0)
+        return f"{used_pct:.0f}%"
+    except Exception:
+      pass
+    return "N/A"
+
+  @staticmethod
+  def _read_disk_free() -> str:
+    try:
+      usage = shutil.disk_usage("/data")
+      free_gb = usage.free / (1024 ** 3)
+      if free_gb >= 1.0:
+        return f"{free_gb:.1f}GB"
+      free_mb = usage.free / (1024 ** 2)
+      return f"{free_mb:.0f}MB"
+    except Exception:
+      return "N/A"
+
+  def close(self) -> None:
+    self._perf_running = False
+    if hasattr(self, "_perf_thread") and self._perf_thread and self._perf_thread.is_alive():
+      self._perf_thread.join(timeout=1.0)
+    super().close()
 
 if __name__ == "__main__":
   gui_app.init_window("OnRoad Camera View")

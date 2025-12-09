@@ -106,7 +106,14 @@ class UIState:
     # dp
     self.dp_dev_disable_connect = self.params.get_bool("dp_dev_disable_connect")
 
+    # dp lincoln performance overlay
+    self.dp_lincoln_perf_info_enabled = False
+
+    # Timing helpers
+    self._settings_update_time: float = 0.0
+
     self.update_params()
+    self._update_settings_params()
 
   def add_offroad_transition_callback(self, callback: Callable[[], None]):
     self._offroad_transition_callbacks.append(callback)
@@ -129,6 +136,8 @@ class UIState:
     self.sm.update(0)
     self._update_state()
     self._update_status()
+    if time.monotonic() - self._settings_update_time > 1.0:
+      self._update_settings_params()
     if time.monotonic() - self._param_update_time > 5.0:
       self.update_params()
     device.update()
@@ -218,6 +227,10 @@ class UIState:
       else:
         self.has_longitudinal_control = self.CP.openpilotLongitudinalControl
     self._param_update_time = time.monotonic()
+
+  def _update_settings_params(self) -> None:
+    self.dp_lincoln_perf_info_enabled = self.params.get_bool("dp_lincoln_perf_info_enabled")
+    self._settings_update_time = time.monotonic()
 
 
 class Device:

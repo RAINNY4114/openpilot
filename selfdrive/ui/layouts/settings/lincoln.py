@@ -65,6 +65,13 @@ class LincolnLayout(Widget):
         step=5,
         suffix=tr(" %"),
       ),
+      simple_item(title=lambda: tr("### HUD & Visualization ###")),
+      toggle_item(
+        title=lambda: tr("Show performance info"),
+        description=lambda: tr("Display device performance information at the bottom: CPU temperature, memory usage, CPU usage, and FPS. Requires UI restart."),
+        initial_state=self._params.get_bool("dp_lincoln_perf_info_enabled"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_perf_info_enabled", val),
+      ),
       button_item(
         title=lambda: tr("NAS (Synology) configuration"),
         button_text=lambda: tr("Edit"),

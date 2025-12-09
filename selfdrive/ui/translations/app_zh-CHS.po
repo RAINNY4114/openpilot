@@ -1755,3 +1755,70 @@ msgstr "🔥 Firehose 模式 🔥"
 #~ msgid_plural ""
 #~ "{0} segments of your driving is in the training dataset so far."
 #~ msgstr[0] "目前已有 {} 个您的驾驶片段被纳入训练数据集。"
+#: selfdrive/ui/layouts/settings/lincoln.py:69
+msgid "Show performance info"
+msgstr "显示性能信息"
+
+#: selfdrive/ui/layouts/settings/lincoln.py:70
+msgid "Display device performance information at the bottom: CPU temperature, memory usage, CPU usage, and FPS. Requires UI restart."
+msgstr "在底部显示设备性能信息：CPU 温度、内存占用、CPU 使用率与帧率。需要重启 UI。"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:270
+msgid "Curvature"
+msgstr "曲率"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:271
+msgid "Control"
+msgstr "控制"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:271
+msgid "Direction"
+msgstr "方向"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:272
+msgid "Memory"
+msgstr "内存"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:273
+msgid "CPU Temp"
+msgstr "CPU 温度"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:305
+msgid "N"
+msgstr "北"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:305
+msgid "NE"
+msgstr "东北"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:305
+msgid "E"
+msgstr "东"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:306
+msgid "SE"
+msgstr "东南"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:306
+msgid "S"
+msgstr "南"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:306
+msgid "SW"
+msgstr "西南"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:306
+msgid "W"
+msgstr "西"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:306
+msgid "NW"
+msgstr "西北"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:333
+msgid "Auto control"
+msgstr "自动接管"
+
+#: selfdrive/ui/onroad/augmented_road_view.py:335
+msgid "Manual control"
+msgstr "人工接管"

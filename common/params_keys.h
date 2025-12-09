@@ -164,6 +164,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lincoln_bsm_voice_enabled", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_bsm_voice_interval_sec", {PERSISTENT, INT, "3"}},
     {"dp_lincoln_bsm_voice_volume_pct", {PERSISTENT, INT, "100"}},
+    {"dp_lincoln_perf_info_enabled", {PERSISTENT, BOOL, "0"}},
     {"LincolnNASAddress", {PERSISTENT, STRING}},
     {"LincolnNASUsername", {PERSISTENT, STRING}},
     {"LincolnNASPassword", {PERSISTENT, STRING}},
