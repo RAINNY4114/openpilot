@@ -65,6 +65,23 @@ class LincolnLayout(Widget):
         step=5,
         suffix=tr(" %"),
       ),
+      simple_item(title=lambda: tr("### Human Turn Detection ###")),
+      toggle_item(
+        title=lambda: tr("Enable Human Turn Detection"),
+        description=lambda: tr("Automatically pause steering when the driver applies large manual steering input, then smoothly resume."),
+        initial_state=self._params.get_bool("dp_htd_enabled"),
+        callback=lambda val: self._params.put_bool("dp_htd_enabled", val),
+      ),
+      spin_button_item(
+        title=lambda: tr("Trigger angle"),
+        description=lambda: tr("Driver steering angle that triggers HTD (degrees)."),
+        initial_value=self._get_param_int("dp_htd_turn_angle_threshold", 90),
+        callback=lambda val: self._params.put("dp_htd_turn_angle_threshold", int(val)),
+        min_val=30,
+        max_val=120,
+        step=1,
+        suffix=tr(" °"),
+      ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(
         title=lambda: tr("Show performance info"),
@@ -243,3 +260,15 @@ class LincolnLayout(Widget):
         self._nas_action_inflight = False
 
     threading.Thread(target=_worker, daemon=True).start()
+
+  @staticmethod
+  def _safe_int(val: bytes | str | None, default: int) -> int:
+    if not val:
+      return default
+    try:
+      return int(val)
+    except (TypeError, ValueError):
+      return default
+
+  def _get_param_int(self, key: str, default: int) -> int:
+    return self._safe_int(self._params.get(key), default)

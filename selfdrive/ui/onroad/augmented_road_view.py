@@ -317,14 +317,14 @@ class AugmentedRoadView(CameraView):
       return
 
     stats = self._get_perf_stats()
-    curvature_text, steering_text = self._get_curvature_and_steer()
+    curvature_text, steering_text, torque_text = self._get_curvature_steer_torque()
     direction_text = self._get_direction_label()
     control_text = self._get_control_state_text()
     mem_usage = stats.get("mem_usage", "N/A")
     cpu_temp = stats.get("cpu_temp", "N/A")
 
     items = [
-      f"{tr('Curvature')} {curvature_text}/{steering_text}",
+      f"{tr('Curvature')} {curvature_text}/{steering_text}/{torque_text}",
       f"{tr('Direction')} {direction_text}",
       f"{tr('Control')} {control_text}",
       f"{tr('Memory')} {mem_usage}",
@@ -362,9 +362,10 @@ class AugmentedRoadView(CameraView):
       rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       cursor_x += measurement.x + gap
 
-  def _get_curvature_and_steer(self) -> tuple[str, str]:
+  def _get_curvature_steer_torque(self) -> tuple[str, str, str]:
     curvature_text = "--"
     steering_text = "--"
+    torque_text = "--"
     sm = ui_state.sm
     try:
       if getattr(sm, "alive", {}).get("controlsState", False):
@@ -372,12 +373,16 @@ class AugmentedRoadView(CameraView):
         if math.isfinite(curvature):
           curvature_text = f"{abs(curvature):.3f}"
       if getattr(sm, "alive", {}).get("carState", False):
-        steering = sm['carState'].steeringAngleDeg
+        car_state = sm['carState']
+        steering = car_state.steeringAngleDeg
         if math.isfinite(steering):
           steering_text = f"{steering:.1f}°"
+        torque = car_state.steeringTorque
+        if math.isfinite(torque):
+          torque_text = f"{torque:.1f}Nm"
     except Exception:
       pass
-    return curvature_text, steering_text
+    return curvature_text, steering_text, torque_text
 
   def _get_direction_label(self) -> str:
     sm = ui_state.sm

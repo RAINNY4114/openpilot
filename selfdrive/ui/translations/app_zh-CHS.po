@@ -1458,6 +1458,21 @@ msgstr "语音音量"
 msgid "Playback volume for blindspot alerts (percentage)."
 msgstr "盲点提示的播放音量（百分比）。"
 
+msgid "### Human Turn Detection ###"
+msgstr "### 人工转弯检测 ###"
+
+msgid "Enable Human Turn Detection"
+msgstr "启用人工转弯检测"
+
+msgid "Automatically pause steering when the driver applies large manual steering input, then smoothly resume."
+msgstr "驾驶员大角度手动打方向时自动暂停横向控制，松手后平滑恢复。"
+
+msgid "Trigger angle"
+msgstr "触发角度"
+
+msgid "Driver steering angle that triggers HTD (degrees)."
+msgstr "触发人工转弯检测的方向盘角度（度）。"
+
 # Lincoln NAS entries
 msgid "NAS (Synology) configuration"
 msgstr "NAS（群晖）配置"
