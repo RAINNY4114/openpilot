@@ -108,7 +108,19 @@ class Tici(HardwareBase):
     return get_device_type()
 
   def reboot(self, reason=None):
-    subprocess.check_output(["sudo", "reboot"])
+    try:
+      # import here to avoid circular import at module load time
+      from openpilot.common.swaglog import cloudlog
+    except Exception:
+      cloudlog = None
+    try:
+      subprocess.check_output(["sudo", "reboot"])
+    except subprocess.CalledProcessError as e:
+      if cloudlog is not None:
+        cloudlog.error(f"reboot failed: {e}")
+      # Swallow to avoid crashing UI in non-root/test environments
+      return False
+    return True
 
   def uninstall(self):
     Path("/data/__system_reset__").touch()
