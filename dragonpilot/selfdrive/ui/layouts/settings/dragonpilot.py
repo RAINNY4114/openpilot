@@ -163,13 +163,6 @@ class DragonpilotLayout(Widget):
       callback=lambda val: self._params.put_bool("dp_lon_aem", val),
     )
 
-    self._toggles["dp_lon_dtsc"] = toggle_item(
-      title=lambda: tr("Dynamic Turn Speed Control (DTSC)"),
-      description=lambda: tr("DTSC automatically adjusts the vehicle's predicted speed based on upcoming road curvature and grip conditions.<br>Originally from the openpilot TACO branch."),
-      initial_state=self._params.get_bool("dp_lon_dtsc"),
-      callback=lambda val: self._params.put_bool("dp_lon_dtsc", val),
-    )
-
   def _ui_toggles(self):
     self._toggles["title_ui"] = simple_item(title=lambda: tr("### UI ###"))
 

@@ -82,6 +82,19 @@ class LincolnLayout(Widget):
         step=1,
         suffix=tr(" °"),
       ),
+      simple_item(title=lambda: tr("### Curve Speed Control ###")),
+      toggle_item(
+        title=lambda: tr("Dynamic Turn Speed Control"),
+        description=lambda: tr("Slow down automatically in curves for Lincoln/Ford (model-based, comfort tuned)."),
+        initial_state=self._params.get_bool("dp_lincoln_curve_speed"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_curve_speed", val),
+      ),
+      toggle_item(
+        title=lambda: tr("Curve speed debug log"),
+        description=lambda: tr("Write curve speed details (model curvature, speed limit, decel) to /data/media/0/lincoln_curve_logs/."),
+        initial_state=self._params.get_bool("dp_lincoln_curve_log"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_curve_log", val),
+      ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(
         title=lambda: tr("Show performance info"),

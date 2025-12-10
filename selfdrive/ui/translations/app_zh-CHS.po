@@ -543,6 +543,26 @@ msgstr "驾驶风格"
 msgid "Dynamic Turn Speed Control (DTSC)"
 msgstr "动态转弯速度控制 (DTSC)"
 
+#: selfdrive/ui/layouts/settings/lincoln.py:77
+msgid "### Curve Speed Control ###"
+msgstr "### 弯道限速 ###"
+
+#: selfdrive/ui/layouts/settings/lincoln.py:80
+msgid "Dynamic Turn Speed Control"
+msgstr "动态弯道限速"
+
+#: selfdrive/ui/layouts/settings/lincoln.py:81
+msgid "Slow down automatically in curves for Lincoln/Ford (model-based, comfort tuned)."
+msgstr "基于模型的舒适弯道减速（福特/林肯专用）。"
+
+#: selfdrive/ui/layouts/settings/lincoln.py:85
+msgid "Curve speed debug log"
+msgstr "弯道限速调试日志"
+
+#: selfdrive/ui/layouts/settings/lincoln.py:86
+msgid "Write curve speed details (model curvature, speed limit, decel) to /data/media/0/lincoln_curve_logs/."
+msgstr "将模型曲率、限速、减速度等写入 /data/media/0/lincoln_curve_logs/ 便于分析。"
+
 #: system/ui/widgets/network.py:123 system/ui/widgets/network.py:139
 #, python-format
 msgid "EDIT"

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import math
+import os
+import time
 import numpy as np
 
 import cereal.messaging as messaging
@@ -16,7 +18,6 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 from dragonpilot.selfdrive.controls.lib.acm import ACM
 from dragonpilot.selfdrive.controls.lib.aem import AEM
-from dragonpilot.selfdrive.controls.lib.dtsc import DTSC
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -32,7 +33,6 @@ _A_TOTAL_MAX_BP = [20., 40.]
 class DPFlags:
   ACM = 1
   AEM = 2
-  DTSC = 2 ** 2
   pass
 
 def get_max_accel(v_ego):
@@ -78,7 +78,13 @@ class LongitudinalPlanner:
     self.solverExecutionTime = 0.0
     self.acm = ACM()
     self.aem = AEM()
-    self.dtsc = DTSC(aggressiveness=0.8)
+    # Lincoln/Ford 专用弯道限速状态
+    self.curve_k_smooth = 0.0
+    self.curve_active = False
+    self.curve_v_target = None
+    self.curve_exit_timer = 0.0
+    self.last_curve_log_t = 0.0
+    self.curve_log_dir = "/data/media/0/lincoln_curve_logs"
 
   @staticmethod
   def parse_model(model_msg):
@@ -100,7 +106,172 @@ class LongitudinalPlanner:
       throttle_prob = 1.0
     return x, v, a, j, throttle_prob
 
-  def update(self, sm, dp_flags = 0):
+  def _apply_lincoln_curve_speed(self, sm, accel_clip, log_enabled: bool):
+    """
+    Ford/Lincoln 专用弯道减速（更稳健的前瞻 + 滞回）：
+    - 取模型曲率在前方窗口内的最大值并平滑
+    - 以舒适侧向加速度上限计算目标速度，带进入/退出滞回，避免出口抖动
+    - 提前按照等效减速度收紧纵向上限（可能为负）实现预减速
+    """
+    model = sm['modelV2']
+    car_state = sm['carState']
+    v_ego = car_state.vEgo
+
+    # 基础检查
+    if len(model.position.x) != ModelConstants.IDX_N or len(model.orientationRate.z) != ModelConstants.IDX_N:
+      if log_enabled:
+        self._log_curve(reason="model_invalid")
+      return accel_clip
+    if v_ego < 1.0:
+      if log_enabled:
+        self._log_curve(reason="low_speed", v=v_ego)
+      return accel_clip
+
+    # 取 MPC 时间轴上的预测值
+    v_pred = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.velocity.x)
+    turn_rates = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.orientationRate.z)
+    positions = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.position.x)
+
+    # 计算曲率，并截断到车辆可下发的信号范围
+    curvatures = np.abs(turn_rates / np.clip(v_pred, 1.0, 100.0))
+    curvatures = np.clip(curvatures, 0.0, 0.02)  # Ford 非 CAN FD 信号上限
+    window_mask = positions <= 80.0  # 关注前方 80m
+    if not np.any(window_mask):
+      if log_enabled:
+        self._log_curve(reason="no_window_points")
+      return accel_clip
+
+    k_window = curvatures[window_mask]
+    pos_window = positions[window_mask]
+    k_max = float(np.max(k_window))
+    critical_idx = int(np.argmax(k_window))
+    critical_distance = float(pos_window[critical_idx])
+
+    if k_max < 1e-4 or critical_distance < 5.0:
+      if log_enabled:
+        self._log_curve(reason="k_too_small", k_max=k_max, dist=critical_distance, v=v_ego)
+      return accel_clip
+
+    # 平滑曲率，进入/退出滞回，减弱抖动
+    alpha = 0.3
+    self.curve_k_smooth = alpha * k_max + (1 - alpha) * self.curve_k_smooth
+    k_enter = 0.006  # 触发阈值（~半径 166 m）
+    k_exit = k_enter * 0.6
+    if self.curve_active:
+      if self.curve_k_smooth < k_exit:
+        # 退出滞回：计时 0.5s 再退出，避免出口抖动
+        self.curve_exit_timer += self.dt
+        if self.curve_exit_timer > 0.5:
+          self.curve_active = False
+          self.curve_exit_timer = 0.0
+      else:
+        self.curve_exit_timer = 0.0
+    else:
+      if self.curve_k_smooth >= k_enter:
+        self.curve_active = True
+        self.curve_exit_timer = 0.0
+
+    if not self.curve_active:
+      if log_enabled:
+        self._log_curve(reason="below_enter", k=k_max, k_smooth=self.curve_k_smooth, v=v_ego)
+      return accel_clip
+
+    # 目标侧向加速度上限（舒适 1.6 m/s^2），带安全系数
+    a_lat_limit = 1.6 * 0.9
+    v_limit = math.sqrt(a_lat_limit / max(self.curve_k_smooth, 1e-4))
+
+    # 已低于限速则不动作
+    if v_ego <= v_limit * 1.05:
+      if log_enabled:
+        self._log_curve(reason="under_limit", v=v_ego, v_limit=v_limit, k=self.curve_k_smooth)
+      return accel_clip
+
+    # 等效减速度：a = (v_f^2 - v_i^2) / (2*d)
+    required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * critical_distance, 1.0)
+    required_decel = max(required_decel, -3.0)  # 不超过 -3 m/s^2，舒适范围
+
+    # 收紧最大加速度（上限），促使 MPC 提前减速
+    accel_clip[1] = min(accel_clip[1], required_decel)
+    # 同步写入 MPC 约束，保证在关键距离前的时间步均受限
+    for i in range(len(T_IDXS_MPC)):
+      t = T_IDXS_MPC[i]
+      distance_at_t = v_ego * t + 0.5 * required_decel * t**2
+      if distance_at_t < critical_distance:
+        self.mpc.params[i, 1] = min(self.mpc.params[i, 1], required_decel)
+    mpc_a_max_min = float(np.min(self.mpc.params[:, 1]))
+
+    if log_enabled:
+      curv_cmd = getattr(sm['carControl'].actuators, "curvature", 0.0) if sm['carControl'].actuators is not None else 0.0
+      accel_cmd = getattr(sm['carControl'].actuators, "accel", 0.0) if sm['carControl'].actuators is not None else 0.0
+      curv_current = - (car_state.yawRate if hasattr(car_state, "yawRate") else 0.0) / max(v_ego, 0.1)
+      steer_torque = getattr(car_state, "steeringTorque", 0.0)
+      steer_fault_temp = getattr(car_state, "steerFaultTemporary", False)
+      steer_fault_perm = getattr(car_state, "steerFaultPermanent", False)
+      sensors_invalid = getattr(car_state, "vehicleSensorsInvalid", False)
+      steer_override = getattr(car_state, "steeringPressed", False)
+      self._log_curve({
+        "reason": "active",
+        "v_ego": v_ego,
+        "v_limit": v_limit,
+        "k_smooth": self.curve_k_smooth,
+        "k_max": k_max,
+        "distance": critical_distance,
+        "required_decel": required_decel,
+        "accel_clip_max": accel_clip[1],
+        "yaw_rate": car_state.yawRate if hasattr(car_state, "yawRate") else 0.0,
+        "steer_angle": car_state.steeringAngleDeg if hasattr(car_state, "steeringAngleDeg") else 0.0,
+        "lat_active": getattr(sm['controlsState'], "latActive", False),
+        "alerts": getattr(sm['controlsState'], "alertText1", "") if hasattr(sm['controlsState'], "alertText1") else "",
+        "curv_cmd": curv_cmd,
+        "curv_current": curv_current,
+        "steer_pressed": steer_override,
+        "gas_pressed": getattr(car_state, "gasPressed", False),
+        "brake_pressed": getattr(car_state, "brakePressed", False),
+        "accel_cmd": accel_cmd,
+        "accel_actual": getattr(car_state, "aEgo", 0.0),
+        "mpc_a_max_min": mpc_a_max_min,
+        "v_desired": self.v_desired_filter.x,
+        "v_plan0": self.v_desired_trajectory[0] if len(self.v_desired_trajectory) else 0.0,
+        "steer_torque": steer_torque,
+        "steer_fault_temp": steer_fault_temp,
+        "steer_fault_perm": steer_fault_perm,
+        "sensors_invalid": sensors_invalid,
+      })
+    return accel_clip
+
+  def _log_curve(self, data: dict = None, reason: str = "", force: bool = False):
+    now = time.monotonic()
+    if not force and now - self.last_curve_log_t < 0.5:
+      return
+    self.last_curve_log_t = now
+    try:
+      os.makedirs(self.curve_log_dir, exist_ok=True)
+      ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+      if data is None:
+        data = {}
+      if reason:
+        data["reason"] = reason
+      line = (f"{ts} reason={data.get('reason','')} v={data.get('v_ego', 0):.2f} v_lim={data.get('v_limit', 0):.2f} "
+              f"k_smooth={data.get('k_smooth', 0):.5f} k_max={data.get('k_max', 0):.5f} "
+              f"dist={data.get('distance', 0):.1f} a_req={data.get('required_decel', 0):.2f} "
+              f"a_max={data.get('accel_clip_max', 0):.2f} yaw={data.get('yaw_rate', 0):.3f} "
+              f"steer={data.get('steer_angle', 0):.2f} lat_active={data.get('lat_active', False)} "
+              f"curv_cmd={data.get('curv_cmd',0):.5f} curv_current={data.get('curv_current',0):.5f} "
+              f"steer_pressed={data.get('steer_pressed', False)} gas_pressed={data.get('gas_pressed', False)} "
+              f"brake_pressed={data.get('brake_pressed', False)} accel_cmd={data.get('accel_cmd',0):.2f} "
+              f"accel_actual={data.get('accel_actual',0):.2f} "
+              f"steer_torque={data.get('steer_torque',0):.2f} "
+              f"steer_fault_temp={data.get('steer_fault_temp', False)} "
+              f"steer_fault_perm={data.get('steer_fault_perm', False)} "
+              f"sensors_invalid={data.get('sensors_invalid', False)} "
+              f"alerts=\"{data.get('alerts','')}\"\n")
+      fname = os.path.join(self.curve_log_dir, time.strftime("curve_%Y%m%d.log", time.localtime()))
+      with open(fname, "a", encoding="utf-8") as f:
+        f.write(line)
+    except Exception as e:
+      cloudlog.error(f"curve log failed: {e}")
+
+  def update(self, sm, dp_flags = 0, lincoln_curve_speed: bool = False, lincoln_curve_log: bool = False):
     mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
 
     if dp_flags & DPFlags.AEM:
@@ -135,6 +306,28 @@ class LongitudinalPlanner:
     else:
       accel_clip = [ACCEL_MIN, ACCEL_MAX]
 
+    if lincoln_curve_speed:
+      accel_clip = self._apply_lincoln_curve_speed(sm, accel_clip, log_enabled=lincoln_curve_log)
+
+    # 重要状态变化/告警即时记录（不受节流影响）
+    if lincoln_curve_log:
+      cs = sm['carState']
+      ctrl = sm['controlsState']
+      alert_text = getattr(ctrl, "alertText1", "") if hasattr(ctrl, "alertText1") else ""
+      if (hasattr(ctrl, "latActive") and not ctrl.latActive) or alert_text:
+        curv_current = - (cs.yawRate if hasattr(cs, "yawRate") else 0.0) / max(cs.vEgo, 0.1)
+        self._log_curve({
+          "reason": "alert_or_lat_off",
+          "v_ego": cs.vEgo,
+          "k_current": curv_current,
+          "steer_torque": getattr(cs, "steeringTorque", 0.0),
+          "steer_pressed": getattr(cs, "steeringPressed", False),
+          "steer_fault_temp": getattr(cs, "steerFaultTemporary", False),
+          "steer_fault_perm": getattr(cs, "steerFaultPermanent", False),
+          "sensors_invalid": getattr(cs, "vehicleSensorsInvalid", False),
+          "alerts": alert_text,
+        }, force=True)
+
     if reset_state:
       self.v_desired_filter.x = v_ego
       # Clip aEgo to cruise limits to prevent large accelerations when becoming active
@@ -156,19 +349,6 @@ class LongitudinalPlanner:
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-
-    # Apply DTSC curve speed constraints if enabled
-    if dp_flags & DPFlags.DTSC:
-      # Get modified acceleration constraints based on curvature
-      a_min_dtsc, a_max_dtsc = self.dtsc.get_mpc_constraints(
-        sm['modelV2'], v_ego, accel_clip[0], accel_clip[1])
-
-      # Update MPC parameters with curve constraints
-      # This directly modifies the acceleration bounds in the MPC solver
-      for i in range(len(a_min_dtsc)):
-        # Apply the more restrictive constraint
-        self.mpc.params[i, 0] = max(accel_clip[0], a_min_dtsc[i])  # a_min
-        self.mpc.params[i, 1] = min(accel_clip[1], a_max_dtsc[i])  # a_max
 
     self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
 

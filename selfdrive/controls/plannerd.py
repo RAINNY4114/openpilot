@@ -23,18 +23,30 @@ def main():
                            poll='modelV2')
 
   dp_flags = 0
+  def refresh_dp_flags() -> int:
+    flags = 0
+    if params.get_bool("dp_lon_acm"):
+      flags |= DPFlags.ACM
+    if params.get_bool("dp_lon_aem"):
+      flags |= DPFlags.AEM
+    return flags
 
-  if params.get_bool("dp_lon_acm"):
-    dp_flags |= DPFlags.ACM
-  if params.get_bool("dp_lon_aem"):
-    dp_flags |= DPFlags.AEM
-  if params.get_bool("dp_lon_dtsc"):
-    dp_flags |= DPFlags.DTSC
+  dp_flags = refresh_dp_flags()
+  last_flag_refresh_frame = 0
+
+  def lincoln_curve_speed_enabled() -> bool:
+    return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_speed")
+  def lincoln_curve_log_enabled() -> bool:
+    return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_log")
 
   while True:
     sm.update()
     if sm.updated['modelV2']:
-      longitudinal_planner.update(sm, dp_flags)
+      # Refresh DP flags periodically so UI toggles take effect without restart
+      if sm.frame - last_flag_refresh_frame > 100:  # ~0.5s @ 20 Hz model
+        dp_flags = refresh_dp_flags()
+        last_flag_refresh_frame = sm.frame
+      longitudinal_planner.update(sm, dp_flags, lincoln_curve_speed=lincoln_curve_speed_enabled(), lincoln_curve_log=lincoln_curve_log_enabled())
       longitudinal_planner.publish(sm, pm)
 
       ldw.update(sm.frame, sm['modelV2'], sm['carState'], sm['carControl'])
