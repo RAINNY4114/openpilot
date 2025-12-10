@@ -239,7 +239,7 @@ class LongitudinalPlanner:
       })
     return accel_clip
 
-  def _log_curve(self, data: dict = None, reason: str = "", force: bool = False):
+  def _log_curve(self, data: dict = None, reason: str = "", force: bool = False, **kwargs):
     now = time.monotonic()
     if not force and now - self.last_curve_log_t < 0.5:
       return
@@ -249,6 +249,8 @@ class LongitudinalPlanner:
       ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
       if data is None:
         data = {}
+      if kwargs:
+        data.update(kwargs)
       if reason:
         data["reason"] = reason
       line = (f"{ts} reason={data.get('reason','')} v={data.get('v_ego', 0):.2f} v_lim={data.get('v_limit', 0):.2f} "

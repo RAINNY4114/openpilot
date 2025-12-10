@@ -387,13 +387,28 @@ class AugmentedRoadView(CameraView):
   def _get_direction_label(self) -> str:
     sm = ui_state.sm
     try:
-      if getattr(sm, "alive", {}).get("gpsLocationExternal", False):
-        gps = sm['gpsLocationExternal']
-        if getattr(gps, "hasFix", True):
-          bearing = getattr(gps, "bearingDeg", float("nan"))
-          if math.isfinite(bearing):
-            index = int(((bearing % 360) + 22.5) // 45) % len(PERF_DIRECTION_LABELS)
-            return tr(PERF_DIRECTION_LABELS[index])
+      def bearing_to_label(bearing_deg: float):
+        if math.isfinite(bearing_deg):
+          idx = int(((bearing_deg % 360) + 22.5) // 45) % len(PERF_DIRECTION_LABELS)
+          return tr(PERF_DIRECTION_LABELS[idx])
+        return None
+
+      def extract_label(msg):
+        if not getattr(msg, "hasFix", True):
+          return None
+        bearing_deg = getattr(msg, "bearingDeg", float("nan"))
+        if not math.isfinite(bearing_deg):
+          vn = getattr(msg, "vN", None)
+          ve = getattr(msg, "vE", None)
+          if vn is not None and ve is not None:
+            bearing_deg = (math.degrees(math.atan2(ve, vn)) + 360.0) % 360.0
+        return bearing_to_label(bearing_deg)
+
+      for service in ("gpsLocationExternal", "gpsLocation"):
+        if getattr(sm, "alive", {}).get(service, False):
+          label = extract_label(sm[service])
+          if label is not None:
+            return label
     except Exception:
       pass
     return "---"
