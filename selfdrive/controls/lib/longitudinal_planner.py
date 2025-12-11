@@ -146,6 +146,15 @@ class LongitudinalPlanner:
     k_max = float(np.max(k_window))
     critical_idx = int(np.argmax(k_window))
     critical_distance = float(pos_window[critical_idx])
+    # 原始模型曲率（未截断）与粗略置信度（std 或 0）
+    k_window_raw = np.abs(turn_rates / np.clip(v_pred, 1.0, 100.0))[window_mask]
+    k_model_max = float(np.max(k_window_raw)) if k_window_raw.size else 0.0
+    try:
+      orient_std = getattr(model.orientationRateStd, "z", [])
+      k_std_window = np.abs(np.array(orient_std)) / np.clip(v_pred, 1.0, 100.0)
+      k_model_std = float(np.max(k_std_window[window_mask])) if len(k_std_window) == len(v_pred) else 0.0
+    except Exception:
+      k_model_std = 0.0
 
     if k_max < 1e-4 or critical_distance < 5.0:
       if log_enabled:
@@ -209,12 +218,23 @@ class LongitudinalPlanner:
       steer_fault_perm = getattr(car_state, "steerFaultPermanent", False)
       sensors_invalid = getattr(car_state, "vehicleSensorsInvalid", False)
       steer_override = getattr(car_state, "steeringPressed", False)
+      ctrl_active = getattr(sm['controlsState'], "active", False)
+      ctrl_long_active = getattr(sm['controlsState'], "longActive", False)
+      ctrl_lat_active = getattr(sm['controlsState'], "latActive", False)
+      ctrl_alert_type = getattr(sm['controlsState'], "alertType", 0)
+      ctrl_alert_size = getattr(sm['controlsState'], "alertSize", 0)
+      ctrl_alert_sound = getattr(sm['controlsState'], "alertSound", 0)
+      cs_enabled = getattr(sm['carState'].cruiseState, "enabled", False)
+      cs_available = getattr(sm['carState'].cruiseState, "available", False)
+      cs_speed = getattr(sm['carState'].cruiseState, "speed", 0.0)
       self._log_curve({
         "reason": "active",
         "v_ego": v_ego,
         "v_limit": v_limit,
         "k_smooth": self.curve_k_smooth,
         "k_max": k_max,
+        "k_model_max": k_model_max,
+        "k_model_std": k_model_std,
         "distance": critical_distance,
         "required_decel": required_decel,
         "accel_clip_max": accel_clip[1],
@@ -236,6 +256,15 @@ class LongitudinalPlanner:
         "steer_fault_temp": steer_fault_temp,
         "steer_fault_perm": steer_fault_perm,
         "sensors_invalid": sensors_invalid,
+        "ctrl_active": ctrl_active,
+        "ctrl_long_active": ctrl_long_active,
+        "ctrl_lat_active": ctrl_lat_active,
+        "ctrl_alert_type": ctrl_alert_type,
+        "ctrl_alert_size": ctrl_alert_size,
+        "ctrl_alert_sound": ctrl_alert_sound,
+        "cs_enabled": cs_enabled,
+        "cs_available": cs_available,
+        "cs_speed": cs_speed,
       })
     return accel_clip
 
@@ -253,20 +282,47 @@ class LongitudinalPlanner:
         data.update(kwargs)
       if reason:
         data["reason"] = reason
-      line = (f"{ts} reason={data.get('reason','')} v={data.get('v_ego', 0):.2f} v_lim={data.get('v_limit', 0):.2f} "
-              f"k_smooth={data.get('k_smooth', 0):.5f} k_max={data.get('k_max', 0):.5f} "
-              f"dist={data.get('distance', 0):.1f} a_req={data.get('required_decel', 0):.2f} "
-              f"a_max={data.get('accel_clip_max', 0):.2f} yaw={data.get('yaw_rate', 0):.3f} "
-              f"steer={data.get('steer_angle', 0):.2f} lat_active={data.get('lat_active', False)} "
-              f"curv_cmd={data.get('curv_cmd',0):.5f} curv_current={data.get('curv_current',0):.5f} "
-              f"steer_pressed={data.get('steer_pressed', False)} gas_pressed={data.get('gas_pressed', False)} "
-              f"brake_pressed={data.get('brake_pressed', False)} accel_cmd={data.get('accel_cmd',0):.2f} "
-              f"accel_actual={data.get('accel_actual',0):.2f} "
-              f"steer_torque={data.get('steer_torque',0):.2f} "
-              f"steer_fault_temp={data.get('steer_fault_temp', False)} "
-              f"steer_fault_perm={data.get('steer_fault_perm', False)} "
-              f"sensors_invalid={data.get('sensors_invalid', False)} "
-              f"alerts=\"{data.get('alerts','')}\"\n")
+      fields = [
+        ts,
+        data.get('reason', ''),
+        f"{data.get('v_ego', 0):.2f}",
+        f"{data.get('v_limit', 0):.2f}",
+        f"{data.get('k_smooth', 0):.5f}",
+        f"{data.get('k_max', 0):.5f}",
+        f"{data.get('k_model_max',0):.5f}",
+        f"{data.get('k_model_std',0):.5f}",
+        f"{data.get('distance', 0):.1f}",
+        f"{data.get('required_decel', 0):.2f}",
+        f"{data.get('accel_clip_max', 0):.2f}",
+        f"{data.get('mpc_a_max_min', 0):.2f}",
+        f"{data.get('curv_cmd',0):.5f}",
+        f"{data.get('curv_current',0):.5f}",
+        f"{data.get('accel_cmd',0):.2f}",
+        f"{data.get('accel_actual',0):.2f}",
+        f"{data.get('v_desired',0):.2f}",
+        f"{data.get('v_plan0',0):.2f}",
+        f"{data.get('yaw_rate', 0):.3f}",
+        f"{data.get('steer_angle', 0):.2f}",
+        f"{data.get('steer_torque',0):.2f}",
+        str(data.get('steer_pressed', False)),
+        str(data.get('gas_pressed', False)),
+        str(data.get('brake_pressed', False)),
+        str(data.get('steer_fault_temp', False)),
+        str(data.get('steer_fault_perm', False)),
+        str(data.get('sensors_invalid', False)),
+        str(data.get('lat_active', False)),
+        str(data.get('ctrl_active', False)),
+        str(data.get('ctrl_long_active', False)),
+        str(data.get('ctrl_lat_active', False)),
+        str(data.get('ctrl_alert_type', 0)),
+        str(data.get('ctrl_alert_size', 0)),
+        str(data.get('ctrl_alert_sound', 0)),
+        str(data.get('cs_enabled', False)),
+        str(data.get('cs_available', False)),
+        f"{data.get('cs_speed', 0.0):.2f}",
+        f"\"{data.get('alerts','')}\"",
+      ]
+      line = ",".join(fields) + "\n"
       fname = os.path.join(self.curve_log_dir, time.strftime("curve_%Y%m%d.log", time.localtime()))
       with open(fname, "a", encoding="utf-8") as f:
         f.write(line)
@@ -328,6 +384,15 @@ class LongitudinalPlanner:
           "steer_fault_perm": getattr(cs, "steerFaultPermanent", False),
           "sensors_invalid": getattr(cs, "vehicleSensorsInvalid", False),
           "alerts": alert_text,
+          "ctrl_active": getattr(ctrl, "active", False),
+          "ctrl_long_active": getattr(ctrl, "longActive", False),
+          "ctrl_lat_active": getattr(ctrl, "latActive", False),
+          "ctrl_alert_type": getattr(ctrl, "alertType", 0),
+          "ctrl_alert_size": getattr(ctrl, "alertSize", 0),
+          "ctrl_alert_sound": getattr(ctrl, "alertSound", 0),
+          "cs_enabled": getattr(cs.cruiseState, "enabled", False),
+          "cs_available": getattr(cs.cruiseState, "available", False),
+          "cs_speed": getattr(cs.cruiseState, "speed", 0.0),
         }, force=True)
 
     if reset_state:

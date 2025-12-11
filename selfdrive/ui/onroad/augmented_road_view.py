@@ -409,6 +409,18 @@ class AugmentedRoadView(CameraView):
           label = extract_label(sm[service])
           if label is not None:
             return label
+      # Fallback: livePose velocity向量
+      if getattr(sm, "alive", {}).get("livePose", False):
+        lp = sm['livePose']
+        vel = getattr(lp, "velocityDevice", None)
+        if vel is not None and getattr(vel, "valid", False):
+          vn = getattr(vel, "x", float("nan"))
+          ve = getattr(vel, "y", float("nan"))
+          if math.isfinite(vn) and math.isfinite(ve) and (abs(vn) + abs(ve) > 0.1):
+            bearing_deg = (math.degrees(math.atan2(ve, vn)) + 360.0) % 360.0
+            label = bearing_to_label(bearing_deg)
+            if label is not None:
+              return label
     except Exception:
       pass
     return "---"

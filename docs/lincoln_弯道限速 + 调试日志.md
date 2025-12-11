@@ -70,11 +70,14 @@ toggle_item(
 - 字段（常规/事件）：
   - `reason`（active/alert_or_lat_off/早退原因）
   - `v_ego`、`v_limit`、`k_smooth/k_max`、`dist`
+  - 模型曲率信息：`k_model_max`（原始未截断曲率最大值）、`k_model_std`（曲率标准差/置信度近似）
   - `a_req`、`accel_clip_max`、`mpc_a_max_min`
   - `accel_cmd/accel_actual`、`curv_cmd/curv_current=-yawRate/v`
   - `steer_torque`、`steer_fault_temp/perm`、`sensors_invalid`
   - `steer_pressed/gas_pressed/brake_pressed`、`lat_active`、`alerts`
+  - 控制/巡航状态：`ctrl_active/ctrl_long_active/ctrl_lat_active`、`ctrl_alert_type/size/sound`、`cs_enabled/cs_available/cs_speed`
   - `v_desired`、`v_plan0`（规划首元素）
+- 输出格式：CSV，每行逗号分隔；第一列为时间戳，第二列为 reason，后续字段顺序与上述列表一致，便于直接用表头解析。
 
 ---
 
@@ -92,4 +95,3 @@ toggle_item(
 
 - Ford 非 CAN FD 曲率信号上限 ±0.02 m⁻¹、EPS 侧向能力 ~2 m/s²，弯前需降速，否则易转向不足/Take Control。
 - 方向盘接管阈值 1 Nm，EPS 质量码/故障会导致横向退出；日志已记录相关状态便于排查。
-
