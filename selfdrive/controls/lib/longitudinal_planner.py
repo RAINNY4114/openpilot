@@ -7,6 +7,7 @@ import numpy as np
 import cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
@@ -85,6 +86,44 @@ class LongitudinalPlanner:
     self.curve_exit_timer = 0.0
     self.last_curve_log_t = 0.0
     self.curve_log_dir = "/data/media/0/lincoln_curve_logs"
+    self._params = Params()
+    self._curve_cfg = {}
+    self._curve_param_last = 0.0
+
+  def _lincoln_curve_config(self):
+    # 小环折加载，1s 内不重复读取参数
+    now = time.monotonic()
+    if now - self._curve_param_last < 1.0 and self._curve_cfg:
+      return self._curve_cfg
+
+    def _safe_int(name: str, default: int) -> int:
+      try:
+        val = self._params.get(name)
+        return int(val) if val is not None else default
+      except Exception:
+        return default
+
+    window_m = max(30, min(150, _safe_int("dp_lincoln_curve_window_m", 100)))
+    k_enter_milli = max(2, min(20, _safe_int("dp_lincoln_curve_k_enter", 4)))  # 0.002~0.020
+    k_enter = k_enter_milli * 1e-3
+    k_exit = k_enter * 0.6
+    a_lat_cm = max(80, min(250, _safe_int("dp_lincoln_curve_alat", 120)))      # cm/s^2 -> m/s^2
+    a_lat = a_lat_cm / 100.0
+    decel_cm = _safe_int("dp_lincoln_curve_decel", -320)                       # cm/s^2, negative
+    decel_max = min(-0.5, max(-500, decel_cm) / 100.0)                         # clamp to [-5.0, -0.5]
+    exit_h_cs = max(10, min(200, _safe_int("dp_lincoln_curve_exit_h", 70)))    # centiseconds
+    exit_h = exit_h_cs / 100.0
+
+    self._curve_cfg = {
+      "window_m": float(window_m),
+      "k_enter": float(k_enter),
+      "k_exit": float(k_exit),
+      "a_lat": float(a_lat),
+      "decel_max": float(decel_max),
+      "exit_h": float(exit_h),
+    }
+    self._curve_param_last = now
+    return self._curve_cfg
 
   @staticmethod
   def parse_model(model_msg):
@@ -132,10 +171,12 @@ class LongitudinalPlanner:
     turn_rates = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.orientationRate.z)
     positions = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.position.x)
 
+    cfg = self._lincoln_curve_config()
+
     # 计算曲率，并截断到车辆可下发的信号范围
     curvatures = np.abs(turn_rates / np.clip(v_pred, 1.0, 100.0))
     curvatures = np.clip(curvatures, 0.0, 0.02)  # Ford 非 CAN FD 信号上限
-    window_mask = positions <= 80.0  # 关注前方 80m
+    window_mask = positions <= cfg["window_m"]  # 关注前方窗口
     if not np.any(window_mask):
       if log_enabled:
         self._log_curve(reason="no_window_points")
@@ -164,13 +205,13 @@ class LongitudinalPlanner:
     # 平滑曲率，进入/退出滞回，减弱抖动
     alpha = 0.3
     self.curve_k_smooth = alpha * k_max + (1 - alpha) * self.curve_k_smooth
-    k_enter = 0.006  # 触发阈值（~半径 166 m）
-    k_exit = k_enter * 0.6
+    k_enter = cfg["k_enter"]  # 触发阈值（~半径 166 m）
+    k_exit = cfg["k_exit"]
     if self.curve_active:
       if self.curve_k_smooth < k_exit:
-        # 退出滞回：计时 0.5s 再退出，避免出口抖动
+        # 退出滞回：计时后再退出，避免出口抖动
         self.curve_exit_timer += self.dt
-        if self.curve_exit_timer > 0.5:
+        if self.curve_exit_timer > cfg["exit_h"]:
           self.curve_active = False
           self.curve_exit_timer = 0.0
       else:
@@ -185,8 +226,8 @@ class LongitudinalPlanner:
         self._log_curve(reason="below_enter", k=k_max, k_smooth=self.curve_k_smooth, v=v_ego)
       return accel_clip
 
-    # 目标侧向加速度上限（舒适 1.6 m/s^2），带安全系数
-    a_lat_limit = 1.6 * 0.9
+    # 目标侧向加速度上限（舒适），带安全系数
+    a_lat_limit = cfg["a_lat"]
     v_limit = math.sqrt(a_lat_limit / max(self.curve_k_smooth, 1e-4))
 
     # 已低于限速则不动作
@@ -197,7 +238,7 @@ class LongitudinalPlanner:
 
     # 等效减速度：a = (v_f^2 - v_i^2) / (2*d)
     required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * critical_distance, 1.0)
-    required_decel = max(required_decel, -3.0)  # 不超过 -3 m/s^2，舒适范围
+    required_decel = max(required_decel, cfg["decel_max"])  # 配置的减速度上限
 
     # 收紧最大加速度（上限），促使 MPC 提前减速
     accel_clip[1] = min(accel_clip[1], required_decel)
@@ -235,6 +276,7 @@ class LongitudinalPlanner:
         "k_max": k_max,
         "k_model_max": k_model_max,
         "k_model_std": k_model_std,
+        "k_enter": k_enter,
         "distance": critical_distance,
         "required_decel": required_decel,
         "accel_clip_max": accel_clip[1],
@@ -265,6 +307,10 @@ class LongitudinalPlanner:
         "cs_enabled": cs_enabled,
         "cs_available": cs_available,
         "cs_speed": cs_speed,
+        "a_lat_limit": a_lat_limit,
+        "window_m": cfg["window_m"],
+        "exit_h": cfg["exit_h"],
+        "decel_setting": cfg["decel_max"],
       })
     return accel_clip
 
@@ -291,6 +337,11 @@ class LongitudinalPlanner:
         f"{data.get('k_max', 0):.5f}",
         f"{data.get('k_model_max',0):.5f}",
         f"{data.get('k_model_std',0):.5f}",
+        f"{data.get('k_enter',0):.5f}",
+        f"{data.get('a_lat_limit',0):.2f}",
+        f"{data.get('window_m',0):.1f}",
+        f"{data.get('exit_h',0):.2f}",
+        f"{data.get('decel_setting',0):.2f}",
         f"{data.get('distance', 0):.1f}",
         f"{data.get('required_decel', 0):.2f}",
         f"{data.get('accel_clip_max', 0):.2f}",

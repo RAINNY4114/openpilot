@@ -148,6 +148,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lon_aem", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_curve_speed", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_curve_log", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_curve_window_m", {PERSISTENT, INT, "100"}},
+    {"dp_lincoln_curve_k_enter", {PERSISTENT, INT, "4"}},       // 存储 1e-3 曲率阈值，默认 0.004
+    {"dp_lincoln_curve_alat", {PERSISTENT, INT, "120"}},        // 存储 cm/s^2，默认 1.20 m/s^2
+    {"dp_lincoln_curve_decel", {PERSISTENT, INT, "-320"}},      // 存储 cm/s^2，默认 -3.20 m/s^2
+    {"dp_lincoln_curve_exit_h", {PERSISTENT, INT, "70"}},       // 存储 1e-2 秒，默认 0.70 s
+    {"dp_lincoln_steer_rate_up_pct", {PERSISTENT, INT, "100"}},   // 转向加速倍率，百分比
+    {"dp_lincoln_steer_rate_down_pct", {PERSISTENT, INT, "100"}}, // 回正减速倍率，百分比
     {"dp_dev_audible_alert_mode", {PERSISTENT, INT, "0"}},
     {"dp_dev_auto_shutdown_in", {PERSISTENT, INT, "-5"}},
     {"dp_ui_lead", {PERSISTENT, INT, "0"}},
