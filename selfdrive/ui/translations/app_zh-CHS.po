@@ -568,8 +568,8 @@ msgid "Curve lookahead window"
 msgstr "曲率前瞻距离"
 
 #: selfdrive/ui/layouts/settings/lincoln.py:100
-msgid "Default 100 m (50–150). Highway/low visibility: 110–140; city/low speed: 80–90. Higher = earlier slowdown; lower = waits until closer."
-msgstr "默认 100 m（50–150）。高速/视距差：110–140；城市/低速：80–90。调高更早减速，调低更靠近弯才减速。"
+msgid "Default 130 m (50–190). Highway/low visibility: 140–180; city/low speed: 80–110. Higher = earlier slowdown; lower = waits until closer."
+msgstr "默认 130 m（50–190）。高速/视距差：140–180；城市/低速：80–110。调高更早减速，调低更靠近弯才减速。"
 
 #: selfdrive/ui/layouts/settings/lincoln.py:110
 msgid "Enter curvature threshold"

@@ -148,7 +148,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lon_aem", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_curve_speed", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_curve_log", {PERSISTENT, BOOL, "0"}},
-    {"dp_lincoln_curve_window_m", {PERSISTENT, INT, "100"}},
+    {"dp_lincoln_curve_window_m", {PERSISTENT, INT, "130"}},
     {"dp_lincoln_curve_k_enter", {PERSISTENT, INT, "4"}},       // 存储 1e-3 曲率阈值，默认 0.004
     {"dp_lincoln_curve_alat", {PERSISTENT, INT, "120"}},        // 存储 cm/s^2，默认 1.20 m/s^2
     {"dp_lincoln_curve_decel", {PERSISTENT, INT, "-320"}},      // 存储 cm/s^2，默认 -3.20 m/s^2

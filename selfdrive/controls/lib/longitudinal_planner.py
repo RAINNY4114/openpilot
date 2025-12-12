@@ -103,7 +103,7 @@ class LongitudinalPlanner:
       except Exception:
         return default
 
-    window_m = max(30, min(150, _safe_int("dp_lincoln_curve_window_m", 100)))
+    window_m = max(30, min(190, _safe_int("dp_lincoln_curve_window_m", 130)))
     k_enter_milli = max(2, min(20, _safe_int("dp_lincoln_curve_k_enter", 4)))  # 0.002~0.020
     k_enter = k_enter_milli * 1e-3
     k_exit = k_enter * 0.6
@@ -187,6 +187,7 @@ class LongitudinalPlanner:
     k_max = float(np.max(k_window))
     critical_idx = int(np.argmax(k_window))
     critical_distance = float(pos_window[critical_idx])
+    k_p80 = float(np.quantile(k_window, 0.8)) if k_window.size else 0.0
     # 原始模型曲率（未截断）与粗略置信度（std 或 0）
     k_window_raw = np.abs(turn_rates / np.clip(v_pred, 1.0, 100.0))[window_mask]
     k_model_max = float(np.max(k_window_raw)) if k_window_raw.size else 0.0
@@ -205,8 +206,10 @@ class LongitudinalPlanner:
     # 平滑曲率，进入/退出滞回，减弱抖动
     alpha = 0.3
     self.curve_k_smooth = alpha * k_max + (1 - alpha) * self.curve_k_smooth
-    k_enter = cfg["k_enter"]  # 触发阈值（~半径 166 m）
-    k_exit = cfg["k_exit"]
+    # 高速段适当降低触发阈值，加快响应
+    speed_factor = np.interp(v_ego, [0., 25., 40.], [1.0, 0.9, 0.8])
+    k_enter = cfg["k_enter"] * speed_factor
+    k_exit = cfg["k_exit"] * speed_factor
     if self.curve_active:
       if self.curve_k_smooth < k_exit:
         # 退出滞回：计时后再退出，避免出口抖动
@@ -236,9 +239,40 @@ class LongitudinalPlanner:
         self._log_curve(reason="under_limit", v=v_ego, v_limit=v_limit, k=self.curve_k_smooth)
       return accel_clip
 
-    # 等效减速度：a = (v_f^2 - v_i^2) / (2*d)
-    required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * critical_distance, 1.0)
-    required_decel = max(required_decel, cfg["decel_max"])  # 配置的减速度上限
+    # 选取触发距离：优先首个超过阈值的点，否则用最大值位置；附加累积弯度提前触发
+    trigger_distance = critical_distance
+    trigger_curv = k_max
+    trigger_type = "max"
+    trigger_mask = k_window >= k_enter
+    if np.any(trigger_mask):
+      first_idx = int(np.argmax(trigger_mask))
+      trigger_distance = float(pos_window[first_idx])
+      trigger_curv = float(k_window[first_idx])
+      trigger_type = "first_k"
+    # 累积弯度/航向变化触发：积分 |k|·ds，随速降低阈值
+    if len(pos_window) > 1:
+      ds = np.diff(pos_window, prepend=pos_window[0])
+      acc_ds = np.cumsum(np.abs(k_window) * ds)
+      bend_cum = float(acc_ds[-1])
+    else:
+      acc_ds = np.array([])
+      bend_cum = 0.0
+    bend_thresh = float(np.deg2rad(np.interp(v_ego, [0., 25., 40.], [5.0, 4.0, 3.0])))  # 随速减小
+    if bend_cum >= bend_thresh and bend_thresh > 0.0 and acc_ds.size:
+      idx_bend = int(np.argmax(acc_ds >= bend_thresh))
+      trigger_distance = float(pos_window[idx_bend])
+      trigger_curv = float(k_window[idx_bend])
+      trigger_type = "bend"
+    # 预留最小减速距离：车速 * 1s
+    d_use = max(trigger_distance, v_ego * 1.0, 1.0)
+
+    # 等效减速度：a = (v_f^2 - v_i^2) / (2*d_use)
+    required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
+    # 高速允许更大预刹（与配置取最保守值）
+    decel_cap = cfg["decel_max"]
+    if v_ego > 25.0:
+      decel_cap = min(decel_cap, -3.5)
+    required_decel = max(required_decel, decel_cap)
 
     # 收紧最大加速度（上限），促使 MPC 提前减速
     accel_clip[1] = min(accel_clip[1], required_decel)
@@ -277,7 +311,13 @@ class LongitudinalPlanner:
         "k_model_max": k_model_max,
         "k_model_std": k_model_std,
         "k_enter": k_enter,
+        "k_p80": k_p80,
         "distance": critical_distance,
+        "trigger_distance": trigger_distance,
+        "trigger_curv": trigger_curv,
+        "trigger_type": trigger_type,
+        "bend_cum": bend_cum,
+        "bend_thresh": bend_thresh,
         "required_decel": required_decel,
         "accel_clip_max": accel_clip[1],
         "yaw_rate": car_state.yawRate if hasattr(car_state, "yawRate") else 0.0,
@@ -310,7 +350,7 @@ class LongitudinalPlanner:
         "a_lat_limit": a_lat_limit,
         "window_m": cfg["window_m"],
         "exit_h": cfg["exit_h"],
-        "decel_setting": cfg["decel_max"],
+        "decel_setting": decel_cap,
       })
     return accel_clip
 
