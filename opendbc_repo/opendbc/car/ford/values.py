@@ -41,41 +41,14 @@ class CarControllerParams:
   MIN_GAS = -0.5
   INACTIVE_GAS = -5.0
 
-  # 可调转向速率倍率（百分比），默认 100%=不变
-  _RATE_UP_BASE = ([5, 25], [0.00045, 0.0001])
-  _RATE_DOWN_BASE = ([5, 25], [0.00045, 0.00015])
-  _ANGLE_LIMITS_CACHE: AngleSteeringLimits | None = None
-  _ANGLE_LIMITS_CACHE_T = 0.0
-
-  @classmethod
-  def _scaled_rates(cls, pct: int, base_rates: list[float]):
-    scale = max(80, min(120, pct)) / 100.0  # clamp to 0.8x~1.2x 保护 EPS
-    return [r * scale for r in base_rates]
-
   @classmethod
   def get_angle_limits(cls, params=None) -> AngleSteeringLimits:
-    now = time.monotonic()
-    if cls._ANGLE_LIMITS_CACHE and (now - cls._ANGLE_LIMITS_CACHE_T) < 1.0:
-      return cls._ANGLE_LIMITS_CACHE
-
-    try:
-      from openpilot.common.params import Params
-      params = params or Params()
-      rate_up_pct = int(params.get("dp_lincoln_steer_rate_up_pct") or 100)
-      rate_down_pct = int(params.get("dp_lincoln_steer_rate_down_pct") or 100)
-    except Exception:
-      rate_up_pct = 100
-      rate_down_pct = 100
-
-    rate_up = cls._scaled_rates(rate_up_pct, cls._RATE_UP_BASE[1])
-    rate_down = cls._scaled_rates(rate_down_pct, cls._RATE_DOWN_BASE[1])
-    cls._ANGLE_LIMITS_CACHE = AngleSteeringLimits(
+    # 固定默认速率，不再读取可调参数
+    return AngleSteeringLimits(
       0.02,
-      (cls._RATE_UP_BASE[0], rate_up),
-      (cls._RATE_DOWN_BASE[0], rate_down),
+      ([5, 25], [0.00045, 0.0001]),
+      ([5, 25], [0.00045, 0.00015]),
     )
-    cls._ANGLE_LIMITS_CACHE_T = now
-    return cls._ANGLE_LIMITS_CACHE
 
   def __init__(self, CP):
     pass

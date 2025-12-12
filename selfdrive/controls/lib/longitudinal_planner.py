@@ -107,20 +107,17 @@ class LongitudinalPlanner:
     k_enter_milli = max(2, min(20, _safe_int("dp_lincoln_curve_k_enter", 4)))  # 0.002~0.020
     k_enter = k_enter_milli * 1e-3
     k_exit = k_enter * 0.6
-    a_lat_cm = max(80, min(250, _safe_int("dp_lincoln_curve_alat", 120)))      # cm/s^2 -> m/s^2
-    a_lat = a_lat_cm / 100.0
+    # 固定舒适横向上限 1.0 m/s²（不再暴露给用户调节）
+    a_lat = 1.0
     decel_cm = _safe_int("dp_lincoln_curve_decel", -320)                       # cm/s^2, negative
     decel_max = min(-0.5, max(-500, decel_cm) / 100.0)                         # clamp to [-5.0, -0.5]
-    exit_h_cs = max(10, min(200, _safe_int("dp_lincoln_curve_exit_h", 70)))    # centiseconds
-    exit_h = exit_h_cs / 100.0
-
     self._curve_cfg = {
       "window_m": float(window_m),
       "k_enter": float(k_enter),
       "k_exit": float(k_exit),
       "a_lat": float(a_lat),
       "decel_max": float(decel_max),
-      "exit_h": float(exit_h),
+      "exit_h": 0.70,  # 固定退出滞回，移除可调
     }
     self._curve_param_last = now
     return self._curve_cfg
@@ -204,12 +201,14 @@ class LongitudinalPlanner:
       return accel_clip
 
     # 平滑曲率，进入/退出滞回，减弱抖动
-    alpha = 0.3
+    alpha = 0.6
     self.curve_k_smooth = alpha * k_max + (1 - alpha) * self.curve_k_smooth
     # 高速段适当降低触发阈值，加快响应
     speed_factor = np.interp(v_ego, [0., 25., 40.], [1.0, 0.9, 0.8])
     k_enter = cfg["k_enter"] * speed_factor
     k_exit = cfg["k_exit"] * speed_factor
+    enter_now = np.any(k_window >= k_enter)
+
     if self.curve_active:
       if self.curve_k_smooth < k_exit:
         # 退出滞回：计时后再退出，避免出口抖动
@@ -220,7 +219,7 @@ class LongitudinalPlanner:
       else:
         self.curve_exit_timer = 0.0
     else:
-      if self.curve_k_smooth >= k_enter:
+      if enter_now or self.curve_k_smooth >= k_enter:
         self.curve_active = True
         self.curve_exit_timer = 0.0
 
@@ -264,7 +263,7 @@ class LongitudinalPlanner:
       trigger_curv = float(k_window[idx_bend])
       trigger_type = "bend"
     # 预留最小减速距离：车速 * 1s
-    d_use = max(trigger_distance, v_ego * 1.0, 1.0)
+    d_use = max(trigger_distance, v_ego * 1.5, 1.0)
 
     # 等效减速度：a = (v_f^2 - v_i^2) / (2*d_use)
     required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
@@ -272,6 +271,8 @@ class LongitudinalPlanner:
     decel_cap = cfg["decel_max"]
     if v_ego > 25.0:
       decel_cap = min(decel_cap, -3.5)
+    if v_ego > 33.0:
+      decel_cap = min(decel_cap, -4.0)
     required_decel = max(required_decel, decel_cap)
 
     # 收紧最大加速度（上限），促使 MPC 提前减速
@@ -311,6 +312,7 @@ class LongitudinalPlanner:
         "k_model_max": k_model_max,
         "k_model_std": k_model_std,
         "k_enter": k_enter,
+        "k_exit": k_exit,
         "k_p80": k_p80,
         "distance": critical_distance,
         "trigger_distance": trigger_distance,
@@ -318,6 +320,7 @@ class LongitudinalPlanner:
         "trigger_type": trigger_type,
         "bend_cum": bend_cum,
         "bend_thresh": bend_thresh,
+        "d_use": d_use,
         "required_decel": required_decel,
         "accel_clip_max": accel_clip[1],
         "yaw_rate": car_state.yawRate if hasattr(car_state, "yawRate") else 0.0,
@@ -368,7 +371,60 @@ class LongitudinalPlanner:
         data.update(kwargs)
       if reason:
         data["reason"] = reason
-      fields = [
+      headers = [
+        "timestamp",
+        "reason",
+        "v_ego(m/s)",
+        "v_limit(m/s)",
+        "k_smooth",
+        "k_max",
+        "k_model_max",
+        "k_model_std",
+        "k_enter",
+        "k_exit",
+        "k_p80",
+        "a_lat_limit(m/s^2)",
+        "window_m",
+        "exit_h(s)",
+        "decel_setting(m/s^2)",
+        "distance_to_peak(m)",
+        "trigger_distance(m)",
+        "trigger_curv",
+        "trigger_type",
+        "bend_cum(rad)",
+        "bend_thresh(rad)",
+        "d_use(m)",
+        "required_decel(m/s^2)",
+        "accel_clip_max(m/s^2)",
+        "mpc_a_max_min(m/s^2)",
+        "curv_cmd",
+        "curv_current",
+        "accel_cmd",
+        "accel_actual",
+        "v_desired",
+        "v_plan0",
+        "yaw_rate",
+        "steer_angle",
+        "steer_torque",
+        "steer_pressed",
+        "gas_pressed",
+        "brake_pressed",
+        "steer_fault_temp",
+        "steer_fault_perm",
+        "sensors_invalid",
+        "lat_active",
+        "ctrl_active",
+        "ctrl_long_active",
+        "ctrl_lat_active",
+        "ctrl_alert_type",
+        "ctrl_alert_size",
+        "ctrl_alert_sound",
+        "cs_enabled",
+        "cs_available",
+        "cs_speed",
+        "alerts",
+      ]
+      values = [
         ts,
         data.get('reason', ''),
         f"{data.get('v_ego', 0):.2f}",
@@ -378,11 +434,19 @@ class LongitudinalPlanner:
         f"{data.get('k_model_max',0):.5f}",
         f"{data.get('k_model_std',0):.5f}",
         f"{data.get('k_enter',0):.5f}",
+        f"{data.get('k_exit',0):.5f}",
+        f"{data.get('k_p80',0):.5f}",
         f"{data.get('a_lat_limit',0):.2f}",
         f"{data.get('window_m',0):.1f}",
         f"{data.get('exit_h',0):.2f}",
         f"{data.get('decel_setting',0):.2f}",
         f"{data.get('distance', 0):.1f}",
+        f"{data.get('trigger_distance',0):.1f}",
+        f"{data.get('trigger_curv',0):.5f}",
+        data.get('trigger_type',""),
+        f"{data.get('bend_cum',0):.5f}",
+        f"{data.get('bend_thresh',0):.5f}",
+        f"{data.get('d_use',0):.1f}",
         f"{data.get('required_decel', 0):.2f}",
         f"{data.get('accel_clip_max', 0):.2f}",
         f"{data.get('mpc_a_max_min', 0):.2f}",
@@ -413,9 +477,12 @@ class LongitudinalPlanner:
         f"{data.get('cs_speed', 0.0):.2f}",
         f"\"{data.get('alerts','')}\"",
       ]
-      line = ",".join(fields) + "\n"
+      line = ",".join(values) + "\n"
       fname = os.path.join(self.curve_log_dir, time.strftime("curve_%Y%m%d.log", time.localtime()))
+      write_header = not os.path.exists(fname) or os.path.getsize(fname) == 0
       with open(fname, "a", encoding="utf-8") as f:
+        if write_header:
+          f.write(",".join(headers) + "\n")
         f.write(line)
     except Exception as e:
       cloudlog.error(f"curve log failed: {e}")
