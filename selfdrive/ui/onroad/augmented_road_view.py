@@ -290,32 +290,31 @@ class AugmentedRoadView(CameraView):
     return self._cached_matrix
 
   def _update_dp_indicator_side_state(self, blinker_state, bsm_state, show_prev, count_prev):
-    show = show_prev
-    count = count_prev
-    color = rl.Color(0, 0, 0, 0)
-
     if not blinker_state and not bsm_state:
-      show = False
-      count = 0
-    else:
-      count += 1
+      return False, 0, rl.Color(0, 0, 0, 0)
+
+    count = count_prev + 1
+    show = True
+    color = rl.Color(0, 0, 0, 0)
 
     if ui_state.dp_lincoln_hud_enhanced:
       # Enhanced logic: blinker = yellow flash, blindspot = red flash, both = red fast flash
       if bsm_state:
-        show = not show if count % (DP_INDICATOR_BLINK_RATE_FAST if blinker_state else DP_INDICATOR_BLINK_RATE_STD) == 0 else show
+        blink_rate = DP_INDICATOR_BLINK_RATE_FAST if blinker_state else DP_INDICATOR_BLINK_RATE_STD
+        show = (count // blink_rate) % 2 == 0
         color = DP_INDICATOR_COLOR_BSM_ENHANCED
       elif blinker_state:
-        show = not show if count % DP_INDICATOR_BLINK_RATE_STD == 0 else show
+        blink_rate = DP_INDICATOR_BLINK_RATE_STD
+        show = (count // blink_rate) % 2 == 0
         color = DP_INDICATOR_COLOR_BLINKER_ENHANCED
       else:
         show = False
     else:
       if bsm_state and blinker_state:
-        show = not show if count % DP_INDICATOR_BLINK_RATE_FAST == 0 else show
+        show = (count // DP_INDICATOR_BLINK_RATE_FAST) % 2 == 0
         color = DP_INDICATOR_COLOR_BSM
       elif blinker_state:
-        show = not show if count % DP_INDICATOR_BLINK_RATE_STD == 0 else show
+        show = (count // DP_INDICATOR_BLINK_RATE_STD) % 2 == 0
         color = DP_INDICATOR_COLOR_BLINKER
       elif bsm_state:
         show = True

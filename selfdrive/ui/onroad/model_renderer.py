@@ -42,10 +42,10 @@ DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M_NEAR = 0.90
 DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M_FAR = 1.10
 DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO_NEAR = 0.70
 DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO_FAR = 0.62
-DP_LINCOLN_LEAD_BOX_SMOOTHING_FAR = 0.90
-DP_LINCOLN_LEAD_BOX_SMOOTHING_NEAR = 0.72
-DP_LINCOLN_LEAD_EFFECT_START_M = 70.0
-DP_LINCOLN_LEAD_EFFECT_FULL_M = 20.0
+DP_LINCOLN_LEAD_BOX_SMOOTHING_FAR = 0.85
+DP_LINCOLN_LEAD_BOX_SMOOTHING_NEAR = 0.55
+DP_LINCOLN_LEAD_EFFECT_START_M = 130.0
+DP_LINCOLN_LEAD_EFFECT_FULL_M = 30.0
 DP_LINCOLN_LEAD_EFFECT_TTC_START_S = 5.0
 DP_LINCOLN_LEAD_EFFECT_TTC_FULL_S = 2.5
 DP_LINCOLN_LEAD_COLOR_FAR = rl.Color(255, 215, 0, 255)
@@ -168,7 +168,8 @@ class ModelRenderer(Widget):
 
       self._update_model(lead_one, path_x_array)
       if render_lead_indicator:
-        self._update_leads(radar_state, path_x_array)
+        v_ego = float(sm["carState"].vEgo) if sm.valid.get("carState", False) else 0.0
+        self._update_leads(radar_state, model, v_ego, path_x_array)
       self._transform_dirty = False
 
     # dp - draw live tracks before everything
@@ -196,12 +197,12 @@ class ModelRenderer(Widget):
     self._road_edge_stds = np.array(model.roadEdgeStds, dtype=np.float32)
     self._acceleration_x = np.array(model.acceleration.x, dtype=np.float32)
 
-  def _update_leads(self, radar_state, path_x_array):
+  def _update_leads(self, radar_state, model, v_ego: float, path_x_array):
     """Update positions of lead vehicles"""
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
     leads = [radar_state.leadOne, radar_state.leadTwo]
 
-    self._update_lead_box(radar_state.leadOne, path_x_array)
+    self._update_lead_box(radar_state.leadOne if radar_state is not None else None, model, v_ego, path_x_array)
 
     for i, lead_data in enumerate(leads):
       if lead_data and lead_data.status:
@@ -214,23 +215,49 @@ class ModelRenderer(Widget):
         if point:
           self._lead_vehicles[i] = self._update_lead_vehicle(d_rel, v_rel, point, self._rect)
 
-  def _update_lead_box(self, lead_one, path_x_array):
+  def _update_lead_box(self, radar_lead_one, model, v_ego: float, path_x_array):
     if not ui_state.dp_lincoln_hud_enhanced:
       self._lead_box_valid = False
       self._lead_box_alpha = 0.0
       self._lead_box_intensity = 0.0
       return
 
-    if not (lead_one and lead_one.status):
+    lead_available = False
+    d_rel = 0.0
+    y_rel = 0.0
+    v_rel = 0.0
+
+    if radar_lead_one is not None and getattr(radar_lead_one, "status", False):
+      lead_available = True
+      d_rel = float(radar_lead_one.dRel)
+      y_rel = float(radar_lead_one.yRel)
+      v_rel = float(getattr(radar_lead_one, "vRel", 0.0))
+    else:
+      # Fallback to model lead when radar lead is missing/unreliable (e.g., radarless or brief detections).
+      try:
+        model_lead = model.leadsV3[0]
+        prob = float(model_lead.prob)
+        x0 = float(model_lead.x[0]) if len(model_lead.x) > 0 else float("nan")
+        y0 = float(model_lead.y[0]) if len(model_lead.y) > 0 else float("nan")
+        v0 = float(model_lead.v[0]) if len(model_lead.v) > 0 else float("nan")
+      except Exception:
+        prob, x0, y0, v0 = 0.0, float("nan"), float("nan"), float("nan")
+
+      if prob >= 0.55 and np.isfinite(x0) and np.isfinite(y0) and x0 > 0.0:
+        lead_available = True
+        d_rel = x0
+        # Model lead y is in device frame (left-positive). Radar lead yRel is the opposite, so invert here
+        # to keep the existing -y_rel mapping below.
+        y_rel = -y0
+        v_rel = v0 - float(v_ego)
+
+    if not lead_available:
       self._lead_box_intensity = 0.0
       self._lead_box_alpha = max(0.0, self._lead_box_alpha - 0.20)
       if self._lead_box_alpha <= 0.0:
         self._lead_box_valid = False
       return
 
-    d_rel = float(lead_one.dRel)
-    y_rel = float(lead_one.yRel)
-    v_rel = float(getattr(lead_one, "vRel", 0.0))
     if not (d_rel > 0.0 and np.isfinite(d_rel) and np.isfinite(y_rel)):
       return
 
@@ -312,7 +339,7 @@ class ModelRenderer(Widget):
     color = rl.Color(r, g, b, alpha)
     rect = rl.Rectangle(self._lead_box_x, self._lead_box_y, self._lead_box_w, self._lead_box_h)
 
-    thickness = max(3, int(self._lead_box_w * (0.018 + 0.010 * t)))
+    thickness = 3
     rl.draw_rectangle_rounded_lines_ex(rect, 0.10, 8, thickness, color)
 
   def _update_model(self, lead, path_x_array):
@@ -323,8 +350,8 @@ class ModelRenderer(Widget):
     # Update lane lines using raw points
     for i, lane_line in enumerate(self._lane_lines):
       if ui_state.dp_lincoln_hud_enhanced:
-        base = 0.045 if i in (1, 2) else 0.035
-        line_width = base + 0.01 * self._lane_line_probs[i]
+        base = 0.055 if i in (1, 2) else 0.050
+        line_width = base + 0.015 * self._lane_line_probs[i]
       else:
         line_width = 0.025 * self._lane_line_probs[i]
       lane_line.projected_points = self._map_line_to_polygon(
@@ -332,7 +359,7 @@ class ModelRenderer(Widget):
       )
 
     # Update road edges using raw points
-    road_edge_width = 0.06 if ui_state.dp_lincoln_hud_enhanced else 0.025
+    road_edge_width = 0.08 if ui_state.dp_lincoln_hud_enhanced else 0.025
     for road_edge in self._road_edges:
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, road_edge_width, 0.0, max_idx, max_distance)
 
@@ -425,18 +452,22 @@ class ModelRenderer(Widget):
 
       prob = float(self._lane_line_probs[i])
       if ui_state.dp_lincoln_hud_enhanced:
-        alpha = float(np.clip(prob * 1.25, 0.0, 1.0))
-        if prob < 0.10:
+        alpha = float(np.clip(prob * 1.35, 0.0, 1.0))
+        if prob < 0.05:
           alpha = 0.0
         else:
-          alpha = max(alpha, 0.35)
+          alpha = max(alpha, 0.40)
       else:
         alpha = float(np.clip(prob, 0.0, 0.7))
 
       is_primary_lane_boundary = i in (1, 2)
-      if ui_state.dp_lincoln_hud_enhanced and ui_state.status == UIStatus.ENGAGED and is_primary_lane_boundary:
-        alpha = max(alpha, 0.70)
-        color = rl.Color(0, 255, 80, int(alpha * 255))
+      if ui_state.dp_lincoln_hud_enhanced:
+        if is_primary_lane_boundary:
+          alpha = max(alpha, 0.80 if ui_state.status == UIStatus.ENGAGED else 0.55)
+          color = rl.Color(0, 255, 80, int(alpha * 255))
+        else:
+          alpha = max(alpha, 0.55 if ui_state.status == UIStatus.ENGAGED else 0.45)
+          color = rl.Color(0, 220, 70, int(alpha * 255))
       else:
         color = rl.Color(255, 255, 255, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
@@ -447,8 +478,8 @@ class ModelRenderer(Widget):
 
       confidence = float(np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0))
       if ui_state.dp_lincoln_hud_enhanced:
-        alpha = max(0.25, confidence ** 0.5)
-        color = rl.Color(255, 30, 30, int(alpha * 255))
+        alpha = max(0.45, confidence ** 0.5)
+        color = rl.Color(255, 0, 0, int(alpha * 255))
       else:
         alpha = confidence
         color = rl.Color(255, 0, 0, int(alpha * 255))
