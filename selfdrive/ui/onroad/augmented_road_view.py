@@ -417,6 +417,7 @@ class AugmentedRoadView(CameraView):
 
     # Decel/brake intensity bar (smoothly turns red with stronger decel)
     cs = sm["carState"]
+    brake_pressed = bool(getattr(cs, "brakePressed", False))
 
     # 1) Actual deceleration (covers stock ACC braking too)
     a_ego = float(getattr(cs, "aEgo", 0.0))
@@ -427,11 +428,12 @@ class AugmentedRoadView(CameraView):
     brake_cmd = 0.0
     if sm.valid.get("carOutput", False):
       brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
-    elif getattr(cs, "brakePressed", False):
-      brake_cmd = 1.0
     brake_intensity = float(np.interp(brake_cmd, [0.02, 0.6], [0.0, 1.0]))
 
     intensity_raw = max(decel_intensity, brake_intensity)
+    if brake_pressed:
+      # Ensure the bar lights up immediately on manual brake press (even if decel is still small)
+      intensity_raw = max(intensity_raw, 0.20)
     intensity = float(np.clip(self._hud_brake_filter.update(intensity_raw), 0.0, 1.0))
     if intensity <= 0.02:
       return
@@ -452,7 +454,7 @@ class AugmentedRoadView(CameraView):
       b = int(120 + t * (60 - 120))
       a = int(40 + t * (200 - 40))
 
-    bar_h = max(6, int(rect.height * 0.012))
+    bar_h = max(8, int(rect.height * 0.018))
     bar_y = int(rect.y + rect.height - bar_h)
     rl.draw_rectangle(int(rect.x), bar_y, int(rect.width), bar_h, rl.Color(r, g, b, a))
 

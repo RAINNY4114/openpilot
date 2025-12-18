@@ -36,10 +36,20 @@ DP_RAINBOW_GRADIENT_SAMPLES = 20
 DP_RAINBOW_HUE_SECTORS = 6
 
 # Lincoln HUD enhancements
-DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M = 1.2
-DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO = 0.8
-DP_LINCOLN_LEAD_BOX_SMOOTHING = 0.85
-DP_LINCOLN_LEAD_BOX_COLOR = rl.Color(255, 215, 0, 255)
+# NOTE: This is a radar/model-projected occupancy box (not pixel-perfect vision bbox).
+# Tune it to "feel" like a vehicle outline without becoming huge at close range.
+DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M_NEAR = 0.90
+DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M_FAR = 1.10
+DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO_NEAR = 0.70
+DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO_FAR = 0.62
+DP_LINCOLN_LEAD_BOX_SMOOTHING_FAR = 0.90
+DP_LINCOLN_LEAD_BOX_SMOOTHING_NEAR = 0.72
+DP_LINCOLN_LEAD_EFFECT_START_M = 70.0
+DP_LINCOLN_LEAD_EFFECT_FULL_M = 20.0
+DP_LINCOLN_LEAD_EFFECT_TTC_START_S = 5.0
+DP_LINCOLN_LEAD_EFFECT_TTC_FULL_S = 2.5
+DP_LINCOLN_LEAD_COLOR_FAR = rl.Color(255, 215, 0, 255)
+DP_LINCOLN_LEAD_COLOR_NEAR = rl.Color(255, 60, 0, 255)
 
 
 @dataclass
@@ -113,6 +123,7 @@ class ModelRenderer(Widget):
     self._lead_box_y = 0.0
     self._lead_box_w = 0.0
     self._lead_box_h = 0.0
+    self._lead_box_intensity = 0.0
 
   def set_transform(self, transform: np.ndarray):
     self._car_space_transform = transform.astype(np.float32)
@@ -207,9 +218,11 @@ class ModelRenderer(Widget):
     if not ui_state.dp_lincoln_hud_enhanced:
       self._lead_box_valid = False
       self._lead_box_alpha = 0.0
+      self._lead_box_intensity = 0.0
       return
 
     if not (lead_one and lead_one.status):
+      self._lead_box_intensity = 0.0
       self._lead_box_alpha = max(0.0, self._lead_box_alpha - 0.20)
       if self._lead_box_alpha <= 0.0:
         self._lead_box_valid = False
@@ -217,7 +230,23 @@ class ModelRenderer(Widget):
 
     d_rel = float(lead_one.dRel)
     y_rel = float(lead_one.yRel)
+    v_rel = float(getattr(lead_one, "vRel", 0.0))
     if not (d_rel > 0.0 and np.isfinite(d_rel) and np.isfinite(y_rel)):
+      return
+
+    dist_intensity = float(np.clip(np.interp(d_rel, [DP_LINCOLN_LEAD_EFFECT_FULL_M, DP_LINCOLN_LEAD_EFFECT_START_M], [1.0, 0.0]), 0.0, 1.0))
+    ttc_intensity = 0.0
+    if v_rel < -0.1:
+      ttc = d_rel / max(0.1, -v_rel)
+      ttc_intensity = float(np.clip(np.interp(ttc, [DP_LINCOLN_LEAD_EFFECT_TTC_FULL_S, DP_LINCOLN_LEAD_EFFECT_TTC_START_S], [1.0, 0.0]), 0.0, 1.0))
+    intensity = max(dist_intensity, ttc_intensity)
+
+    # Hide until we're meaningfully close/closing; fade out smoothly when far
+    if intensity <= 0.01:
+      self._lead_box_intensity = 0.0
+      self._lead_box_alpha = max(0.0, self._lead_box_alpha - 0.10)
+      if self._lead_box_alpha <= 0.0:
+        self._lead_box_valid = False
       return
 
     idx = self._get_path_length_idx(path_x_array, d_rel)
@@ -225,8 +254,12 @@ class ModelRenderer(Widget):
     if 0 <= idx < len(self._path.raw_points):
       z_on_path += float(self._path.raw_points[idx, 2])
 
-    left_pt = self._map_to_screen(d_rel, -y_rel - DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M, z_on_path)
-    right_pt = self._map_to_screen(d_rel, -y_rel + DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M, z_on_path)
+    # Make the box narrower when near so it doesn't cover adjacent vehicles
+    half_width_m = float(np.interp(d_rel, [DP_LINCOLN_LEAD_EFFECT_FULL_M, DP_LINCOLN_LEAD_EFFECT_START_M],
+                                   [DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M_NEAR, DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M_FAR]))
+
+    left_pt = self._map_to_screen(d_rel, -y_rel - half_width_m, z_on_path)
+    right_pt = self._map_to_screen(d_rel, -y_rel + half_width_m, z_on_path)
     if left_pt is None or right_pt is None:
       return
 
@@ -236,9 +269,11 @@ class ModelRenderer(Widget):
 
     center_x = (float(left_pt[0]) + float(right_pt[0])) / 2.0
     bottom_y = (float(left_pt[1]) + float(right_pt[1])) / 2.0
-    height_px = width_px * DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO
+    height_ratio = float(np.interp(d_rel, [DP_LINCOLN_LEAD_EFFECT_FULL_M, DP_LINCOLN_LEAD_EFFECT_START_M],
+                                   [DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO_NEAR, DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO_FAR]))
+    height_px = width_px * height_ratio
 
-    margin_px = max(10.0, width_px * 0.05)
+    margin_px = max(6.0, width_px * 0.03)
     x = center_x - width_px / 2.0 - margin_px
     y = bottom_y - height_px
     w = width_px + 2.0 * margin_px
@@ -248,8 +283,11 @@ class ModelRenderer(Widget):
     x = float(np.clip(x, self._rect.x, self._rect.x + self._rect.width - w))
     y = float(np.clip(y, self._rect.y, self._rect.y + self._rect.height - h))
 
+    # Make updates more responsive when the lead is close/closing
+    smoothing = float(np.interp(intensity, [0.0, 1.0], [DP_LINCOLN_LEAD_BOX_SMOOTHING_FAR, DP_LINCOLN_LEAD_BOX_SMOOTHING_NEAR]))
+
     if self._lead_box_valid:
-      a = DP_LINCOLN_LEAD_BOX_SMOOTHING
+      a = smoothing
       self._lead_box_x = self._lead_box_x * a + x * (1.0 - a)
       self._lead_box_y = self._lead_box_y * a + y * (1.0 - a)
       self._lead_box_w = self._lead_box_w * a + w * (1.0 - a)
@@ -258,16 +296,23 @@ class ModelRenderer(Widget):
       self._lead_box_valid = True
       self._lead_box_x, self._lead_box_y, self._lead_box_w, self._lead_box_h = x, y, w, h
 
+    self._lead_box_intensity = intensity
     self._lead_box_alpha = min(1.0, self._lead_box_alpha + 0.25)
 
   def _draw_lead_box(self):
     if not (ui_state.dp_lincoln_hud_enhanced and self._lead_box_valid) or self._lead_box_alpha <= 0.01:
       return
 
-    alpha = int(np.clip(self._lead_box_alpha * 255.0, 0, 255))
-    color = rl.Color(DP_LINCOLN_LEAD_BOX_COLOR.r, DP_LINCOLN_LEAD_BOX_COLOR.g, DP_LINCOLN_LEAD_BOX_COLOR.b, alpha)
+    t = float(np.clip(self._lead_box_intensity, 0.0, 1.0))
+    r = int(DP_LINCOLN_LEAD_COLOR_FAR.r + t * (DP_LINCOLN_LEAD_COLOR_NEAR.r - DP_LINCOLN_LEAD_COLOR_FAR.r))
+    g = int(DP_LINCOLN_LEAD_COLOR_FAR.g + t * (DP_LINCOLN_LEAD_COLOR_NEAR.g - DP_LINCOLN_LEAD_COLOR_FAR.g))
+    b = int(DP_LINCOLN_LEAD_COLOR_FAR.b + t * (DP_LINCOLN_LEAD_COLOR_NEAR.b - DP_LINCOLN_LEAD_COLOR_FAR.b))
+
+    alpha = int(np.clip(self._lead_box_alpha * (110.0 + 145.0 * t), 0, 255))
+    color = rl.Color(r, g, b, alpha)
     rect = rl.Rectangle(self._lead_box_x, self._lead_box_y, self._lead_box_w, self._lead_box_h)
-    thickness = max(2, int(self._lead_box_w * 0.015))
+
+    thickness = max(3, int(self._lead_box_w * (0.018 + 0.010 * t)))
     rl.draw_rectangle_rounded_lines_ex(rect, 0.10, 8, thickness, color)
 
   def _update_model(self, lead, path_x_array):
@@ -278,7 +323,8 @@ class ModelRenderer(Widget):
     # Update lane lines using raw points
     for i, lane_line in enumerate(self._lane_lines):
       if ui_state.dp_lincoln_hud_enhanced:
-        line_width = 0.02 + 0.015 * self._lane_line_probs[i]
+        base = 0.045 if i in (1, 2) else 0.035
+        line_width = base + 0.01 * self._lane_line_probs[i]
       else:
         line_width = 0.025 * self._lane_line_probs[i]
       lane_line.projected_points = self._map_line_to_polygon(
@@ -286,7 +332,7 @@ class ModelRenderer(Widget):
       )
 
     # Update road edges using raw points
-    road_edge_width = 0.03 if ui_state.dp_lincoln_hud_enhanced else 0.025
+    road_edge_width = 0.06 if ui_state.dp_lincoln_hud_enhanced else 0.025
     for road_edge in self._road_edges:
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, road_edge_width, 0.0, max_idx, max_distance)
 
@@ -377,12 +423,20 @@ class ModelRenderer(Widget):
       if lane_line.projected_points.size == 0:
         continue
 
-      alpha_cap = 0.9 if ui_state.dp_lincoln_hud_enhanced else 0.7
-      alpha = np.clip(self._lane_line_probs[i], 0.0, alpha_cap)
+      prob = float(self._lane_line_probs[i])
+      if ui_state.dp_lincoln_hud_enhanced:
+        alpha = float(np.clip(prob * 1.25, 0.0, 1.0))
+        if prob < 0.10:
+          alpha = 0.0
+        else:
+          alpha = max(alpha, 0.35)
+      else:
+        alpha = float(np.clip(prob, 0.0, 0.7))
 
       is_primary_lane_boundary = i in (1, 2)
       if ui_state.dp_lincoln_hud_enhanced and ui_state.status == UIStatus.ENGAGED and is_primary_lane_boundary:
-        color = rl.Color(128, 216, 166, int(alpha * 255))
+        alpha = max(alpha, 0.70)
+        color = rl.Color(0, 255, 80, int(alpha * 255))
       else:
         color = rl.Color(255, 255, 255, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
@@ -391,8 +445,13 @@ class ModelRenderer(Widget):
       if road_edge.projected_points.size == 0:
         continue
 
-      alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
-      color = rl.Color(255, 0, 0, int(alpha * 255))
+      confidence = float(np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0))
+      if ui_state.dp_lincoln_hud_enhanced:
+        alpha = max(0.25, confidence ** 0.5)
+        color = rl.Color(255, 30, 30, int(alpha * 255))
+      else:
+        alpha = confidence
+        color = rl.Color(255, 0, 0, int(alpha * 255))
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):
@@ -427,6 +486,21 @@ class ModelRenderer(Widget):
         stops=[0.0, 0.5, 1.0],
       )
       draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
+
+      # Lincoln HUD enhancements: tint the road band as we approach lead, then restore to green when clear
+      if ui_state.dp_lincoln_hud_enhanced and self._lead_box_intensity > 0.01:
+        t = float(np.clip(self._lead_box_intensity, 0.0, 1.0))
+        r = int(DP_LINCOLN_LEAD_COLOR_FAR.r + t * (DP_LINCOLN_LEAD_COLOR_NEAR.r - DP_LINCOLN_LEAD_COLOR_FAR.r))
+        g = int(DP_LINCOLN_LEAD_COLOR_FAR.g + t * (DP_LINCOLN_LEAD_COLOR_NEAR.g - DP_LINCOLN_LEAD_COLOR_FAR.g))
+        b = int(DP_LINCOLN_LEAD_COLOR_FAR.b + t * (DP_LINCOLN_LEAD_COLOR_NEAR.b - DP_LINCOLN_LEAD_COLOR_FAR.b))
+        top_alpha = int(20 + t * 120)
+        overlay = Gradient(
+          start=(0.0, 1.0),
+          end=(0.0, 0.0),
+          colors=[rl.Color(r, g, b, 0), rl.Color(r, g, b, top_alpha)],
+          stops=[0.0, 1.0],
+        )
+        draw_polygon(self._rect, self._path.projected_points, gradient=overlay)
 
   def _draw_lead_indicator(self):
     # Draw lead vehicles if available
