@@ -1917,3 +1917,11 @@ msgstr "自动接管"
 #: selfdrive/ui/onroad/augmented_road_view.py:335
 msgid "Manual control"
 msgstr "人工接管"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "HUD drawing enhancements"
+msgstr "HUD 显示增强"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Enable enhanced HUD visuals (blindspot zones, clearer lane lines, brake cues)."
+msgstr "启用 HUD 视觉增强（盲点区域、更清晰车道线、制动提示）。"

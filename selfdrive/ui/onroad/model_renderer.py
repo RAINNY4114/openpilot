@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
-from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
@@ -34,6 +34,12 @@ DP_RAINBOW_NUM_REPEATS = 3
 DP_RAINBOW_ALPHA = 128
 DP_RAINBOW_GRADIENT_SAMPLES = 20
 DP_RAINBOW_HUE_SECTORS = 6
+
+# Lincoln HUD enhancements
+DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M = 1.2
+DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO = 0.8
+DP_LINCOLN_LEAD_BOX_SMOOTHING = 0.85
+DP_LINCOLN_LEAD_BOX_COLOR = rl.Color(255, 215, 0, 255)
 
 
 @dataclass
@@ -100,6 +106,14 @@ class ModelRenderer(Widget):
     self._dp_ui_rainbow_rotation = 0.0
     self._dp_ui_rainbow_gradient = None
 
+    # Lincoln HUD enhancements
+    self._lead_box_valid = False
+    self._lead_box_alpha = 0.0
+    self._lead_box_x = 0.0
+    self._lead_box_y = 0.0
+    self._lead_box_w = 0.0
+    self._lead_box_h = 0.0
+
   def set_transform(self, transform: np.ndarray):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
@@ -129,7 +143,7 @@ class ModelRenderer(Widget):
     model = sm['modelV2']
     radar_state = sm['radarState'] if sm.valid['radarState'] else None
     lead_one = radar_state.leadOne if radar_state else None
-    render_lead_indicator = self._longitudinal_control and radar_state is not None
+    render_lead_indicator = radar_state is not None and (self._longitudinal_control or ui_state.dp_lincoln_hud_enhanced)
 
     # Update model data when needed
     model_updated = sm.updated['modelV2']
@@ -176,6 +190,8 @@ class ModelRenderer(Widget):
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
     leads = [radar_state.leadOne, radar_state.leadTwo]
 
+    self._update_lead_box(radar_state.leadOne, path_x_array)
+
     for i, lead_data in enumerate(leads):
       if lead_data and lead_data.status:
         d_rel, y_rel, v_rel = lead_data.dRel, lead_data.yRel, lead_data.vRel
@@ -187,6 +203,73 @@ class ModelRenderer(Widget):
         if point:
           self._lead_vehicles[i] = self._update_lead_vehicle(d_rel, v_rel, point, self._rect)
 
+  def _update_lead_box(self, lead_one, path_x_array):
+    if not ui_state.dp_lincoln_hud_enhanced:
+      self._lead_box_valid = False
+      self._lead_box_alpha = 0.0
+      return
+
+    if not (lead_one and lead_one.status):
+      self._lead_box_alpha = max(0.0, self._lead_box_alpha - 0.20)
+      if self._lead_box_alpha <= 0.0:
+        self._lead_box_valid = False
+      return
+
+    d_rel = float(lead_one.dRel)
+    y_rel = float(lead_one.yRel)
+    if not (d_rel > 0.0 and np.isfinite(d_rel) and np.isfinite(y_rel)):
+      return
+
+    idx = self._get_path_length_idx(path_x_array, d_rel)
+    z_on_path = float(self._path_offset_z)
+    if 0 <= idx < len(self._path.raw_points):
+      z_on_path += float(self._path.raw_points[idx, 2])
+
+    left_pt = self._map_to_screen(d_rel, -y_rel - DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M, z_on_path)
+    right_pt = self._map_to_screen(d_rel, -y_rel + DP_LINCOLN_LEAD_BOX_HALF_WIDTH_M, z_on_path)
+    if left_pt is None or right_pt is None:
+      return
+
+    width_px = abs(float(right_pt[0]) - float(left_pt[0]))
+    if width_px < 8.0 or not np.isfinite(width_px):
+      return
+
+    center_x = (float(left_pt[0]) + float(right_pt[0])) / 2.0
+    bottom_y = (float(left_pt[1]) + float(right_pt[1])) / 2.0
+    height_px = width_px * DP_LINCOLN_LEAD_BOX_HEIGHT_RATIO
+
+    margin_px = max(10.0, width_px * 0.05)
+    x = center_x - width_px / 2.0 - margin_px
+    y = bottom_y - height_px
+    w = width_px + 2.0 * margin_px
+    h = height_px
+
+    # Clamp to viewport
+    x = float(np.clip(x, self._rect.x, self._rect.x + self._rect.width - w))
+    y = float(np.clip(y, self._rect.y, self._rect.y + self._rect.height - h))
+
+    if self._lead_box_valid:
+      a = DP_LINCOLN_LEAD_BOX_SMOOTHING
+      self._lead_box_x = self._lead_box_x * a + x * (1.0 - a)
+      self._lead_box_y = self._lead_box_y * a + y * (1.0 - a)
+      self._lead_box_w = self._lead_box_w * a + w * (1.0 - a)
+      self._lead_box_h = self._lead_box_h * a + h * (1.0 - a)
+    else:
+      self._lead_box_valid = True
+      self._lead_box_x, self._lead_box_y, self._lead_box_w, self._lead_box_h = x, y, w, h
+
+    self._lead_box_alpha = min(1.0, self._lead_box_alpha + 0.25)
+
+  def _draw_lead_box(self):
+    if not (ui_state.dp_lincoln_hud_enhanced and self._lead_box_valid) or self._lead_box_alpha <= 0.01:
+      return
+
+    alpha = int(np.clip(self._lead_box_alpha * 255.0, 0, 255))
+    color = rl.Color(DP_LINCOLN_LEAD_BOX_COLOR.r, DP_LINCOLN_LEAD_BOX_COLOR.g, DP_LINCOLN_LEAD_BOX_COLOR.b, alpha)
+    rect = rl.Rectangle(self._lead_box_x, self._lead_box_y, self._lead_box_w, self._lead_box_h)
+    thickness = max(2, int(self._lead_box_w * 0.015))
+    rl.draw_rectangle_rounded_lines_ex(rect, 0.10, 8, thickness, color)
+
   def _update_model(self, lead, path_x_array):
     """Update model visualization data based on model message"""
     max_distance = np.clip(path_x_array[-1], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
@@ -194,13 +277,18 @@ class ModelRenderer(Widget):
 
     # Update lane lines using raw points
     for i, lane_line in enumerate(self._lane_lines):
+      if ui_state.dp_lincoln_hud_enhanced:
+        line_width = 0.02 + 0.015 * self._lane_line_probs[i]
+      else:
+        line_width = 0.025 * self._lane_line_probs[i]
       lane_line.projected_points = self._map_line_to_polygon(
-        lane_line.raw_points, 0.025 * self._lane_line_probs[i], 0.0, max_idx, max_distance
+        lane_line.raw_points, line_width, 0.0, max_idx, max_distance
       )
 
     # Update road edges using raw points
+    road_edge_width = 0.03 if ui_state.dp_lincoln_hud_enhanced else 0.025
     for road_edge in self._road_edges:
-      road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, 0.025, 0.0, max_idx, max_distance)
+      road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, road_edge_width, 0.0, max_idx, max_distance)
 
     # Update path using raw points
     if lead and lead.status:
@@ -289,8 +377,14 @@ class ModelRenderer(Widget):
       if lane_line.projected_points.size == 0:
         continue
 
-      alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
-      color = rl.Color(255, 255, 255, int(alpha * 255))
+      alpha_cap = 0.9 if ui_state.dp_lincoln_hud_enhanced else 0.7
+      alpha = np.clip(self._lane_line_probs[i], 0.0, alpha_cap)
+
+      is_primary_lane_boundary = i in (1, 2)
+      if ui_state.dp_lincoln_hud_enhanced and ui_state.status == UIStatus.ENGAGED and is_primary_lane_boundary:
+        color = rl.Color(128, 216, 166, int(alpha * 255))
+      else:
+        color = rl.Color(255, 255, 255, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
 
     for i, road_edge in enumerate(self._road_edges):
@@ -336,6 +430,7 @@ class ModelRenderer(Widget):
 
   def _draw_lead_indicator(self):
     # Draw lead vehicles if available
+    self._draw_lead_box()
     for lead in self._lead_vehicles:
       if not lead.glow or not lead.chevron:
         continue
@@ -343,19 +438,22 @@ class ModelRenderer(Widget):
       rl.draw_triangle_fan(lead.glow, len(lead.glow), rl.Color(218, 202, 37, 255))
       rl.draw_triangle_fan(lead.chevron, len(lead.chevron), rl.Color(201, 34, 49, lead.fill_alpha))
 
-      if ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]:
+      show_distance = ui_state.dp_lincoln_hud_enhanced or ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
+      show_ttc = ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
+
+      if show_distance or show_ttc:
         start_y = lead.y
 
-        # d_rel
-        dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
-        self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
+        if show_distance:
+          dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
+          self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
 
-        # ttc
-        car_state = ui_state.sm['carState']
-        ttc = (lead.d_rel / car_state.vEgo) if car_state.vEgo > 0 else float("NaN")
-        if ttc < 5.:
-          ttc_str = f"{ttc:.1f}s"
-          self._dp_paint_centered_lead_text(ttc_str, 80, lead.x, start_y + lead.sz + 40)
+        if show_ttc:
+          car_state = ui_state.sm['carState']
+          ttc = (lead.d_rel / car_state.vEgo) if car_state.vEgo > 0 else float("NaN")
+          if ttc < 5.:
+            ttc_str = f"{ttc:.1f}s"
+            self._dp_paint_centered_lead_text(ttc_str, 80, lead.x, start_y + lead.sz + 40)
 
   @staticmethod
   def _get_path_length_idx(pos_x_array: np.ndarray, path_distance: float) -> int:
@@ -589,4 +687,3 @@ class ModelRenderer(Widget):
 
         for i, line in enumerate(lines):
           rl.draw_text_ex(font, line, rl.Vector2(text_x, text_y + i * line_height), font_size, 0, rl.WHITE)
-

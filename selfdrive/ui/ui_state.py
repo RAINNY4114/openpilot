@@ -231,6 +231,7 @@ class UIState:
     self._param_update_time = time.monotonic()
 
   def _update_settings_params(self) -> None:
+    self.dp_lincoln_hud_enhanced = self.params.get_bool("dp_lincoln_hud_enhanced")
     self.dp_lincoln_perf_info_enabled = self.params.get_bool("dp_lincoln_perf_info_enabled")
     self._settings_update_time = time.monotonic()
 
