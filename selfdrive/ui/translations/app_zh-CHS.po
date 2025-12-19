@@ -1979,6 +1979,14 @@ msgid "Download status"
 msgstr "下载状态"
 
 #: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Download traffic"
+msgstr "下载流量"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Approximate downloaded data and speed while maps are downloading."
+msgstr "显示下载离线地图时的已下载数据量与速度（近似）。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
 #, python-format
 msgid "Downloading: {done}/{total} ({pct}%)"
 msgstr "下载中：{done}/{total}（{pct}%）"

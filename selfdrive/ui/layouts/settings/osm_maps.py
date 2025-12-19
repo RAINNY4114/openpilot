@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import subprocess
 import shutil
 import time
@@ -31,8 +32,19 @@ class OSMMapsLayout(Widget):
     self._prev_download_active = self._download_active()
     self._download_start_t: float | None = None
     self._download_start_done = 0
+    self._download_start_bytes = 0
+    self._download_rate_bps = 0.0
+    self._download_last_sample_t = 0.0
+    self._download_last_sample_bytes = 0
 
     self._ensure_default_maps_selected()
+
+    self._traffic_item = text_item(
+      title=lambda: tr("Download traffic"),
+      value=lambda: self._traffic_text(),
+      description=lambda: tr("Approximate downloaded data and speed while maps are downloading."),
+    )
+    self._traffic_item.set_visible(lambda: self._download_active())
 
     self._eta_item = text_item(
       title=lambda: tr("Download ETA"),
@@ -64,6 +76,7 @@ class OSMMapsLayout(Widget):
         title=lambda: tr("Download status"),
         value=lambda: self._status_text(),
       ),
+      self._traffic_item,
       self._eta_item,
       self._elapsed_item,
       button_item(
@@ -89,26 +102,6 @@ class OSMMapsLayout(Widget):
       ),
     ], line_separator=True, spacing=0)
 
-  def _update_state(self):
-    active = self._download_active()
-    if active and self._download_start_t is None:
-      p = self._progress()
-      self._download_start_t = time.monotonic()
-      self._download_start_done = int(p.get("downloaded_files", 0) or 0)
-
-    if active and not self._prev_download_active:
-      p = self._progress()
-      self._download_start_t = time.monotonic()
-      self._download_start_done = int(p.get("downloaded_files", 0) or 0)
-
-    if self._prev_download_active and not active:
-      p = self._progress()
-      total = int(p.get("total_files", 0) or 0)
-      done = int(p.get("downloaded_files", 0) or 0)
-      self._download_start_t = None
-      self._download_start_done = 0
-    self._prev_download_active = active
-
   def _render(self, rect):
     self._update_state()
     self._scroller.render(rect)
@@ -132,13 +125,27 @@ class OSMMapsLayout(Widget):
     return bool(self._params_memory.get("OSMDownloadLocations"))
 
   def _progress(self) -> dict:
-    raw = self._params.get("OSMDownloadProgress")
+    raw = None
+    try:
+      raw = self._params_memory.get("OSMDownloadProgress")
+    except Exception:
+      raw = None
+
+    if not raw:
+      raw = self._params.get("OSMDownloadProgress")
     if not raw:
       return {}
     try:
       return json.loads(raw)
     except Exception:
-      return {}
+      # Fallback: be tolerant of non-JSON payloads (match FrogPilot's regex approach)
+      m = re.search(r'"total_files"\s*:\s*(\d+).*"downloaded_files"\s*:\s*(\d+)', raw)
+      if not m:
+        return {}
+      return {
+        "total_files": int(m.group(1)),
+        "downloaded_files": int(m.group(2)),
+      }
 
   def _has_any_files(self) -> bool:
     return os.path.isdir(OSM_OFFLINE_DIR)
@@ -177,12 +184,31 @@ class OSMMapsLayout(Widget):
     return f"{value:.2f} {units[i]}"
 
   @staticmethod
+  def _format_rate(bytes_per_sec: float) -> str:
+    bytes_per_sec = max(0.0, float(bytes_per_sec))
+    if bytes_per_sec <= 0.0:
+      return "0 KB/s"
+    units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    i = 0
+    value = bytes_per_sec
+    while value >= 1024.0 and i < (len(units) - 1):
+      value /= 1024.0
+      i += 1
+    return f"{value:.2f} {units[i]}"
+
+  @staticmethod
   def _format_duration(seconds: int) -> str:
     seconds = max(0, int(seconds))
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+  def _traffic_text(self) -> str:
+    if not self._download_active() or self._download_start_t is None:
+      return ""
+    downloaded = max(0, self._local_bytes() - int(self._download_start_bytes))
+    return f"{self._format_bytes(downloaded)} ({self._format_rate(self._download_rate_bps)})"
 
   def _status_text(self) -> str:
     p = self._progress()
@@ -191,6 +217,11 @@ class OSMMapsLayout(Widget):
       done = int(p.get("downloaded_files", 0) or 0)
       if total > 0:
         pct = int(round(100.0 * min(done, total) / total))
+        if done >= total and self._has_maps():
+          # Some mapd builds may not clear OSMDownloadLocations on completion.
+          self._params_memory.remove("OSMDownloadLocations")
+          self._params.remove("OSMDownloadProgress")
+          return tr("Ready")
         return tr("Downloading: {done}/{total} ({pct}%)").format(done=done, total=total, pct=pct)
       return tr("Downloading...")
 
@@ -250,3 +281,42 @@ class OSMMapsLayout(Widget):
     except Exception:
       pass
     self._params.remove("OSMDownloadProgress")
+
+  def _update_state(self):
+    now = time.monotonic()
+    active = self._download_active()
+    if active and self._download_start_t is None:
+      p = self._progress()
+      self._download_start_t = now
+      self._download_start_done = int(p.get("downloaded_files", 0) or 0)
+      self._download_start_bytes = self._local_bytes()
+      self._download_last_sample_t = now
+      self._download_last_sample_bytes = self._download_start_bytes
+
+    if active and not self._prev_download_active:
+      p = self._progress()
+      self._download_start_t = now
+      self._download_start_done = int(p.get("downloaded_files", 0) or 0)
+      self._download_start_bytes = self._local_bytes()
+      self._download_last_sample_t = now
+      self._download_last_sample_bytes = self._download_start_bytes
+      self._download_rate_bps = 0.0
+
+    if active and self._download_start_t is not None:
+      # Estimate download throughput using local disk growth (1s cached).
+      current_bytes = self._local_bytes()
+      if now - self._download_last_sample_t >= 1.0:
+        delta_bytes = max(0, current_bytes - self._download_last_sample_bytes)
+        dt = max(0.001, now - self._download_last_sample_t)
+        self._download_rate_bps = delta_bytes / dt
+        self._download_last_sample_t = now
+        self._download_last_sample_bytes = current_bytes
+
+    if self._prev_download_active and not active:
+      self._download_start_t = None
+      self._download_start_done = 0
+      self._download_start_bytes = 0
+      self._download_rate_bps = 0.0
+      self._download_last_sample_t = 0.0
+      self._download_last_sample_bytes = 0
+    self._prev_download_active = active
