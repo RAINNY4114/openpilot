@@ -116,6 +116,7 @@ procs = [
   PythonProcess("joystickd", "tools.joystick.joystickd", or_(joystick, notcar)),
   PythonProcess("selfdrived", "selfdrive.selfdrived.selfdrived", only_onroad),
   PythonProcess("card", "selfdrive.car.card", only_onroad),
+  PythonProcess("maps_updater", "selfdrive.mapd.maps_updater", always_run, enabled=not PC),
   PythonProcess("mapd", "selfdrive.mapd.mapd", mapd, enabled=not PC),
   PythonProcess("deleter", "system.loggerd.deleter", always_run),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", driverview, enabled=(WEBCAM or not PC) and not LITE),

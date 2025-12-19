@@ -14,21 +14,27 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
-VERSION_CHANNEL = "v1"
-GITHUB_VERSION_URL = f"https://github.com/FrogAi/FrogPilot-Resources/raw/Versions/mapd_version_{VERSION_CHANNEL}.txt"
-GITLAB_VERSION_URL = f"https://gitlab.com/FrogAi/FrogPilot-Resources/-/raw/Versions/mapd_version_{VERSION_CHANNEL}.txt"
-FALLBACK_MAPD_VERSION = "v1.9.1"
+# FrogPilot publishes a version pointer for mapd. v2 is JSON and is kept up-to-date.
+VERSION_CHANNEL = "v2"
+GITHUB_VERSION_URL = f"https://github.com/FrogAi/FrogPilot-Resources/raw/Versions/mapd_version_{VERSION_CHANNEL}.json"
+GITLAB_VERSION_URL = f"https://gitlab.com/FrogAi/FrogPilot-Resources/-/raw/Versions/mapd_version_{VERSION_CHANNEL}.json"
+LEGACY_VERSION_URLS = (
+  "https://github.com/FrogAi/FrogPilot-Resources/raw/Versions/mapd_version_v1.txt",
+  "https://gitlab.com/FrogAi/FrogPilot-Resources/-/raw/Versions/mapd_version_v1.txt",
+)
+FALLBACK_MAPD_VERSION = "v1.12.0"
 
 MAPD_PATH = "/data/media/0/osm/mapd"
 MAPD_VERSION_PATH = "/data/media/0/osm/mapd_version"
 PARAMS_MEMORY_PATH = "/dev/shm/params"
 
 DOWNLOAD_URLS = [
-  # Primary (works today, GitHub may redirect between repos)
-  "https://github.com/pfeiferj/mapd/releases/download/{version}/mapd",
+  # Primary (openpilot-focused builds)
   "https://github.com/pfeiferj/openpilot-mapd/releases/download/{version}/mapd",
   # Mirror used by FrogPilot (public raw file)
   "https://gitlab.com/FrogAi/FrogPilot-Resources/-/raw/Mapd/{version}",
+  # Older fallback (kept for redundancy)
+  "https://github.com/pfeiferj/mapd/releases/download/{version}/mapd",
 ]
 
 def _read_local_version() -> str | None:
@@ -43,11 +49,34 @@ def _read_local_version() -> str | None:
     return None
 
 
+def _parse_remote_version(payload: bytes) -> str | None:
+  try:
+    text = payload.decode("utf-8", errors="ignore").strip()
+  except Exception:
+    return None
+
+  if not text:
+    return None
+
+  if text.startswith("{"):
+    try:
+      obj = json.loads(text)
+      version = obj.get("version")
+      if isinstance(version, str) and version.strip():
+        return version.strip()
+    except Exception:
+      pass
+
+  # Legacy plain-text format: "vX.Y.Z"
+  first_line = text.splitlines()[0].strip()
+  return first_line if first_line else None
+
+
 def _get_latest_version() -> str | None:
-  for url in (GITHUB_VERSION_URL, GITLAB_VERSION_URL):
+  for url in (GITHUB_VERSION_URL, GITLAB_VERSION_URL, *LEGACY_VERSION_URLS):
     try:
       with urllib.request.urlopen(url, timeout=10) as resp:
-        version = resp.read().decode("utf-8").strip()
+        version = _parse_remote_version(resp.read())
         if version:
           return version
     except (urllib.error.URLError, socket.timeout):
@@ -55,6 +84,26 @@ def _get_latest_version() -> str | None:
     except Exception:
       cloudlog.exception("mapd: failed to fetch latest version")
   return None
+
+
+def _cleanup_leftovers() -> None:
+  parent = os.path.dirname(MAPD_PATH)
+  try:
+    for name in os.listdir(parent):
+      if not name.startswith("mapd"):
+        continue
+      if name in ("mapd", "mapd_version"):
+        continue
+      p = os.path.join(parent, name)
+      try:
+        if os.path.isfile(p):
+          os.remove(p)
+      except Exception:
+        pass
+  except FileNotFoundError:
+    pass
+  except Exception:
+    cloudlog.exception("mapd: cleanup failed")
 
 
 def _download(url: str, dst: str, version: str) -> None:
@@ -149,6 +198,7 @@ def main() -> None:
 
   while True:
     try:
+      _cleanup_leftovers()
       now = time.monotonic()
       if now - last_version_check_t > 3600.0 or desired_version is None:
         desired_version = _get_latest_version() or desired_version

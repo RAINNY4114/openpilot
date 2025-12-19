@@ -182,6 +182,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapTargetLatA", {PERSISTENT, FLOAT}},
     {"MapsSelected", {PERSISTENT, STRING}},
     {"LastMapsUpdate", {PERSISTENT, STRING}},
+    {"PreferredSchedule", {PERSISTENT, INT, "0"}},
     {"OSMDownloadBounds", {PERSISTENT, STRING}},
     {"OSMDownloadLocations", {PERSISTENT, STRING}},
     {"OSMDownloadProgress", {CLEAR_ON_MANAGER_START, STRING}},
