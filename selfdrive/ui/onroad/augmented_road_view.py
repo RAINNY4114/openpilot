@@ -17,6 +17,7 @@ from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
+from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -157,9 +158,6 @@ class AugmentedRoadView(CameraView):
     # Draw colored border based on driving state
     self._draw_border(rect)
 
-    # Lincoln HUD enhancement overlays that must sit on top of everything (including border)
-    self._draw_hud_enhanced_top_overlays(rect)
-
     # publish uiDebug
     msg = messaging.new_message('uiDebug')
     msg.uiDebug.drawTimeMillis = (time.monotonic() - start_draw) * 1000
@@ -179,6 +177,49 @@ class AugmentedRoadView(CameraView):
     border_color = BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
     if ui_state.dp_alka_active and ui_state.status == UIStatus.DISENGAGED:
       border_color = BORDER_COLORS[UIStatus.ALKA]
+    base_border_color = border_color
+
+    # Lincoln HUD enhancements: brake intensity colors the whole border (FrogPilot-style "whole frame" cue)
+    if ui_state.dp_lincoln_hud_enhanced:
+      sm = ui_state.sm
+      if sm.alive.get("carState", False):
+        cs = sm["carState"]
+        brake_pressed = bool(getattr(cs, "brakePressed", False))
+
+        # 1) Actual deceleration (covers stock ACC braking too)
+        a_ego = float(getattr(cs, "aEgo", 0.0))
+        decel = max(0.0, -a_ego)  # m/s^2
+        decel_intensity = float(np.interp(decel, [DP_DECEL_BAR_MIN_MS2, DP_DECEL_BAR_MAX_MS2], [0.0, 1.0]))
+
+        # 2) Commanded brake (covers OP longitudinal brake actuation)
+        brake_cmd = 0.0
+        if sm.valid.get("carOutput", False):
+          brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
+        brake_intensity = float(np.interp(brake_cmd, [0.02, 0.6], [0.0, 1.0]))
+
+        intensity_raw = max(decel_intensity, brake_intensity)
+        if brake_pressed:
+          intensity_raw = max(intensity_raw, 0.20)
+        intensity = float(np.clip(self._hud_brake_filter.update(intensity_raw), 0.0, 1.0))
+
+        if intensity > 0.02:
+          hard_brake_pred = False
+          if sm.alive.get("modelV2", False):
+            hard_brake_pred = bool(sm["modelV2"].meta.hardBrakePredicted)
+
+          hard_brake = hard_brake_pred or (decel >= DP_HARD_BRAKE_DECEL_MS2) or (brake_cmd >= DP_HARD_BRAKE_BRAKE_CMD)
+          if hard_brake:
+            flash_on = (time.monotonic() * DP_HARD_BRAKE_FLASH_HZ) % 1.0 < 0.5
+            border_color = rl.Color(255, 0, 0, 255) if flash_on else base_border_color
+          else:
+            t = intensity
+            border_color = rl.Color(
+              int(base_border_color.r + t * (255 - base_border_color.r)),
+              int(base_border_color.g + t * (0 - base_border_color.g)),
+              int(base_border_color.b + t * (0 - base_border_color.b)),
+              base_border_color.a,
+            )
+
     border_rect = rl.Rectangle(rect.x + UI_BORDER_SIZE, rect.y + UI_BORDER_SIZE,
                                rect.width - 2 * UI_BORDER_SIZE, rect.height - 2 * UI_BORDER_SIZE)
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, UI_BORDER_SIZE, border_color)
@@ -385,7 +426,20 @@ class AugmentedRoadView(CameraView):
     elif blindspot:
       alpha = 140
 
-    zone_color = rl.Color(color.r, color.g, color.b, int(np.clip(alpha, 0, 255)))
+    # FrogPilot-style: red/yellow semi-transparent vertical gradient band
+    a0 = int(np.clip(alpha, 0, 255))
+    a1 = int(np.clip(alpha * 0.70, 0, 255))
+    a2 = int(np.clip(alpha * 0.25, 0, 255))
+    gradient = Gradient(
+      start=(0.0, 1.0),
+      end=(0.0, 0.0),
+      colors=[
+        rl.Color(color.r, color.g, color.b, a0),
+        rl.Color(color.r, color.g, color.b, a1),
+        rl.Color(color.r, color.g, color.b, a2),
+      ],
+      stops=[0.0, 0.55, 1.0],
+    )
 
     if is_left:
       x_outer = rect.x + inset
@@ -404,58 +458,7 @@ class AugmentedRoadView(CameraView):
         (x_outer - bottom_w, bottom_y),
       ]
 
-    rl.draw_triangle_fan(points, len(points), zone_color)
-
-  def _draw_hud_enhanced_top_overlays(self, rect: rl.Rectangle) -> None:
-    if not ui_state.dp_lincoln_hud_enhanced:
-      return
-
-    sm = ui_state.sm
-    if not sm.alive.get("carState", False):
-      return
-
-    # Decel/brake intensity bar (smoothly turns red with stronger decel)
-    cs = sm["carState"]
-    brake_pressed = bool(getattr(cs, "brakePressed", False))
-
-    # 1) Actual deceleration (covers stock ACC braking too)
-    a_ego = float(getattr(cs, "aEgo", 0.0))
-    decel = max(0.0, -a_ego)  # m/s^2
-    decel_intensity = float(np.interp(decel, [DP_DECEL_BAR_MIN_MS2, DP_DECEL_BAR_MAX_MS2], [0.0, 1.0]))
-
-    # 2) Commanded brake (covers OP longitudinal brake actuation)
-    brake_cmd = 0.0
-    if sm.valid.get("carOutput", False):
-      brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
-    brake_intensity = float(np.interp(brake_cmd, [0.02, 0.6], [0.0, 1.0]))
-
-    intensity_raw = max(decel_intensity, brake_intensity)
-    if brake_pressed:
-      # Ensure the bar lights up immediately on manual brake press (even if decel is still small)
-      intensity_raw = max(intensity_raw, 0.20)
-    intensity = float(np.clip(self._hud_brake_filter.update(intensity_raw), 0.0, 1.0))
-    if intensity <= 0.02:
-      return
-
-    hard_brake_pred = False
-    if sm.alive.get("modelV2", False):
-      hard_brake_pred = bool(sm["modelV2"].meta.hardBrakePredicted)
-
-    hard_brake = hard_brake_pred or (decel >= DP_HARD_BRAKE_DECEL_MS2) or (brake_cmd >= DP_HARD_BRAKE_BRAKE_CMD)
-    if hard_brake:
-      flash_on = (time.monotonic() * DP_HARD_BRAKE_FLASH_HZ) % 1.0 < 0.5
-      r, g, b = 255, 0, 0
-      a = 220 if flash_on else 30
-    else:
-      t = intensity
-      r = int(0 + t * (255 - 0))
-      g = int(210 + t * (60 - 210))
-      b = int(120 + t * (60 - 120))
-      a = int(40 + t * (200 - 40))
-
-    bar_h = max(8, int(rect.height * 0.018))
-    bar_y = int(rect.y + rect.height - bar_h)
-    rl.draw_rectangle(int(rect.x), bar_y, int(rect.width), bar_h, rl.Color(r, g, b, a))
+    draw_polygon(rect, np.array(points, dtype=np.float32), gradient=gradient)
 
   def _draw_performance_info(self) -> None:
     if not ui_state.dp_lincoln_perf_info_enabled:

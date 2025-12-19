@@ -68,6 +68,7 @@ class LeadVehicle:
   x: float = 0.0
   y: float = 0.0
   sz: float = 0.0
+  v_lead: float = 0.0
 
 @dataclass
 class DpUiLeadMode:
@@ -207,13 +208,14 @@ class ModelRenderer(Widget):
     for i, lead_data in enumerate(leads):
       if lead_data and lead_data.status:
         d_rel, y_rel, v_rel = lead_data.dRel, lead_data.yRel, lead_data.vRel
+        v_lead = float(getattr(lead_data, "vLead", 0.0))
         idx = self._get_path_length_idx(path_x_array, d_rel)
 
         # Get z-coordinate from path at the lead vehicle position
         z = self._path.raw_points[idx, 2] if idx < len(self._path.raw_points) else 0.0
         point = self._map_to_screen(d_rel, -y_rel, z + self._path_offset_z)
         if point:
-          self._lead_vehicles[i] = self._update_lead_vehicle(d_rel, v_rel, point, self._rect)
+          self._lead_vehicles[i] = self._update_lead_vehicle(d_rel, v_rel, v_lead, point, self._rect)
 
   def _update_lead_box(self, radar_lead_one, model, v_ego: float, path_x_array):
     if not ui_state.dp_lincoln_hud_enhanced:
@@ -420,7 +422,7 @@ class ModelRenderer(Widget):
       stops=gradient_stops,
     )
 
-  def _update_lead_vehicle(self, d_rel, v_rel, point, rect):
+  def _update_lead_vehicle(self, d_rel, v_rel, v_lead, point, rect):
     speed_buff, lead_buff = 10.0, 40.0
 
     # Calculate fill alpha
@@ -442,7 +444,7 @@ class ModelRenderer(Widget):
     glow = [(x + (sz * 1.35) + g_xo, y + sz + g_yo), (x, y - g_yo), (x - (sz * 1.35) - g_xo, y + sz + g_yo)]
     chevron = [(x + (sz * 1.25), y + sz), (x, y), (x - (sz * 1.25), y + sz)]
 
-    return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha), d_rel=d_rel, x=x, y=y, sz=sz)
+    return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha), d_rel=d_rel, x=x, y=y, sz=sz, v_lead=v_lead)
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
@@ -543,22 +545,31 @@ class ModelRenderer(Widget):
       rl.draw_triangle_fan(lead.glow, len(lead.glow), rl.Color(218, 202, 37, 255))
       rl.draw_triangle_fan(lead.chevron, len(lead.chevron), rl.Color(201, 34, 49, lead.fill_alpha))
 
-      show_distance = ui_state.dp_lincoln_hud_enhanced or ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
-      show_ttc = ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
-
-      if show_distance or show_ttc:
+      # Lincoln HUD: force-show only distance + lead speed (no TTC, no extra numbers)
+      if ui_state.dp_lincoln_hud_enhanced:
         start_y = lead.y
+        dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
+        v_lead = max(0.0, float(getattr(lead, "v_lead", 0.0)))
+        speed_str = f"{v_lead * 3.6:.0f}km/h" if ui_state.is_metric else f"{v_lead * 2.23694:.0f}mph"
+        self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
+        self._dp_paint_centered_lead_text(speed_str, 48, lead.x, start_y + lead.sz + 40)
+      else:
+        show_distance = ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
+        show_ttc = ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
 
-        if show_distance:
-          dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
-          self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
+        if show_distance or show_ttc:
+          start_y = lead.y
 
-        if show_ttc:
-          car_state = ui_state.sm['carState']
-          ttc = (lead.d_rel / car_state.vEgo) if car_state.vEgo > 0 else float("NaN")
-          if ttc < 5.:
-            ttc_str = f"{ttc:.1f}s"
-            self._dp_paint_centered_lead_text(ttc_str, 80, lead.x, start_y + lead.sz + 40)
+          if show_distance:
+            dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
+            self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
+
+          if show_ttc:
+            car_state = ui_state.sm['carState']
+            ttc = (lead.d_rel / car_state.vEgo) if car_state.vEgo > 0 else float("NaN")
+            if ttc < 5.:
+              ttc_str = f"{ttc:.1f}s"
+              self._dp_paint_centered_lead_text(ttc_str, 80, lead.x, start_y + lead.sz + 40)
 
   @staticmethod
   def _get_path_length_idx(pos_x_array: np.ndarray, path_distance: float) -> int:

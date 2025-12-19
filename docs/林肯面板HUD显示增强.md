@@ -29,7 +29,7 @@
 
 - `selfdrive/ui/onroad/augmented_road_view.py`
   - `_update_dp_indicator_side_state()`：颜色/闪烁逻辑
-  - `_draw_hud_enhancements()`：在画面左右绘制半透明的侧向“风险区域”（随闪烁同步）
+  - `_draw_hud_enhancements()`：在画面左右绘制红/黄的半透明**渐变带**“风险区域”（随闪烁同步）
 
 ### 2.2 车道线更稳、更清晰（粗细稳定、主车道更突出）
 
@@ -47,11 +47,13 @@
   - `_update_model()`：调整 laneLines/roadEdges 的绘制宽度策略
   - `_draw_lane_lines()`：4 条车道线统一绿色体系（engaged 时主车道更亮）
 
-### 2.3 前车信息更简洁（只显示距离）
+### 2.3 前车信息更简洁（距离 + 前车速度）
 
 数据来源：`radarState.leadOne/leadTwo`
 
 启用增强后，即使不打开其它调试/显示项，也会在前车 chevron 下方显示**距离**（m/ft），避免 UI 太“空”但又不堆数字。
+
+同时显示**前车速度**（km/h / mph），并且不显示 TTC 等额外数字。
 
 实现位置：
 
@@ -91,7 +93,7 @@
   - `_update_lead_box()`：计算投影框并滤波
   - `_draw_lead_box()`：绘制黄色描边框
 
-### 2.4 刹车提示条（随制动强度逐渐变红）
+### 2.4 刹车提示（整框变色）
 
 数据来源优先级：
 
@@ -99,15 +101,15 @@
 2. `carOutput.actuatorsOutput.brake`（openpilot 的制动指令，0~1，用作补充）
 3. `carState.brakePressed`（人工踩刹车时用于“立即点亮/最低亮度”保障）
 
-启用增强后，在 HUD 底部绘制一条细条：
+启用增强后，HUD **整圈边框**会随制动强度“渐变变红”：
 
-- 常规减速：颜色随**减速度/制动强度**从绿→红渐变（带滤波，避免闪烁）。
-- 急刹车：当检测到**大减速度/大制动**（或模型 `hardBrakePredicted`）时，改为**红色快闪**作为强提醒。
-- 人工踩刹车：`brakePressed` 会让条形**立即点亮**（避免“踩了但不亮/亮得太慢”）。
+- 常规减速：边框颜色随**减速度/制动强度**从当前状态色逐渐过渡到红色（带滤波，避免闪烁）。
+- 急刹车：当检测到**大减速度/大制动**（或模型 `hardBrakePredicted`）时，边框改为**红色快闪**作为强提醒。
+- 人工踩刹车：`brakePressed` 会让边框**立即开始变红**（避免“踩了但不亮/亮得太慢”）。
 
 实现位置：
 
-- `selfdrive/ui/onroad/augmented_road_view.py` → `_draw_hud_enhanced_top_overlays()`（**最顶层绘制**，贴最底部，覆盖底边框区域）
+- `selfdrive/ui/onroad/augmented_road_view.py` → `_draw_border()`（边框颜色动态更新）
 
 ## 3. 重要说明
 
