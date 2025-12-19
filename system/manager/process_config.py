@@ -68,6 +68,18 @@ def dashy_with_video(started: bool, params: Params, CP: car.CarParams) -> bool:
 def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not params.get_bool("dp_dev_disable_connect")
 
+def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # Run mapd when:
+  # - user requested an offline maps download, or
+  # - onroad realtime cruise mode is enabled
+  try:
+    params_memory = Params("/dev/shm/params")
+    if params_memory.get("OSMDownloadLocations"):
+      return True
+  except Exception:
+    pass
+  return started and params.get_bool("dp_lincoln_osm_realtime_cruise")
+
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -104,6 +116,7 @@ procs = [
   PythonProcess("joystickd", "tools.joystick.joystickd", or_(joystick, notcar)),
   PythonProcess("selfdrived", "selfdrive.selfdrived.selfdrived", only_onroad),
   PythonProcess("card", "selfdrive.car.card", only_onroad),
+  PythonProcess("mapd", "selfdrive.mapd.mapd", mapd, enabled=not PC),
   PythonProcess("deleter", "system.loggerd.deleter", always_run),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", driverview, enabled=(WEBCAM or not PC) and not LITE),
   PythonProcess("dpmonitoringd", "selfdrive.monitoring.dpmonitoringd", only_onroad, enabled=LITE),

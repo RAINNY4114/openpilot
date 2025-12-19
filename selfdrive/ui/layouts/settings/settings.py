@@ -8,6 +8,7 @@ from openpilot.selfdrive.ui.layouts.settings.firehose import FirehoseLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
 from openpilot.selfdrive.ui.layouts.settings.lincoln import LincolnLayout
+from openpilot.selfdrive.ui.layouts.settings.osm_maps import OSMMapsLayout
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -41,6 +42,7 @@ class PanelType(IntEnum):
   DEVELOPER = 5
   DRAGONPILOT = 6
   LINCOLN = 7
+  OSM_MAPS = 8
 
 
 @dataclass
@@ -68,6 +70,7 @@ class SettingsLayout(Widget):
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
       PanelType.DRAGONPILOT: PanelInfo("dp", DragonpilotLayout()),
       PanelType.LINCOLN: PanelInfo("Lincoln", LincolnLayout()),
+      PanelType.OSM_MAPS: PanelInfo(tr_noop("Offline Maps"), OSMMapsLayout()),
     }
 
     self._font_medium = gui_app.font(FontWeight.MEDIUM)
@@ -121,25 +124,39 @@ class SettingsLayout(Widget):
     self._close_btn_rect = close_btn_rect
 
     # Navigation buttons
-    y = rect.y + 200
+    nav_top_margin = 40
+    nav_bottom_margin = 40
+    y = close_btn_rect.y + close_btn_rect.height + nav_top_margin
+
+    available = (rect.y + rect.height) - nav_bottom_margin - y
+    num_panels = max(1, len(self._panels))
+    nav_btn_height = min(NAV_BTN_HEIGHT, available / num_panels) if available > 0 else NAV_BTN_HEIGHT
+    nav_btn_height = max(1, nav_btn_height)
+    if nav_btn_height * num_panels > available and available > 0:
+      nav_btn_height = max(1, available / num_panels)
+
+    font_size = 65
+    if nav_btn_height < font_size + 14:
+      font_size = max(40, int(nav_btn_height - 14))
+
     for panel_type, panel_info in self._panels.items():
-      button_rect = rl.Rectangle(rect.x + 50, y, rect.width - 150, NAV_BTN_HEIGHT)
+      button_rect = rl.Rectangle(rect.x + 50, y, rect.width - 150, nav_btn_height)
 
       # Button styling
       is_selected = panel_type == self._current_panel
       text_color = TEXT_SELECTED if is_selected else TEXT_NORMAL
       # Draw button text (right-aligned)
       panel_name = tr(panel_info.name)
-      text_size = measure_text_cached(self._font_medium, panel_name, 65)
+      text_size = measure_text_cached(self._font_medium, panel_name, font_size)
       text_pos = rl.Vector2(
         button_rect.x + button_rect.width - text_size.x, button_rect.y + (button_rect.height - text_size.y) / 2
       )
-      rl.draw_text_ex(self._font_medium, panel_name, text_pos, 65, 0, text_color)
+      rl.draw_text_ex(self._font_medium, panel_name, text_pos, font_size, 0, text_color)
 
       # Store button rect for click detection
       panel_info.button_rect = button_rect
 
-      y += NAV_BTN_HEIGHT
+      y += nav_btn_height
 
   def _draw_current_panel(self, rect: rl.Rectangle):
     rl.draw_rectangle_rounded(

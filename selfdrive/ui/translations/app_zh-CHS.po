@@ -1084,7 +1084,7 @@ msgstr "二维码错误"
 
 #: selfdrive/ui/widgets/ssh_key.py:31
 msgid "REMOVE"
-msgstr "移除"
+msgstr "删除"
 
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:40
 #: selfdrive/ui/layouts/settings/device.py:58
@@ -1870,6 +1870,10 @@ msgstr "控制"
 msgid "Direction"
 msgstr "方向"
 
+#: selfdrive/ui/onroad/augmented_road_view.py
+msgid "Road"
+msgstr "道路"
+
 #: selfdrive/ui/onroad/augmented_road_view.py:272
 msgid "Memory"
 msgstr "内存"
@@ -1925,3 +1929,121 @@ msgstr "HUD 显示增强"
 #: selfdrive/ui/layouts/settings/lincoln.py
 msgid "Enable enhanced HUD visuals (blindspot zones, clearer lane lines, brake cues)."
 msgstr "启用 HUD 视觉增强（盲点区域、更清晰车道线、制动提示）。"
+
+#: selfdrive/ui/layouts/settings/settings.py
+msgid "Offline Maps"
+msgstr "离线地图"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "### Offline Maps (China) ###"
+msgstr "### 离线地图（中国） ###"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Realtime cruise mode"
+msgstr "实时巡航模式"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Use offline maps for real-time cruise assistance (no navigation). Requires maps downloaded."
+msgstr "使用离线地图进行实时巡航辅助（不提供导航）。需要先下载地图。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Offline maps region"
+msgstr "离线地图区域"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "China (default)"
+msgstr "中国（默认）"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "This panel is simplified: only China offline maps are supported."
+msgstr "该面板为简化版：仅支持中国离线地图。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Offline maps size"
+msgstr "离线地图大小"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Stored under /data/media/0/osm/offline."
+msgstr "保存在 /data/media/0/osm/offline/。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Last download"
+msgstr "上次下载"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Never"
+msgstr "从未"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Download status"
+msgstr "下载状态"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+#, python-format
+msgid "Downloading: {done}/{total} ({pct}%)"
+msgstr "下载中：{done}/{total}（{pct}%）"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Downloading..."
+msgstr "下载中..."
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+#, python-format
+msgid "Error: {}"
+msgstr "错误：{}"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Ready"
+msgstr "已就绪"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Not downloaded"
+msgstr "未下载"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Download ETA"
+msgstr "预计剩余时间"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Time elapsed"
+msgstr "已用时间"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Download offline maps"
+msgstr "下载离线地图"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Download China offline maps (large download, WiFi recommended)."
+msgstr "下载中国离线地图（文件较大，建议使用 Wi‑Fi）。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Cancel download"
+msgstr "取消下载"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Stop the current download (keeps partial file for resume)."
+msgstr "停止当前下载（保留已下载部分，便于续传）。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Remove offline maps"
+msgstr "删除离线地图"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Delete downloaded offline maps to free storage."
+msgstr "删除已下载的离线地图以释放存储空间。"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Are you sure you want to delete all downloaded offline maps?"
+msgstr "确定要删除所有已下载的离线地图吗？"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "CANCEL"
+msgstr "取消"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Remove"
+msgstr "删除"
+
+#: selfdrive/ui/layouts/settings/osm_maps.py
+msgid "Unknown error"
+msgstr "未知错误"

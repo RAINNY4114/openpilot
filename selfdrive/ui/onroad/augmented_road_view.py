@@ -21,6 +21,7 @@ from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.common.params import Params
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
@@ -97,6 +98,10 @@ class AugmentedRoadView(CameraView):
     self._perf_running = True
     self._perf_thread = threading.Thread(target=self._perf_update_loop, daemon=True)
     self._perf_thread.start()
+    self._params = Params()
+    self._params_memory = Params("/dev/shm/params")
+    self._road_loc_cache = "--"
+    self._road_loc_cache_t = 0.0
 
     # Lincoln HUD enhancements
     self._hud_brake_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
@@ -471,6 +476,7 @@ class AugmentedRoadView(CameraView):
     stats = self._get_perf_stats()
     curvature_text, steering_text, torque_text = self._get_curvature_steer_torque()
     direction_text = self._get_direction_label()
+    road_loc_text = self._get_road_location_text()
     control_text = self._get_control_state_text()
     mem_usage = stats.get("mem_usage", "N/A")
     cpu_temp = stats.get("cpu_temp", "N/A")
@@ -478,6 +484,7 @@ class AugmentedRoadView(CameraView):
     items = [
       f"{tr('Curvature')} {curvature_text}/{steering_text}/{torque_text}",
       f"{tr('Direction')} {direction_text}",
+      f"{tr('Road')} {road_loc_text}",
       f"{tr('Control')} {control_text}",
       f"{tr('Memory')} {mem_usage}",
       f"{tr('CPU Temp')} {cpu_temp}",
@@ -535,6 +542,59 @@ class AugmentedRoadView(CameraView):
     except Exception:
       pass
     return curvature_text, steering_text, torque_text
+
+  def _get_road_location_text(self) -> str:
+    now = time.monotonic()
+    if now - self._road_loc_cache_t < 0.5:
+      return self._road_loc_cache
+
+    # Prefer mapd-provided road name (OSM matched), fall back to GPS coordinates.
+    road_name = ""
+    for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
+      if params is None:
+        continue
+      try:
+        rn = params.get("RoadName")
+        if rn:
+          road_name = rn.strip()
+          if road_name:
+            break
+      except Exception:
+        continue
+
+    if road_name:
+      max_chars = 22
+      if len(road_name) > max_chars:
+        road_name = road_name[:max_chars - 1] + "…"
+      self._road_loc_cache = road_name
+      self._road_loc_cache_t = now
+      return road_name
+
+    sm = ui_state.sm
+    lat = None
+    lon = None
+    for service in ("gpsLocationExternal", "gpsLocation"):
+      try:
+        if getattr(sm, "alive", {}).get(service, False):
+          msg = sm[service]
+          if hasattr(msg, "hasFix") and not getattr(msg, "hasFix", False):
+            continue
+          lat_v = getattr(msg, "latitude", None)
+          lon_v = getattr(msg, "longitude", None)
+          if lat_v is None or lon_v is None:
+            continue
+          lat_f = float(lat_v)
+          lon_f = float(lon_v)
+          if math.isfinite(lat_f) and math.isfinite(lon_f):
+            lat = lat_f
+            lon = lon_f
+            break
+      except Exception:
+        continue
+
+    self._road_loc_cache = f"{lat:.5f},{lon:.5f}" if lat is not None and lon is not None else "--"
+    self._road_loc_cache_t = now
+    return self._road_loc_cache
 
   def _get_direction_label(self) -> str:
     sm = ui_state.sm

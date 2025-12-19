@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import math
 import os
 import time
@@ -30,6 +31,13 @@ MIN_ALLOW_THROTTLE_SPEED = 2.5
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
+
+# Map Turn Speed Controller (mapd) constants (similar to FrogPilot/CP behavior)
+_MAP_EARTH_RADIUS_M = 6373000.0
+_MAP_TO_RADIANS = math.pi / 180.0
+_MAP_TARGET_JERK = -0.6   # m/s^3
+_MAP_TARGET_ACCEL = -1.2  # m/s^2
+_MAP_TARGET_OFFSET_S = 1.0
 
 class DPFlags:
   ACM = 1
@@ -87,8 +95,12 @@ class LongitudinalPlanner:
     self.last_curve_log_t = 0.0
     self.curve_log_dir = "/data/media/0/lincoln_curve_logs"
     self._params = Params()
+    self._params_memory = Params("/dev/shm/params")
     self._curve_cfg = {}
     self._curve_param_last = 0.0
+
+    self._map_target_velocities_raw = None
+    self._map_target_velocities = []
 
   def _lincoln_curve_config(self):
     # 小环折加载，1s 内不重复读取参数
@@ -121,6 +133,124 @@ class LongitudinalPlanner:
     }
     self._curve_param_last = now
     return self._curve_cfg
+
+  def _map_distance_to_point(self, lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    ax = lat_a * _MAP_TO_RADIANS
+    ay = lon_a * _MAP_TO_RADIANS
+    bx = lat_b * _MAP_TO_RADIANS
+    by = lon_b * _MAP_TO_RADIANS
+    a = math.sin((bx - ax) / 2) ** 2 + math.cos(ax) * math.cos(bx) * math.sin((by - ay) / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
+    return _MAP_EARTH_RADIUS_M * c
+
+  def _map_target_velocities_list(self) -> list:
+    raw = None
+    try:
+      raw = self._params_memory.get("MapTargetVelocities")
+    except Exception:
+      raw = None
+
+    if not raw:
+      try:
+        raw = self._params.get("MapTargetVelocities")
+      except Exception:
+        raw = None
+
+    if not raw:
+      self._map_target_velocities_raw = None
+      self._map_target_velocities = []
+      return []
+
+    if raw == self._map_target_velocities_raw:
+      return self._map_target_velocities
+
+    try:
+      parsed = json.loads(raw)
+      if not isinstance(parsed, list):
+        parsed = []
+    except Exception:
+      parsed = []
+
+    self._map_target_velocities_raw = raw
+    self._map_target_velocities = parsed
+    return parsed
+
+  @staticmethod
+  def _map_calculate_velocity(t: float, target_jerk: float, a_ego: float, v_ego: float) -> float:
+    return v_ego + a_ego * t + (target_jerk / 2) * (t ** 2)
+
+  @staticmethod
+  def _map_calculate_distance(t: float, target_jerk: float, a_ego: float, v_ego: float) -> float:
+    return t * v_ego + (a_ego / 2) * (t ** 2) + (target_jerk / 6) * (t ** 3)
+
+  def _map_turn_target_speed(self, v_ego: float, a_ego: float, lat: float, lon: float) -> float:
+    target_velocities = self._map_target_velocities_list()
+    if not target_velocities:
+      return 0.0
+
+    min_dist = 1e9
+    min_idx = 0
+    distances: list[float] = []
+
+    for i, target_velocity in enumerate(target_velocities):
+      try:
+        tlat = float(target_velocity.get("latitude", 0.0))
+        tlon = float(target_velocity.get("longitude", 0.0))
+      except Exception:
+        distances.append(1e9)
+        continue
+
+      d = self._map_distance_to_point(lat, lon, tlat, tlon)
+      distances.append(d)
+      if d < min_dist:
+        min_dist = d
+        min_idx = i
+
+    forward_points = target_velocities[min_idx:]
+    forward_distances = distances[min_idx:]
+
+    valid_velocities: list[float] = []
+    for i, target_velocity in enumerate(forward_points):
+      try:
+        tv = float(target_velocity.get("velocity", 0.0))
+      except Exception:
+        continue
+      if tv <= 0.0 or tv > v_ego:
+        continue
+
+      d = float(forward_distances[i])
+
+      a_diff = (a_ego - _MAP_TARGET_ACCEL)
+      accel_t = abs(a_diff / _MAP_TARGET_JERK) if abs(_MAP_TARGET_JERK) > 1e-6 else 0.0
+      min_accel_v = self._map_calculate_velocity(accel_t, _MAP_TARGET_JERK, a_ego, v_ego)
+
+      max_d = 0.0
+      if tv > min_accel_v:
+        qa = 0.5 * _MAP_TARGET_JERK
+        qb = a_ego
+        qc = v_ego - tv
+        disc = qb * qb - 4 * qa * qc
+        if disc < 0.0 or abs(qa) < 1e-9:
+          continue
+        sqrt_disc = math.sqrt(disc)
+        t_a = (-qb - sqrt_disc) / (2 * qa)
+        t_b = (-qb + sqrt_disc) / (2 * qa)
+        t = t_a if t_a > 0.0 else t_b
+        if t <= 0.0 or math.isnan(t) or math.isinf(t):
+          continue
+        max_d += self._map_calculate_distance(t, _MAP_TARGET_JERK, a_ego, v_ego)
+      else:
+        max_d += self._map_calculate_distance(accel_t, _MAP_TARGET_JERK, a_ego, v_ego)
+        t = abs((min_accel_v - tv) / _MAP_TARGET_ACCEL) if abs(_MAP_TARGET_ACCEL) > 1e-6 else 0.0
+        max_d += self._map_calculate_distance(t, 0.0, _MAP_TARGET_ACCEL, min_accel_v)
+
+      if d < max_d + tv * _MAP_TARGET_OFFSET_S:
+        valid_velocities.append(tv)
+
+    if not valid_velocities:
+      return 0.0
+
+    return float(min(valid_velocities))
 
   @staticmethod
   def parse_model(model_msg):
@@ -487,7 +617,8 @@ class LongitudinalPlanner:
     except Exception as e:
       cloudlog.error(f"curve log failed: {e}")
 
-  def update(self, sm, dp_flags = 0, lincoln_curve_speed: bool = False, lincoln_curve_log: bool = False):
+  def update(self, sm, dp_flags = 0, lincoln_curve_speed: bool = False, lincoln_curve_log: bool = False,
+             lincoln_osm_realtime_cruise: bool = False):
     mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
 
     if dp_flags & DPFlags.AEM:
@@ -503,6 +634,22 @@ class LongitudinalPlanner:
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
+
+    # Map-based turn speed target (priority over vision curve limit when enabled+available)
+    v_map_target = 0.0
+    map_turn_limit_active = False
+    map_data_available = False
+    if lincoln_osm_realtime_cruise and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
+      gps = sm['gpsLocationExternal']
+      if getattr(gps, "hasFix", False):
+        try:
+          v_map_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, float(gps.latitude), float(gps.longitude))
+          map_data_available = len(self._map_target_velocities) > 0
+          map_turn_limit_active = v_map_target > 0.1
+        except Exception:
+          v_map_target = 0.0
+          map_turn_limit_active = False
+          map_data_available = False
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
@@ -522,7 +669,8 @@ class LongitudinalPlanner:
     else:
       accel_clip = [ACCEL_MIN, ACCEL_MAX]
 
-    if lincoln_curve_speed:
+    # If map data is available, prefer it and skip vision-based curve speed limit to avoid mixing the two.
+    if lincoln_curve_speed and not map_data_available:
       accel_clip = self._apply_lincoln_curve_speed(sm, accel_clip, log_enabled=lincoln_curve_log)
 
     # 重要状态变化/告警即时记录（不受节流影响）
@@ -571,6 +719,9 @@ class LongitudinalPlanner:
 
     if force_slow_decel:
       v_cruise = 0.0
+
+    if lincoln_osm_realtime_cruise and map_turn_limit_active and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
+      v_cruise = min(v_cruise, v_map_target)
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)

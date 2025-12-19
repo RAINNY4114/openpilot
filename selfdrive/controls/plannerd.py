@@ -19,7 +19,7 @@ def main():
   ldw = LaneDepartureWarning()
   longitudinal_planner = LongitudinalPlanner(CP)
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance'])
-  sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'modelV2', 'selfdriveState'],
+  sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'gpsLocationExternal', 'modelV2', 'selfdriveState'],
                            poll='modelV2')
 
   dp_flags = 0
@@ -38,6 +38,8 @@ def main():
     return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_speed")
   def lincoln_curve_log_enabled() -> bool:
     return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_log")
+  def lincoln_osm_realtime_enabled() -> bool:
+    return CP.brand == "ford" and params.get_bool("dp_lincoln_osm_realtime_cruise")
 
   while True:
     sm.update()
@@ -46,7 +48,8 @@ def main():
       if sm.frame - last_flag_refresh_frame > 100:  # ~0.5s @ 20 Hz model
         dp_flags = refresh_dp_flags()
         last_flag_refresh_frame = sm.frame
-      longitudinal_planner.update(sm, dp_flags, lincoln_curve_speed=lincoln_curve_speed_enabled(), lincoln_curve_log=lincoln_curve_log_enabled())
+      longitudinal_planner.update(sm, dp_flags, lincoln_curve_speed=lincoln_curve_speed_enabled(), lincoln_curve_log=lincoln_curve_log_enabled(),
+                                  lincoln_osm_realtime_cruise=lincoln_osm_realtime_enabled())
       longitudinal_planner.publish(sm, pm)
 
       ldw.update(sm.frame, sm['modelV2'], sm['carState'], sm['carControl'])
