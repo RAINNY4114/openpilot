@@ -393,23 +393,137 @@ class AugmentedRoadView(CameraView):
 
     cs = sm["carState"]
 
-    # Side hazard zones (blindspot + blinker intent)
-    self._draw_hud_enhanced_side_zone(
-      rect=rect,
-      is_left=True,
-      blinker=cs.leftBlinker,
-      blindspot=cs.leftBlindspot,
-      show=self._dp_indicator_show_left,
-      color=self._dp_indicator_color_left,
+    # FrogPilot-style blindspot "wall" (drawn in the adjacent lane polygon)
+    if cs.leftBlindspot:
+      self._draw_hud_fp_blindspot_wall(rect=rect, is_left=True)
+    elif cs.leftBlinker:
+      # Keep the original (simple) blinker intent highlight when no blindspot is present
+      self._draw_hud_enhanced_side_zone(
+        rect=rect,
+        is_left=True,
+        blinker=True,
+        blindspot=False,
+        show=self._dp_indicator_show_left,
+        color=self._dp_indicator_color_left,
+      )
+
+    if cs.rightBlindspot:
+      self._draw_hud_fp_blindspot_wall(rect=rect, is_left=False)
+    elif cs.rightBlinker:
+      self._draw_hud_enhanced_side_zone(
+        rect=rect,
+        is_left=False,
+        blinker=True,
+        blindspot=False,
+        show=self._dp_indicator_show_right,
+        color=self._dp_indicator_color_right,
+      )
+
+  @staticmethod
+  def _fp_calculate_lane_width(lane: np.ndarray, current_lane: np.ndarray, road_edge: np.ndarray | None = None) -> float:
+    if lane.size == 0 or current_lane.size == 0:
+      return 0.0
+
+    try:
+      current_x = current_lane[:, 0]
+      current_y = current_lane[:, 1]
+      lane_y_interp = np.interp(current_x, lane[:, 0], lane[:, 1])
+      distance_to_lane = float(np.mean(np.abs(current_y - lane_y_interp)))
+
+      if road_edge is None or road_edge.size == 0:
+        return distance_to_lane
+
+      road_edge_y_interp = np.interp(current_x, road_edge[:, 0], road_edge[:, 1])
+      distance_to_road_edge = float(np.mean(np.abs(current_y - road_edge_y_interp)))
+      if distance_to_road_edge < distance_to_lane:
+        return 0.0
+
+      return distance_to_lane
+    except Exception:
+      return 0.0
+
+  def _fp_adjacent_lane_centerline(self, lane: np.ndarray, current_lane: np.ndarray) -> np.ndarray:
+    if lane.size == 0 or current_lane.size == 0:
+      return np.empty((0, 3), dtype=np.float32)
+
+    try:
+      x = current_lane[:, 0]
+      lane_y = np.interp(x, lane[:, 0], lane[:, 1])
+      lane_z = np.interp(x, lane[:, 0], lane[:, 2])
+      center_y = 0.5 * (lane_y + current_lane[:, 1])
+      center_z = 0.5 * (lane_z + current_lane[:, 2])
+      return np.column_stack((x, center_y, center_z)).astype(np.float32)
+    except Exception:
+      return np.empty((0, 3), dtype=np.float32)
+
+  def _fp_get_adjacent_lane_polygon(self, rect: rl.Rectangle, is_left: bool) -> np.ndarray:
+    mr = self.model_renderer
+    if not hasattr(mr, "_lane_lines") or not hasattr(mr, "_road_edges"):
+      return np.empty((0, 2), dtype=np.float32)
+
+    try:
+      # Model lane lines are ordered like upstream:
+      # 0: left far, 1: left near (ego boundary), 2: right near, 3: right far
+      if is_left:
+        outer = mr._lane_lines[0].raw_points
+        inner = mr._lane_lines[1].raw_points
+        road_edge = mr._road_edges[0].raw_points if len(mr._road_edges) > 0 else None
+      else:
+        outer = mr._lane_lines[3].raw_points
+        inner = mr._lane_lines[2].raw_points
+        road_edge = mr._road_edges[1].raw_points if len(mr._road_edges) > 1 else None
+
+      lane_width = self._fp_calculate_lane_width(outer, inner, road_edge)
+      if lane_width <= 0.0:
+        return np.empty((0, 2), dtype=np.float32)
+
+      centerline = self._fp_adjacent_lane_centerline(outer, inner)
+      if centerline.shape[0] < 2:
+        return np.empty((0, 2), dtype=np.float32)
+
+      # Match FrogPilot's max draw distance logic (10-100 m, optionally shortened when a lead is present)
+      path_raw = getattr(mr, "_path", None)
+      path_x = np.empty((0,), dtype=np.float32)
+      if path_raw is not None and getattr(path_raw, "raw_points", np.empty((0, 3))).size:
+        path_x = path_raw.raw_points[:, 0]
+
+      if path_x.size:
+        max_distance = float(np.clip(float(path_x[-1]), 10.0, 100.0))
+      else:
+        max_distance = float(np.clip(float(centerline[-1, 0]), 10.0, 100.0))
+
+      sm = ui_state.sm
+      if sm.valid.get("radarState", False):
+        lead_one = sm["radarState"].leadOne
+        if getattr(lead_one, "status", False):
+          lead_d = float(lead_one.dRel) * 2.0
+          max_distance = float(np.clip(lead_d - min(lead_d * 0.35, 10.0), 0.0, max_distance))
+
+      max_idx = mr._get_path_length_idx(path_x if path_x.size else centerline[:, 0], max_distance)
+      return mr._map_line_to_polygon(centerline, lane_width / 2.0, 0.0, max_idx, max_distance, allow_invert=False)
+    except Exception:
+      return np.empty((0, 2), dtype=np.float32)
+
+  def _draw_hud_fp_blindspot_wall(self, rect: rl.Rectangle, is_left: bool) -> None:
+    poly = self._fp_get_adjacent_lane_polygon(rect, is_left=is_left)
+    if poly.size == 0:
+      return
+
+    # 1:1 FrogPilot color: HSL(0°, 0.75, 0.5) with alpha 0.6/0.4/0.2
+    r, g, b = 223, 32, 32
+    gradient = Gradient(
+      start=(0.0, 1.0),
+      end=(0.0, 0.0),
+      colors=[
+        # `shader_polygon` maps t=0 at gradientEnd (top) and t=1 at gradientStart (bottom),
+        # so order colors from top->bottom to match FrogPilot's bottom-heavy gradient.
+        rl.Color(r, g, b, int(0.20 * 255)),
+        rl.Color(r, g, b, int(0.40 * 255)),
+        rl.Color(r, g, b, int(0.60 * 255)),
+      ],
+      stops=[0.0, 0.5, 1.0],
     )
-    self._draw_hud_enhanced_side_zone(
-      rect=rect,
-      is_left=False,
-      blinker=cs.rightBlinker,
-      blindspot=cs.rightBlindspot,
-      show=self._dp_indicator_show_right,
-      color=self._dp_indicator_color_right,
-    )
+    draw_polygon(rect, poly, gradient=gradient)
 
   @staticmethod
   def _draw_hud_enhanced_side_zone(rect: rl.Rectangle, is_left: bool, blinker: bool, blindspot: bool,
@@ -439,9 +553,9 @@ class AugmentedRoadView(CameraView):
       start=(0.0, 1.0),
       end=(0.0, 0.0),
       colors=[
-        rl.Color(color.r, color.g, color.b, a0),
-        rl.Color(color.r, color.g, color.b, a1),
         rl.Color(color.r, color.g, color.b, a2),
+        rl.Color(color.r, color.g, color.b, a1),
+        rl.Color(color.r, color.g, color.b, a0),
       ],
       stops=[0.0, 0.55, 1.0],
     )

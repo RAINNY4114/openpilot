@@ -15,21 +15,44 @@
 
 ## 2. 启用后的绘制改动（与 CP 无关、全新设计）
 
-### 2.1 转向灯 / 盲点提示（边框 + 侧向“风险区域”）
+### 2.1 转向灯 / 盲点提示（黄灯渐变带 + 红色盲点墙）
 
 数据来源：`carState.leftBlinker/rightBlinker`、`carState.leftBlindspot/rightBlindspot`
 
-启用增强后，左右两侧使用一致的颜色/闪烁规则：
+启用增强后，左右两侧使用一致的提示规则：
 
-- **打灯**：黄闪
-- **盲点**：红闪
-- **打灯 + 盲点**：红快闪
+- **打灯**：对应侧绘制**黄色渐变带**（按闪烁节奏闪烁）
+- **盲点**：对应侧绘制**红色盲点墙**（覆盖相邻车道，红色渐变，常亮；对齐 FrogPilot 的表现）
+- **打灯 + 盲点**：仍以**盲点墙优先**（不再叠加黄色渐变带，避免画面过于复杂）
 
 实现位置：
 
 - `selfdrive/ui/onroad/augmented_road_view.py`
   - `_update_dp_indicator_side_state()`：颜色/闪烁逻辑
-  - `_draw_hud_enhancements()`：在画面左右绘制红/黄的半透明**渐变带**“风险区域”（随闪烁同步）
+  - `_draw_hud_enhancements()`：按 blinker/blindspot 状态选择绘制“黄色渐变带”或“红色盲点墙”
+  - `_draw_hud_fp_blindspot_wall()`：FrogPilot 风格盲点墙（红色渐变填充相邻车道）
+  - `_fp_get_adjacent_lane_polygon()`：用 `modelV2.laneLines/roadEdges` 合成相邻车道多边形（本仓库标准模型只有 4 条 laneLines，因此用左右两条边界线的**几何中线**近似 FrogPilot 的 `laneLines[4/5]` 相邻车道中心线）
+
+### 2.1.1 盲点墙（对齐 FrogPilot 的实现细节）
+
+**FrogPilot 参考实现**
+
+- 盲点墙绘制：`frogpilot/ui/qt/onroad/frogpilot_annotated_camera.cc` → `paintBlindSpotPath()`
+  - 使用 `track_adjacent_vertices[0/1]` 直接填充多边形
+  - 颜色：红色渐变（底部 α=0.6 → 中部 α=0.4 → 顶部 α=0.2）
+- `track_adjacent_vertices` 生成：`selfdrive/ui/ui.cc` → `update_line_data(...)`
+  - 左：`update_line_data(..., lane_lines[4], lane_width_left/2, ..., &track_adjacent_vertices[0], max_idx, allow_invert=false)`
+  - 右：`update_line_data(..., lane_lines[5], lane_width_right/2, ..., &track_adjacent_vertices[1], max_idx, allow_invert=false)`
+  - 绘制长度：`MIN_DRAW_DISTANCE=10m` ~ `MAX_DRAW_DISTANCE=100m`，并且会按 `radarState.leadOne.dRel` 提前缩短（与主轨迹一致）
+
+**本仓库标准 UI 的对齐方式**
+
+- 由于本仓库 `modelV2.laneLines` 只有 4 条（0/1/2/3），没有 FrogPilot 的 `laneLines[4/5]` “相邻车道中心线”，因此采用：
+  - 左侧相邻车道中心线 ≈ `laneLines[0]` 与 `laneLines[1]` 的几何中线
+  - 右侧相邻车道中心线 ≈ `laneLines[3]` 与 `laneLines[2]` 的几何中线
+- 相邻车道宽度：按 FrogPilot 同款 `calculate_lane_width()` 思路（并做“roadEdge 更近则置 0”门控）
+- 多边形生成：复用 `selfdrive/ui/onroad/model_renderer.py` 的投影/裁剪逻辑 `_map_line_to_polygon(..., y_off=lane_width/2, allow_invert=False)`
+- 绘制长度：同样使用 10~100m + leadOne 缩短，确保“墙的长度/跟随前车缩短”与 FrogPilot 一致
 
 ### 2.2 车道线更稳、更清晰（粗细稳定、主车道更突出）
 
@@ -110,6 +133,40 @@
 实现位置：
 
 - `selfdrive/ui/onroad/augmented_road_view.py` → `_draw_border()`（边框颜色动态更新）
+
+### 2.5 弯道限速提示（1:1 复刻 FrogPilot 的曲线提示控件）
+
+> 说明：这是“弯道限速（`dp_lincoln_curve_speed`）”的 HUD 可视化提示，**不依赖** `dp_lincoln_hud_enhanced` 开关（即：就算不启用 HUD 显示增强，只要弯道限速在工作，这个提示也会出现）。
+
+**显示内容**
+- 弯道图标（根据弯道方向左右镜像）
+- 弯道目标速度（`km/h`/`mph`）
+
+**显示条件（与 FrogPilot 一致：只在“正在控速”时出现）**
+- `carParams.brand == "ford"`
+- 已设定巡航速度（左上角 `MAX` 有效数值）
+- `dp_lincoln_curve_speed == 1`
+- 预测弯道目标速度 `< 当前设定巡航速度`
+
+**数据来源 / 计算**
+- 使用 `modelV2.position.x / modelV2.velocity.x / modelV2.orientationRate.z` 计算前方窗口内曲率峰值并平滑
+- 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.0 m/s²）
+- 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
+
+**资源与代码位置**
+- 图标 PNG：`selfdrive/assets/icons/curve_speed.png`
+- 计算与绘制：`selfdrive/ui/onroad/hud_renderer.py`
+  - `_update_curve_speed_widget()`：生成目标速度文本 + 镜像方向
+  - `_draw_curve_speed_control()`：绘制图标与蓝色速度条
+
+**HUD 位置（1:1 对齐 FrogPilot 的相对布局）**
+- 参考 FrogPilot：`curveSpeedRect.x = setSpeedRect.right() + UI_BORDER_SIZE`
+  - FrogPilot 参考文件：`frogpilot/ui/qt/onroad/frogpilot_annotated_camera.cc`（`paintCurveSpeedControl`）
+  - FrogPilot 图标资源：`frogpilot/assets/other_images/curve_speed.png`
+- 本仓库实现：
+  - 图标左上角：`x = set_speed_rect.x + set_speed_rect.width + UI_CONFIG.border_size`，`y = set_speed_rect.y`
+  - 容器尺寸：`widget_size = UI_CONFIG.button_size * 1.25`
+  - 蓝色速度条：`y + widget_size + 10`，高度 `100`
 
 ## 3. 重要说明
 
