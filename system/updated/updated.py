@@ -356,28 +356,34 @@ class Updater:
     output = run(["git", "ls-remote", "--heads"], OVERLAY_MERGED)
 
     self.branches = defaultdict(lambda: None)
+    cur_branch = self.get_branch(OVERLAY_MERGED)
+    target_branch = self.target_branch
+    always_include = {cur_branch, target_branch}
     for line in output.split('\n'):
       ls_remotes_re = r'(?P<commit_sha>\b[0-9a-f]{5,40}\b)(\s+)(refs\/heads\/)(?P<branch_name>.*$)'
       x = re.fullmatch(ls_remotes_re, line.strip())
-      # if x is not None and x.group('branch_name') not in excluded_branches:
-      #   self.branches[x.group('branch_name')] = x.group('commit_sha')
+      if x is None:
+        continue
 
-      # dp logic
-      if x is not None:
-        name = x.group('branch_name')
+      name = x.group('branch_name')
+      commit_sha = x.group('commit_sha')
 
-        # Check for version X.Y.Z at the start (ignores trailing suffixes like -pre-build)
-        m = re.match(r'^(\d+)\.(\d+)\.(\d+)', name)
+      # Always include current and target branch so update checks don't break on custom branch names.
+      if name in always_include:
+        self.branches[name] = commit_sha
+        continue
 
-        # Logic:
-        # 1. Allow exactly 'pre-build'
-        # 2. OR Allow if it parses as a version AND that version is >= 0.9.8
-        if name == 'pre-build' or (m and tuple(map(int, m.groups())) >= (0, 9, 8)):
-          self.branches[name] = x.group('commit_sha')
+      if name in excluded_branches:
+        continue
 
-    cur_branch = self.get_branch(OVERLAY_MERGED)
+      # dp logic: show only versioned branches (>= 0.9.8) and pre-build in the UI selector.
+      # This ignores trailing suffixes like "-pre-build" as long as the branch starts with X.Y.Z.
+      version_match = re.match(r'^(\d+)\.(\d+)\.(\d+)', name)
+      if name == 'pre-build' or (version_match and tuple(map(int, version_match.groups())) >= (0, 9, 8)):
+        self.branches[name] = commit_sha
+
     cur_commit = self.get_commit_hash(OVERLAY_MERGED)
-    new_branch = self.target_branch
+    new_branch = target_branch
     new_commit = self.branches[new_branch]
     if (cur_branch, cur_commit) != (new_branch, new_commit):
       cloudlog.info(f"update available, {cur_branch} ({str(cur_commit)[:7]}) -> {new_branch} ({str(new_commit)[:7]})")
