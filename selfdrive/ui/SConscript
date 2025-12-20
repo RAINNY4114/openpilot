@@ -7,6 +7,10 @@ Import('env', 'arch', 'common')
 # build the fonts
 generator = File("#selfdrive/assets/fonts/process.py")
 source_files = Glob("#selfdrive/assets/fonts/*.ttf") + Glob("#selfdrive/assets/fonts/*.otf")
+# Font atlas contents depend on translations (process.py reads languages.json + .po files)
+translation_sources = [
+  File("#selfdrive/ui/translations/languages.json"),
+] + Glob("#selfdrive/ui/translations/app_*.po")
 output_files = [
   (f.abspath.split('.')[0] + ".fnt", f.abspath.split('.')[0] + ".png")
   for f in source_files
@@ -14,7 +18,7 @@ output_files = [
 ]
 env.Command(
   target=output_files,
-  source=[generator, source_files],
+  source=[generator] + source_files + translation_sources,
   action=f"python3 {generator}",
 )
 
