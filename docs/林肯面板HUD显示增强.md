@@ -168,6 +168,30 @@
   - 容器尺寸：`widget_size = UI_CONFIG.button_size * 1.25`
   - 蓝色速度条：`y + widget_size + 10`，高度 `100`
 
+### 2.6 HUD 底部性能条（道路名称/逆地理）
+
+> 说明：这是一条**独立开关**的 HUD 叠加（`dp_lincoln_perf_info_enabled`），用于在底部展示运行状态与“道路信息”。
+
+**显示内容（从左到右）**
+- `Curvature`：曲率/方向盘角/方向盘扭矩
+- `Direction`：方向（N/NE/E/…）
+- `Road`：优先显示 `RoadName`（mapd 离线 OSM 匹配/逆地理结果），否则回退显示 `lat,lon`（保留 5 位小数）；完全无效则显示 `--`
+- `Control`：自动/人工接管
+- `Memory`、`CPU Temp`
+
+**布局/样式（用于 1:1 复刻）**
+- 字号：`PERF_FONT_SIZE = 32`
+- 内边距：`PERF_PADDING = 12`
+- 底部留白：`PERF_MARGIN_BOTTOM = UI_BORDER_SIZE // 2`（当前等于 `15px`）
+- 字段间距：`PERF_ITEM_GAP = 140`（超宽时会自动收缩）
+- 背景色：`PERF_BG_COLOR = rl.Color(0, 0, 0, 120)`（半透明黑，更浅）
+
+**关键代码**
+- 绘制：`selfdrive/ui/onroad/augmented_road_view.py` → `_draw_performance_info()` / `_get_road_location_text()`
+- 进程启动条件：`system/manager/process_config.py` → `mapd(...)`
+  - 下载离线地图进行中：始终运行
+  - 上路：开启 `dp_lincoln_osm_realtime_cruise` 或开启性能条（`dp_lincoln_perf_info_enabled`）时运行
+
 ## 3. 重要说明
 
 - 本功能只影响**标准 UI（MainLayout / `selfdrive/ui/onroad/*`）** 的绘制；如需同步到 `mici` UI，需要单独实现。

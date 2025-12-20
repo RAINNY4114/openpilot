@@ -71,14 +71,16 @@ def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
 def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Run mapd when:
   # - user requested an offline maps download, or
-  # - onroad realtime cruise mode is enabled
+  # - onroad realtime cruise mode is enabled, or
+  # - Lincoln performance overlay is enabled (HUD needs RoadName)
   try:
     params_memory = Params("/dev/shm/params")
     if params_memory.get("OSMDownloadLocations"):
       return True
   except Exception:
     pass
-  return started and params.get_bool("dp_lincoln_osm_realtime_cruise")
+  return started and (params.get_bool("dp_lincoln_osm_realtime_cruise") or
+                      params.get_bool("dp_lincoln_perf_info_enabled"))
 
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
