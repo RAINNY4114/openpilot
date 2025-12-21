@@ -1,4 +1,6 @@
 import math
+from dataclasses import dataclass
+from importlib.resources import as_file
 import os
 import shutil
 import threading
@@ -14,7 +16,7 @@ from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import FONT_DIR, FONT_SCALE, font_fallback, gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
@@ -62,6 +64,12 @@ PERF_ITEM_GAP = 140
 PERF_BG_COLOR = rl.Color(0, 0, 0, 120)
 
 
+@dataclass
+class _DynamicFontCacheEntry:
+  font: rl.Font
+  last_used_t: float
+
+
 class AugmentedRoadView(CameraView):
   def __init__(self, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD):
     super().__init__("camerad", stream_type)
@@ -104,6 +112,7 @@ class AugmentedRoadView(CameraView):
     self._road_loc_cache_t = 0.0
     self._road_name_last = ""
     self._road_name_last_t = 0.0
+    self._road_font_cache: dict[tuple[int, ...], _DynamicFontCacheEntry] = {}
 
     # Lincoln HUD enhancements
     self._hud_brake_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
@@ -606,7 +615,20 @@ class AugmentedRoadView(CameraView):
       f"{tr('CPU Temp')} {cpu_temp}",
     ]
 
-    measurements = [measure_text_cached(self._perf_font, text, PERF_FONT_SIZE) for text in items]
+    road_item_idx = 2
+    road_item_font: rl.Font | None = None
+    road_item_text = items[road_item_idx]
+    if road_loc_text not in ("", "--"):
+      base_font = font_fallback(self._perf_font)
+      if self._font_has_missing_glyphs(base_font, road_item_text):
+        road_item_font = self._get_dynamic_unifont_font(road_item_text)
+
+    measurements: list[rl.Vector2] = []
+    for idx, text in enumerate(items):
+      if idx == road_item_idx and road_item_font is not None:
+        measurements.append(self._measure_text_ex_no_fallback(road_item_font, text, PERF_FONT_SIZE))
+      else:
+        measurements.append(measure_text_cached(self._perf_font, text, PERF_FONT_SIZE))
     total_text_width = sum(size.x for size in measurements)
     gap_count = max(0, len(items) - 1)
     gap = float(PERF_ITEM_GAP if gap_count else 0)
@@ -633,9 +655,96 @@ class AugmentedRoadView(CameraView):
 
     cursor_x = bar_x + PERF_PADDING
     text_y = bar_y + PERF_PADDING
-    for text, measurement in zip(items, measurements):
-      rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
+    for idx, (text, measurement) in enumerate(zip(items, measurements)):
+      if idx == road_item_idx and road_item_font is not None:
+        self._draw_text_ex_no_fallback(road_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
+      else:
+        rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       cursor_x += measurement.x + gap
+
+  @staticmethod
+  def _measure_text_ex_no_fallback(font: rl.Font, text: str, font_size: int, spacing: float = 0) -> rl.Vector2:
+    try:
+      return rl.measure_text_ex(font, text, font_size * FONT_SCALE, spacing)  # noqa: TID251
+    except Exception:
+      return rl.Vector2(0, 0)
+
+  @staticmethod
+  def _draw_text_ex_no_fallback(font: rl.Font, text: str, position: rl.Vector2, font_size: int, spacing: float, tint: rl.Color) -> None:
+    # application.py patches rl.draw_text_ex to always apply font_fallback().
+    # Use the original function so we can explicitly draw with a dynamic font.
+    if hasattr(rl, "_orig_draw_text_ex"):
+      rl._orig_draw_text_ex(font, text, position, font_size * FONT_SCALE, spacing, tint)
+    else:
+      rl.draw_text_ex(font, text, position, font_size, spacing, tint)
+
+  @staticmethod
+  def _font_has_missing_glyphs(font: rl.Font, text: str) -> bool:
+    try:
+      q = ord("?")
+      q_idx = rl.get_glyph_index(font, q)
+      for ch in text:
+        cp = ord(ch)
+        if cp == q:
+          continue
+        idx = rl.get_glyph_index(font, cp)
+        if idx != q_idx:
+          continue
+        gi = rl.get_glyph_info(font, cp)
+        if getattr(gi, "value", q) == q:
+          return True
+    except Exception:
+      return False
+    return False
+
+  def _get_dynamic_unifont_font(self, text: str) -> "rl.Font | None":
+    codepoints = tuple(sorted({ord(c) for c in text}))
+    if not codepoints:
+      return None
+
+    now = time.monotonic()
+    entry = self._road_font_cache.get(codepoints)
+    if entry is not None:
+      entry.last_used_t = now
+      return entry.font
+
+    try:
+      with as_file(FONT_DIR) as font_dir:
+        font_path = font_dir / "unifont.otf"
+        if not font_path.exists():
+          return None
+
+        cp_buffer = rl.ffi.new("int[]", list(codepoints))
+        cp_ptr = rl.ffi.cast("int *", cp_buffer)
+        # Match the atlas generation default (UNIFONT_SIZE=64) for good downscaled clarity.
+        font = rl.load_font_ex(font_path.as_posix(), 64, cp_ptr, len(codepoints))
+
+      if getattr(font, "glyphCount", 0) <= 0 or getattr(font, "texture", None) is None or font.texture.id == 0:
+        try:
+          rl.unload_font(font)
+        except Exception:
+          pass
+        return None
+
+      rl.set_texture_filter(font.texture, rl.TextureFilter.TEXTURE_FILTER_BILINEAR)
+    except Exception:
+      return None
+
+    self._road_font_cache[codepoints] = _DynamicFontCacheEntry(font=font, last_used_t=now)
+    self._prune_road_font_cache(max_entries=8)
+    return font
+
+  def _prune_road_font_cache(self, max_entries: int) -> None:
+    if len(self._road_font_cache) <= max_entries:
+      return
+
+    items = sorted(self._road_font_cache.items(), key=lambda kv: kv[1].last_used_t)
+    for key, entry in items[: max(0, len(items) - max_entries)]:
+      try:
+        rl.unload_font(entry.font)
+      except Exception:
+        pass
+      self._road_font_cache.pop(key, None)
 
   def _get_curvature_steer_torque(self) -> tuple[str, str, str]:
     curvature_text = "--"
