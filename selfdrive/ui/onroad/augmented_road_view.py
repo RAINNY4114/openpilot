@@ -102,6 +102,8 @@ class AugmentedRoadView(CameraView):
     self._params_memory = Params("/dev/shm/params")
     self._road_loc_cache = "--"
     self._road_loc_cache_t = 0.0
+    self._road_name_last = ""
+    self._road_name_last_t = 0.0
 
     # Lincoln HUD enhancements
     self._hud_brake_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
@@ -680,9 +682,18 @@ class AugmentedRoadView(CameraView):
       max_chars = 22
       if len(road_name) > max_chars:
         road_name = road_name[:max_chars - 1] + "…"
+      self._road_name_last = road_name
+      self._road_name_last_t = now
       self._road_loc_cache = road_name
       self._road_loc_cache_t = now
       return road_name
+
+    # mapd can briefly output an empty road name during GPS jitter or process restarts.
+    # Keep the last valid match for a short time to avoid flickering to raw coordinates.
+    if self._road_name_last and (now - self._road_name_last_t) < 10.0:
+      self._road_loc_cache = self._road_name_last
+      self._road_loc_cache_t = now
+      return self._road_loc_cache
 
     sm = ui_state.sm
     lat = None

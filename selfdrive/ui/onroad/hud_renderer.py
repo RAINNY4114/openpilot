@@ -80,7 +80,9 @@ class HudRenderer(Widget):
 
     self._torque_bar = TorqueBar()
 
-    self._curve_speed_icon: rl.Texture = gui_app.texture("icons/curve_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
+    # NOTE: Prefer explicit L/R assets instead of texture mirroring; some devices/drivers don't render negative src_rect reliably.
+    self._curve_speed_icon_l: rl.Texture = gui_app.texture("icons/curve_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
+    self._curve_speed_icon_r: rl.Texture = gui_app.texture("icons/curveR_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
     self._curve_speed_str: str = ""
     self._curve_speed_flip: bool = False
     self._curve_show: bool = False
@@ -361,14 +363,15 @@ class HudRenderer(Widget):
     x = self._set_speed_rect.x + self._set_speed_rect.width + UI_CONFIG.border_size
     y = self._set_speed_rect.y
 
-    src_rect = rl.Rectangle(0, 0, float(self._curve_speed_icon.width), float(self._curve_speed_icon.height))
-    if self._curve_speed_flip:
-      src_rect = rl.Rectangle(float(self._curve_speed_icon.width), 0, -float(self._curve_speed_icon.width), float(self._curve_speed_icon.height))
+    icon = self._curve_speed_icon_l
+    if self._curve_speed_flip and getattr(self._curve_speed_icon_r, "id", 0) != 0:
+      icon = self._curve_speed_icon_r
 
-    icon_x = x + (widget_size - self._curve_speed_icon.width) / 2
-    icon_y = y + (widget_size - self._curve_speed_icon.height) / 2
-    dest_rect = rl.Rectangle(icon_x, icon_y, float(self._curve_speed_icon.width), float(self._curve_speed_icon.height))
-    rl.draw_texture_pro(self._curve_speed_icon, src_rect, dest_rect, rl.Vector2(0, 0), 0.0, COLORS.white)
+    src_rect = rl.Rectangle(0, 0, float(icon.width), float(icon.height))
+    icon_x = x + (widget_size - icon.width) / 2
+    icon_y = y + (widget_size - icon.height) / 2
+    dest_rect = rl.Rectangle(icon_x, icon_y, float(icon.width), float(icon.height))
+    rl.draw_texture_pro(icon, src_rect, dest_rect, rl.Vector2(0, 0), 0.0, COLORS.white)
 
     csc_rect = rl.Rectangle(x, y + widget_size + 10, float(widget_size), 100.0)
     rl.draw_rectangle_rounded(csc_rect, 0.35, 10, COLORS.blue_translucent)

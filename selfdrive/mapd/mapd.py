@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import math
 import os
 import socket
 import stat
@@ -167,21 +168,66 @@ def _ensure_mapd_binary(desired_version: str | None) -> bool:
   return False
 
 
+def _extract_gps_payload(sm: messaging.SubMaster) -> dict[str, float] | None:
+  for service in ("gpsLocationExternal", "gpsLocation"):
+    try:
+      if not getattr(sm, "alive", {}).get(service, False):
+        continue
+      gps = sm[service]
+      if getattr(gps, "hasFix", True) is False:
+        continue
+
+      lat_v = getattr(gps, "latitude", None)
+      lon_v = getattr(gps, "longitude", None)
+      if lat_v is None or lon_v is None:
+        continue
+
+      lat = float(lat_v)
+      lon = float(lon_v)
+      if not (math.isfinite(lat) and math.isfinite(lon)):
+        continue
+
+      bearing = None
+      try:
+        b = float(getattr(gps, "bearingDeg", float("nan")))
+        if math.isfinite(b):
+          bearing = b
+      except Exception:
+        pass
+
+      # If bearingDeg is unavailable/unstable, fall back to velocity direction.
+      if bearing is None:
+        try:
+          v_n = float(getattr(gps, "vN", float("nan")))
+          v_e = float(getattr(gps, "vE", float("nan")))
+          if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
+            bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+        except Exception:
+          pass
+
+      if bearing is None:
+        bearing = 0.0
+
+      return {
+        "latitude": lat,
+        "longitude": lon,
+        "bearing": bearing,
+      }
+    except Exception:
+      continue
+  return None
+
+
 def _gps_position_writer_thread(exit_event: threading.Event) -> None:
   params_memory = Params(PARAMS_MEMORY_PATH)
-  sm = messaging.SubMaster(["gpsLocationExternal"])
+  sm = messaging.SubMaster(["gpsLocationExternal", "gpsLocation"])
 
   rk = Ratekeeper(2.0, print_delay_threshold=None)  # 2 Hz is enough for mapd
   while not exit_event.is_set():
     try:
       sm.update(0)
-      gps = sm["gpsLocationExternal"]
-      if getattr(gps, "hasFix", False):
-        payload = {
-          "latitude": float(gps.latitude),
-          "longitude": float(gps.longitude),
-          "bearing": float(gps.bearingDeg),
-        }
+      payload = _extract_gps_payload(sm)
+      if payload is not None:
         params_memory.put("LastGPSPosition", json.dumps(payload, separators=(",", ":")))
     except Exception:
       cloudlog.exception("mapd: failed updating LastGPSPosition")

@@ -154,7 +154,7 @@
 - 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
 
 **资源与代码位置**
-- 图标 PNG：`selfdrive/assets/icons/curve_speed.png`
+- 图标 PNG：左弯 `selfdrive/assets/icons/curve_speed.png`、右弯 `selfdrive/assets/icons/curveR_speed.png`（避免依赖纹理镜像）
 - 计算与绘制：`selfdrive/ui/onroad/hud_renderer.py`
   - `_update_curve_speed_widget()`：生成目标速度文本 + 镜像方向
   - `_draw_curve_speed_control()`：绘制图标与蓝色速度条
