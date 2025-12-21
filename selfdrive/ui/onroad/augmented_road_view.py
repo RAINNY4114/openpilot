@@ -606,7 +606,7 @@ class AugmentedRoadView(CameraView):
     mem_usage = stats.get("mem_usage", "N/A")
     cpu_temp = stats.get("cpu_temp", "N/A")
 
-    items = [
+    base_items = [
       f"{tr('Curvature')} {curvature_text}/{steering_text}/{torque_text}",
       f"{tr('Direction')} {direction_text}",
       f"{tr('Road')} {road_loc_text}",
@@ -616,28 +616,57 @@ class AugmentedRoadView(CameraView):
     ]
 
     road_item_idx = 2
-    road_item_font: rl.Font | None = None
-    road_item_text = items[road_item_idx]
-    if road_loc_text not in ("", "--"):
-      base_font = font_fallback(self._perf_font)
-      if self._font_has_missing_glyphs(base_font, road_item_text):
-        road_item_font = self._get_dynamic_unifont_font(road_item_text)
-
-    measurements: list[rl.Vector2] = []
-    for idx, text in enumerate(items):
-      if idx == road_item_idx and road_item_font is not None:
-        measurements.append(self._measure_text_ex_no_fallback(road_item_font, text, PERF_FONT_SIZE))
-      else:
-        measurements.append(measure_text_cached(self._perf_font, text, PERF_FONT_SIZE))
-    total_text_width = sum(size.x for size in measurements)
-    gap_count = max(0, len(items) - 1)
-    gap = float(PERF_ITEM_GAP if gap_count else 0)
-    desired_width = total_text_width + 2 * PERF_PADDING + gap * gap_count
     max_width = max(rect.width - 40, 0)
-    if gap_count > 0 and max_width > 0 and desired_width > max_width:
-      gap = max(20.0, (max_width - 2 * PERF_PADDING - total_text_width) / gap_count)
+
+    items = list(base_items)
+    road_label = f"{tr('Road')} "
+    road_value = road_loc_text if road_loc_text else "--"
+
+    road_item_font: rl.Font | None = None
+    measurements: list[rl.Vector2] = []
+    gap_count = max(0, len(items) - 1)
+    gap = 0.0
+    desired_width = 0.0
+
+    for _ in range(2):
+      items[road_item_idx] = f"{tr('Road')} {road_value}"
+
+      road_item_font = None
+      if road_value not in ("", "--"):
+        base_font = font_fallback(self._perf_font)
+        if self._font_has_missing_glyphs(base_font, items[road_item_idx]):
+          road_item_font = self._get_dynamic_unifont_font(items[road_item_idx])
+
+      measurements = []
+      for idx, text in enumerate(items):
+        if idx == road_item_idx and road_item_font is not None:
+          measurements.append(self._measure_text_ex_no_fallback(road_item_font, text, PERF_FONT_SIZE))
+        else:
+          measurements.append(measure_text_cached(self._perf_font, text, PERF_FONT_SIZE))
+
+      total_text_width = sum(size.x for size in measurements)
+      gap = float(PERF_ITEM_GAP if gap_count else 0.0)
+      if gap_count > 0 and max_width > 0:
+        gap = min(gap, max(0.0, (max_width - 2 * PERF_PADDING - total_text_width) / gap_count))
       desired_width = total_text_width + 2 * PERF_PADDING + gap * gap_count
-    bar_width = desired_width
+
+      if max_width <= 0 or desired_width <= max_width or road_value in ("", "--"):
+        break
+
+      width_without_road = total_text_width - measurements[road_item_idx].x
+      if road_item_font is not None:
+        label_width = self._measure_text_ex_no_fallback(road_item_font, road_label, PERF_FONT_SIZE).x
+        measure_value_width = lambda t: self._measure_text_ex_no_fallback(road_item_font, t, PERF_FONT_SIZE).x
+      else:
+        label_width = measure_text_cached(self._perf_font, road_label, PERF_FONT_SIZE).x
+        measure_value_width = lambda t: measure_text_cached(self._perf_font, t, PERF_FONT_SIZE).x
+
+      available_for_road_item = max_width - 2 * PERF_PADDING - gap * gap_count - width_without_road
+      available_for_value = available_for_road_item - label_width
+      shortened = self._ellipsize_text_to_width(road_value, available_for_value, measure_value_width)
+      road_value = shortened if shortened else "--"
+
+    bar_width = min(desired_width, max_width) if max_width > 0 else desired_width
     bar_height = PERF_FONT_SIZE + 2 * PERF_PADDING
 
     bar_x = rect.x + (rect.width - bar_width) / 2
@@ -661,6 +690,29 @@ class AugmentedRoadView(CameraView):
       else:
         rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       cursor_x += measurement.x + gap
+
+  @staticmethod
+  def _ellipsize_text_to_width(text: str, max_width: float, measure_width, ellipsis: str = "...") -> str:
+    if max_width <= 0:
+      return ""
+    if not text:
+      return text
+    if measure_width(text) <= max_width:
+      return text
+    if measure_width(ellipsis) > max_width:
+      return ""
+
+    lo, hi = 0, len(text)
+    best = ""
+    while lo <= hi:
+      mid = (lo + hi) // 2
+      candidate = text[:mid] + ellipsis
+      if measure_width(candidate) <= max_width:
+        best = candidate
+        lo = mid + 1
+      else:
+        hi = mid - 1
+    return best
 
   @staticmethod
   def _measure_text_ex_no_fallback(font: rl.Font, text: str, font_size: int, spacing: float = 0) -> rl.Vector2:
@@ -773,7 +825,7 @@ class AugmentedRoadView(CameraView):
     if now - self._road_loc_cache_t < 0.5:
       return self._road_loc_cache
 
-    # Prefer mapd-provided road name (OSM matched), fall back to GPS coordinates.
+    # Prefer mapd-provided road name (OSM matched); fall back to GPS coordinates.
     road_name = ""
     for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
       if params is None:
@@ -790,7 +842,7 @@ class AugmentedRoadView(CameraView):
     if road_name:
       max_chars = 22
       if len(road_name) > max_chars:
-        road_name = road_name[:max_chars - 1] + "…"
+        road_name = road_name[:max_chars - 3] + "..."
       self._road_name_last = road_name
       self._road_name_last_t = now
       self._road_loc_cache = road_name
@@ -798,13 +850,28 @@ class AugmentedRoadView(CameraView):
       return road_name
 
     # mapd can briefly output an empty road name during GPS jitter or process restarts.
-    # Keep the last valid match for a short time to avoid flickering to raw coordinates.
-    if self._road_name_last and (now - self._road_name_last_t) < 10.0:
+    # Keep the last valid match to avoid flickering to raw coordinates, especially when stopped.
+    sm = ui_state.sm
+    hold_s = 10.0
+    try:
+      if getattr(sm, "alive", {}).get("carState", False):
+        car_state = sm["carState"]
+        if getattr(car_state, "standstill", False):
+          hold_s = 3600.0
+        else:
+          v = getattr(car_state, "vEgo", None)
+          if v is not None:
+            v_ego = float(v)
+            if math.isfinite(v_ego) and v_ego < 1.0:
+              hold_s = 60.0
+    except Exception:
+      pass
+
+    if self._road_name_last and (now - self._road_name_last_t) < hold_s:
       self._road_loc_cache = self._road_name_last
       self._road_loc_cache_t = now
       return self._road_loc_cache
 
-    sm = ui_state.sm
     lat = None
     lon = None
     for service in ("gpsLocationExternal", "gpsLocation"):

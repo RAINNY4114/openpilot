@@ -139,8 +139,9 @@
 > 说明：这是“弯道限速（`dp_lincoln_curve_speed`）”的 HUD 可视化提示，**不依赖** `dp_lincoln_hud_enhanced` 开关（即：就算不启用 HUD 显示增强，只要弯道限速在工作，这个提示也会出现）。
 
 **显示内容**
-- 弯道图标（根据弯道方向左右镜像）
-- 弯道目标速度（`km/h`/`mph`）
+- 弯道图标（根据弯道方向选择左/右图标）
+- 上行：`前方弯道 xx m · 准备减速/减速中`
+- 下行：`目标 xx km/h/mph`
 
 **显示条件（与 FrogPilot 一致：只在“正在控速”时出现）**
 - `carParams.brand == "ford"`
@@ -151,13 +152,17 @@
 **数据来源 / 计算**
 - 使用 `modelV2.position.x / modelV2.velocity.x / modelV2.orientationRate.z` 计算前方窗口内曲率峰值并平滑
 - 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.0 m/s²）
+- 弯道距离：取前方窗口内**首次**曲率达到 `k_enter` 的 `position.x`（兜底：最大曲率点距离）
+- 减速状态：
+  - `减速中`：检测到实际减速度 `carState.aEgo < -0.30` 或制动指令 `carOutput.actuatorsOutput.brake >= 0.05`
+  - 否则为 `准备减速`
 - 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
 
 **资源与代码位置**
 - 图标 PNG：左弯 `selfdrive/assets/icons/curve_speed.png`、右弯 `selfdrive/assets/icons/curveR_speed.png`（避免依赖纹理镜像）
 - 计算与绘制：`selfdrive/ui/onroad/hud_renderer.py`
-  - `_update_curve_speed_widget()`：生成目标速度文本 + 镜像方向
-  - `_draw_curve_speed_control()`：绘制图标与蓝色速度条
+  - `_update_curve_speed_widget()`：生成目标速度/距离文本 + 方向
+  - `_draw_curve_speed_control()`：绘制图标与蓝色信息框（上：距离；下：目标速度）
 
 **HUD 位置（1:1 对齐 FrogPilot 的相对布局）**
 - 参考 FrogPilot：`curveSpeedRect.x = setSpeedRect.right() + UI_BORDER_SIZE`
@@ -166,7 +171,7 @@
 - 本仓库实现：
   - 图标左上角：`x = set_speed_rect.x + set_speed_rect.width + UI_CONFIG.border_size`，`y = set_speed_rect.y`
   - 容器尺寸：`widget_size = UI_CONFIG.button_size * 1.25`
-  - 蓝色速度条：`y + widget_size + 10`，高度 `100`
+  - 蓝色信息框：`y + widget_size + 10`，高度 `100`（两行文字：前方弯道距离 + 目标速度）
 
 ### 2.6 HUD 底部性能条（道路名称/逆地理）
 
@@ -175,7 +180,7 @@
 **显示内容（从左到右）**
 - `Curvature`：曲率/方向盘角/方向盘扭矩
 - `Direction`：方向（N/NE/E/…）
-- `Road`：优先显示 `RoadName`（mapd 离线 OSM 匹配/逆地理结果），否则回退显示 `lat,lon`（保留 5 位小数）；完全无效则显示 `--`
+- `Road`：优先显示 `RoadName`（mapd 离线 OSM 匹配/逆地理结果），否则回退显示 `lat,lon`（保留 5 位小数）；完全无效则显示 `--`（为避免跳变：行驶保留 10s、低速保留 60s、停车保留 1h）
 - `Control`：自动/人工接管
 - `Memory`、`CPU Temp`
 
@@ -183,7 +188,7 @@
 - 字号：`PERF_FONT_SIZE = 32`
 - 内边距：`PERF_PADDING = 12`
 - 底部留白：`PERF_MARGIN_BOTTOM = UI_BORDER_SIZE // 2`（当前等于 `15px`）
-- 字段间距：`PERF_ITEM_GAP = 140`（超宽时会自动收缩）
+- 字段间距：`PERF_ITEM_GAP = 140`（超宽时会自动收缩到 `0`；仍超宽会对 `Road` 字段做 `...` 省略，避免被 scissor 裁切）
 - 背景色：`PERF_BG_COLOR = rl.Color(0, 0, 0, 120)`（半透明黑，更浅）
 
 **关键代码**

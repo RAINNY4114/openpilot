@@ -84,6 +84,8 @@ class HudRenderer(Widget):
     self._curve_speed_icon_l: rl.Texture = gui_app.texture("icons/curve_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
     self._curve_speed_icon_r: rl.Texture = gui_app.texture("icons/curveR_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
     self._curve_speed_str: str = ""
+    self._curve_dist_str: str = ""
+    self._curve_state_str: str = ""
     self._curve_speed_flip: bool = False
     self._curve_show: bool = False
     self._curve_k_smooth: float = 0.0
@@ -101,6 +103,9 @@ class HudRenderer(Widget):
       self._curve_show = False
       self._curve_active = False
       self._curve_exit_timer = 0.0
+      self._curve_speed_str = ""
+      self._curve_dist_str = ""
+      self._curve_state_str = ""
       return
 
     controls_state = sm['controlsState']
@@ -241,6 +246,8 @@ class HudRenderer(Widget):
 
     self._curve_show = False
     self._curve_speed_str = ""
+    self._curve_dist_str = ""
+    self._curve_state_str = ""
 
     sm = ui_state.sm
     try:
@@ -293,6 +300,8 @@ class HudRenderer(Widget):
 
     k_max = 0.0
     k_signed_at_max = 0.0
+    dist_at_max = 0.0
+    dist_at_enter = None
     for pos, v_pred, turn_rate in zip(positions, v_preds, turn_rates):
       try:
         pos_f = float(pos)
@@ -309,9 +318,12 @@ class HudRenderer(Widget):
       k_signed = turn_rate_f / v_pred_f
       k = abs(k_signed)
       k = min(k, 0.02)
+      if dist_at_enter is None and k >= k_enter:
+        dist_at_enter = pos_f
       if k > k_max:
         k_max = k
         k_signed_at_max = k_signed
+        dist_at_max = pos_f
 
     if k_max < 1e-4:
       self._curve_active = False
@@ -351,8 +363,31 @@ class HudRenderer(Widget):
 
     display_speed = min(self.speed, v_limit_disp)
     speed_unit = tr("km/h") if ui_state.is_metric else tr("mph")
-    self._curve_speed_str = f"{round(display_speed)} {speed_unit}"
+    self._curve_speed_str = f"目标 {round(display_speed)} {speed_unit}"
     self._curve_speed_flip = k_signed_at_max >= 0.0
+
+    dist_m = float(dist_at_enter if dist_at_enter is not None else dist_at_max)
+    dist = dist_m
+    unit = "m"
+
+    decel_active = False
+    try:
+      a_ego = float(getattr(car_state, "aEgo", 0.0))
+      if math.isfinite(a_ego) and a_ego < -0.30:
+        decel_active = True
+    except Exception:
+      pass
+    if not decel_active:
+      try:
+        if getattr(sm, "valid", {}).get("carOutput", False):
+          brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
+          if math.isfinite(brake_cmd) and brake_cmd >= 0.05:
+            decel_active = True
+      except Exception:
+        pass
+
+    self._curve_state_str = "减速中" if decel_active else "准备减速"
+    self._curve_dist_str = f"前方弯道 {max(0, int(round(dist)))} {unit} · {self._curve_state_str}"
     self._curve_show = True
 
   def _draw_curve_speed_control(self) -> None:
@@ -377,7 +412,13 @@ class HudRenderer(Widget):
     rl.draw_rectangle_rounded(csc_rect, 0.35, 10, COLORS.blue_translucent)
     rl.draw_rectangle_rounded_lines_ex(csc_rect, 0.35, 10, 10, COLORS.blue)
 
-    text_size = 50
-    text_metrics = measure_text_cached(self._font_bold, self._curve_speed_str, text_size)
-    text_pos = rl.Vector2(csc_rect.x + 20, csc_rect.y + (csc_rect.height - text_metrics.y) / 2)
-    rl.draw_text_ex(self._font_bold, self._curve_speed_str, text_pos, text_size, 0, COLORS.white)
+    speed_text_size = 50
+    dist_text_size = 34
+    speed_metrics = measure_text_cached(self._font_bold, self._curve_speed_str, speed_text_size)
+    dist_metrics = measure_text_cached(self._font_medium, self._curve_dist_str, dist_text_size)
+    total_h = dist_metrics.y + 6 + speed_metrics.y
+    start_y = csc_rect.y + (csc_rect.height - total_h) / 2
+    dist_pos = rl.Vector2(csc_rect.x + 20, start_y)
+    speed_pos = rl.Vector2(csc_rect.x + 20, start_y + dist_metrics.y + 6)
+    rl.draw_text_ex(self._font_medium, self._curve_dist_str, dist_pos, dist_text_size, 0, COLORS.white)
+    rl.draw_text_ex(self._font_bold, self._curve_speed_str, speed_pos, speed_text_size, 0, COLORS.white)
