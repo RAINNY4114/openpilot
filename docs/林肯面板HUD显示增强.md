@@ -172,6 +172,7 @@
   - 图标左上角：`x = set_speed_rect.x + set_speed_rect.width + UI_CONFIG.border_size`，`y = set_speed_rect.y`
   - 容器尺寸：`widget_size = UI_CONFIG.button_size * 1.25`
   - 蓝色信息框：`y + widget_size + 10`，高度 `100`（两行文字：前方弯道距离 + 目标速度）
+    - 宽度：按文本测量自动扩展（最小 `widget_size * 2`），避免长文案溢出到蓝框外（如 `前方弯道 xx m · 准备减速`）
 
 ### 2.6 HUD 底部性能条（道路名称/逆地理）
 

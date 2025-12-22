@@ -272,7 +272,7 @@ class LongitudinalPlanner:
       throttle_prob = 1.0
     return x, v, a, j, throttle_prob
 
-  def _apply_lincoln_curve_speed(self, sm, accel_clip, log_enabled: bool):
+  def _apply_lincoln_curve_speed(self, sm, accel_clip, v_cruise: float, log_enabled: bool):
     """
     Ford/Lincoln 专用弯道减速（更稳健的前瞻 + 滞回）：
     - 取模型曲率在前方窗口内的最大值并平滑
@@ -287,11 +287,13 @@ class LongitudinalPlanner:
     if len(model.position.x) != ModelConstants.IDX_N or len(model.orientationRate.z) != ModelConstants.IDX_N:
       if log_enabled:
         self._log_curve(reason="model_invalid")
-      return accel_clip
+      self.curve_v_target = None
+      return accel_clip, v_cruise
     if v_ego < 1.0:
       if log_enabled:
         self._log_curve(reason="low_speed", v=v_ego)
-      return accel_clip
+      self.curve_v_target = None
+      return accel_clip, v_cruise
 
     # 取 MPC 时间轴上的预测值
     v_pred = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.velocity.x)
@@ -307,7 +309,8 @@ class LongitudinalPlanner:
     if not np.any(window_mask):
       if log_enabled:
         self._log_curve(reason="no_window_points")
-      return accel_clip
+      self.curve_v_target = None
+      return accel_clip, v_cruise
 
     k_window = curvatures[window_mask]
     pos_window = positions[window_mask]
@@ -328,7 +331,8 @@ class LongitudinalPlanner:
     if k_max < 1e-4 or critical_distance < 5.0:
       if log_enabled:
         self._log_curve(reason="k_too_small", k_max=k_max, dist=critical_distance, v=v_ego)
-      return accel_clip
+      self.curve_v_target = None
+      return accel_clip, v_cruise
 
     # 平滑曲率，进入/退出滞回，减弱抖动
     alpha = 0.6
@@ -356,17 +360,23 @@ class LongitudinalPlanner:
     if not self.curve_active:
       if log_enabled:
         self._log_curve(reason="below_enter", k=k_max, k_smooth=self.curve_k_smooth, v=v_ego)
-      return accel_clip
+      self.curve_v_target = None
+      return accel_clip, v_cruise
 
     # 目标侧向加速度上限（舒适），带安全系数
     a_lat_limit = cfg["a_lat"]
     v_limit = math.sqrt(a_lat_limit / max(self.curve_k_smooth, 1e-4))
 
-    # 已低于限速则不动作
-    if v_ego <= v_limit * 1.05:
+    # 只有当弯道目标速度会限制用户的巡航设定时才介入（与 HUD 图标条件一致）。
+    if v_cruise <= 0.1 or v_limit >= v_cruise - 1e-3:
       if log_enabled:
-        self._log_curve(reason="under_limit", v=v_ego, v_limit=v_limit, k=self.curve_k_smooth)
-      return accel_clip
+        self._log_curve(reason="not_limiting_v_cruise", v=v_ego, v_limit=v_limit, v_cruise=v_cruise, k=self.curve_k_smooth)
+      self.curve_v_target = None
+      return accel_clip, v_cruise
+
+    # 初始化一个“弯道期间的 v_cruise 上限”，确保图标出现时立即开始缓慢减速
+    if self.curve_v_target is None or not math.isfinite(self.curve_v_target):
+      self.curve_v_target = min(v_cruise, max(v_limit, v_ego))
 
     # 选取触发距离：优先首个超过阈值的点，否则用最大值位置；附加累积弯度提前触发
     trigger_distance = critical_distance
@@ -396,24 +406,24 @@ class LongitudinalPlanner:
     d_use = max(trigger_distance, v_ego * 1.5, 1.0)
 
     # 等效减速度：a = (v_f^2 - v_i^2) / (2*d_use)
-    required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
-    # 高速允许更大预刹（与配置取最保守值）
+    required_decel = 0.0
     decel_cap = cfg["decel_max"]
-    if v_ego > 25.0:
-      decel_cap = min(decel_cap, -3.5)
-    if v_ego > 33.0:
-      decel_cap = min(decel_cap, -4.0)
-    required_decel = max(required_decel, decel_cap)
+    if v_ego > v_limit + 1e-3:
+      required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
+      # 高速允许更大预刹（与配置取最保守值）
+      if v_ego > 25.0:
+        decel_cap = min(decel_cap, -3.5)
+      if v_ego > 33.0:
+        decel_cap = min(decel_cap, -4.0)
+      required_decel = max(required_decel, decel_cap)
 
-    # 收紧最大加速度（上限），促使 MPC 提前减速
-    accel_clip[1] = min(accel_clip[1], required_decel)
-    # 同步写入 MPC 约束，保证在关键距离前的时间步均受限
-    for i in range(len(T_IDXS_MPC)):
-      t = T_IDXS_MPC[i]
-      distance_at_t = v_ego * t + 0.5 * required_decel * t**2
-      if distance_at_t < critical_distance:
-        self.mpc.params[i, 1] = min(self.mpc.params[i, 1], required_decel)
-    mpc_a_max_min = float(np.min(self.mpc.params[:, 1]))
+      # 让 v_cruise 上限按 required_decel 逐步下降，图标出现即开始“慢慢减速”
+      self.curve_v_target = max(v_limit, self.curve_v_target + required_decel * self.dt)
+
+    # 应用弯道目标速度上限
+    v_cruise = min(v_cruise, float(self.curve_v_target))
+
+    mpc_a_max_min = float("nan")
 
     if log_enabled:
       curv_cmd = getattr(sm['carControl'].actuators, "curvature", 0.0) if sm['carControl'].actuators is not None else 0.0
@@ -485,7 +495,7 @@ class LongitudinalPlanner:
         "exit_h": cfg["exit_h"],
         "decel_setting": decel_cap,
       })
-    return accel_clip
+    return accel_clip, v_cruise
 
   def _log_curve(self, data: dict = None, reason: str = "", force: bool = False, **kwargs):
     now = time.monotonic()
@@ -635,17 +645,34 @@ class LongitudinalPlanner:
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
 
-    # Map-based turn speed target (priority over vision curve limit when enabled+available)
+    # Map-based turn speed target (priority over vision curve limit when it actively limits v_cruise)
     v_map_target = 0.0
     map_turn_limit_active = False
     map_data_available = False
     if lincoln_osm_realtime_cruise and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
-      gps = sm['gpsLocationExternal']
-      if getattr(gps, "hasFix", False):
+      lat_lon: tuple[float, float] | None = None
+      for service in ("gpsLocationExternal", "gpsLocation"):
+        if service not in sm.data:
+          continue
+        gps = sm[service]
+        if not getattr(gps, "hasFix", False):
+          continue
         try:
-          v_map_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, float(gps.latitude), float(gps.longitude))
+          lat = float(gps.latitude)
+          lon = float(gps.longitude)
+        except Exception:
+          continue
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+          continue
+        lat_lon = (lat, lon)
+        break
+
+      if lat_lon is not None:
+        try:
+          v_map_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1])
           map_data_available = len(self._map_target_velocities) > 0
-          map_turn_limit_active = v_map_target > 0.1
+          # "active" means map is actually tightening the cruise target (vs only having data).
+          map_turn_limit_active = v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3)
         except Exception:
           v_map_target = 0.0
           map_turn_limit_active = False
@@ -669,9 +696,11 @@ class LongitudinalPlanner:
     else:
       accel_clip = [ACCEL_MIN, ACCEL_MAX]
 
-    # If map data is available, prefer it and skip vision-based curve speed limit to avoid mixing the two.
-    if lincoln_curve_speed and not map_data_available:
-      accel_clip = self._apply_lincoln_curve_speed(sm, accel_clip, log_enabled=lincoln_curve_log)
+    # Map has priority only when it is actively limiting; otherwise allow vision curve limiting as a fallback.
+    if lincoln_curve_speed and not map_turn_limit_active:
+      accel_clip, v_cruise = self._apply_lincoln_curve_speed(sm, accel_clip, v_cruise, log_enabled=lincoln_curve_log)
+    else:
+      self.curve_v_target = None
 
     # 重要状态变化/告警即时记录（不受节流影响）
     if lincoln_curve_log:

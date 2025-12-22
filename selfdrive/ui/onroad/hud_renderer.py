@@ -398,6 +398,17 @@ class HudRenderer(Widget):
     x = self._set_speed_rect.x + self._set_speed_rect.width + UI_CONFIG.border_size
     y = self._set_speed_rect.y
 
+    speed_text_size = 50
+    dist_text_size = 34
+    speed_metrics = measure_text_cached(self._font_bold, self._curve_speed_str, speed_text_size)
+    dist_metrics = measure_text_cached(self._font_medium, self._curve_dist_str, dist_text_size)
+
+    padding_x = 20.0
+    # Keep a stable base width so the widget doesn't "jitter" as numbers update, but always
+    # grow if the rendered text would overflow the background.
+    min_width = float(widget_size) * 2.0
+    csc_width = max(min_width, float(max(speed_metrics.x, dist_metrics.x)) + 2 * padding_x)
+
     icon = self._curve_speed_icon_l
     if self._curve_speed_flip and getattr(self._curve_speed_icon_r, "id", 0) != 0:
       icon = self._curve_speed_icon_r
@@ -408,17 +419,13 @@ class HudRenderer(Widget):
     dest_rect = rl.Rectangle(icon_x, icon_y, float(icon.width), float(icon.height))
     rl.draw_texture_pro(icon, src_rect, dest_rect, rl.Vector2(0, 0), 0.0, COLORS.white)
 
-    csc_rect = rl.Rectangle(x, y + widget_size + 10, float(widget_size), 100.0)
+    csc_rect = rl.Rectangle(x, y + widget_size + 10, csc_width, 100.0)
     rl.draw_rectangle_rounded(csc_rect, 0.35, 10, COLORS.blue_translucent)
     rl.draw_rectangle_rounded_lines_ex(csc_rect, 0.35, 10, 10, COLORS.blue)
 
-    speed_text_size = 50
-    dist_text_size = 34
-    speed_metrics = measure_text_cached(self._font_bold, self._curve_speed_str, speed_text_size)
-    dist_metrics = measure_text_cached(self._font_medium, self._curve_dist_str, dist_text_size)
     total_h = dist_metrics.y + 6 + speed_metrics.y
     start_y = csc_rect.y + (csc_rect.height - total_h) / 2
-    dist_pos = rl.Vector2(csc_rect.x + 20, start_y)
-    speed_pos = rl.Vector2(csc_rect.x + 20, start_y + dist_metrics.y + 6)
+    dist_pos = rl.Vector2(csc_rect.x + padding_x, start_y)
+    speed_pos = rl.Vector2(csc_rect.x + padding_x, start_y + dist_metrics.y + 6)
     rl.draw_text_ex(self._font_medium, self._curve_dist_str, dist_pos, dist_text_size, 0, COLORS.white)
     rl.draw_text_ex(self._font_bold, self._curve_speed_str, speed_pos, speed_text_size, 0, COLORS.white)
