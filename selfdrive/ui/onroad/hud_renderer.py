@@ -370,23 +370,31 @@ class HudRenderer(Widget):
     dist = dist_m
     unit = "m"
 
-    decel_active = False
+    ctrl_long_active = False
     try:
-      a_ego = float(getattr(car_state, "aEgo", 0.0))
-      if math.isfinite(a_ego) and a_ego < -0.30:
-        decel_active = True
+      if getattr(sm, "valid", {}).get("controlsState", False):
+        ctrl_long_active = bool(sm["controlsState"].longActive)
     except Exception:
-      pass
-    if not decel_active:
+      ctrl_long_active = False
+
+    if not ctrl_long_active:
+      # Don't claim we're slowing down when longitudinal control isn't active.
+      self._curve_state_str = "仅提示"
+    else:
+      decel_active = False
       try:
-        if getattr(sm, "valid", {}).get("carOutput", False):
-          brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
-          if math.isfinite(brake_cmd) and brake_cmd >= 0.05:
-            decel_active = True
+        a_ego = float(getattr(car_state, "aEgo", 0.0))
+        if math.isfinite(a_ego) and a_ego < -0.30:
+          decel_active = True
       except Exception:
         pass
+      if not decel_active:
+        try:
+          decel_active = bool(getattr(car_state, "brakePressed", False))
+        except Exception:
+          decel_active = False
 
-    self._curve_state_str = "减速中" if decel_active else "准备减速"
+      self._curve_state_str = "减速中" if decel_active else "准备减速"
     self._curve_dist_str = f"前方弯道 {max(0, int(round(dist)))} {unit} · {self._curve_state_str}"
     self._curve_show = True
 

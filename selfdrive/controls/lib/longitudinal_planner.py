@@ -92,6 +92,7 @@ class LongitudinalPlanner:
     self.curve_active = False
     self.curve_v_target = None
     self.curve_exit_timer = 0.0
+    self.curve_a_target = 0.0
     self.last_curve_log_t = 0.0
     self.curve_log_dir = "/data/media/0/lincoln_curve_logs"
     self._params = Params()
@@ -101,6 +102,15 @@ class LongitudinalPlanner:
 
     self._map_target_velocities_raw = None
     self._map_target_velocities = []
+    self._map_v_target = 0.0
+    self._map_a_target = 0.0
+    self._map_turn_limit_active = False
+    self._map_data_available = False
+    self._map_points = 0
+    self._map_min_dist_m = 0.0
+    self._map_lock_lat = 0.0
+    self._map_lock_lon = 0.0
+    self._map_lock_v = 0.0
 
   def _lincoln_curve_config(self):
     # 小环折加载，1s 内不重复读取参数
@@ -118,7 +128,7 @@ class LongitudinalPlanner:
     window_m = max(30, min(190, _safe_int("dp_lincoln_curve_window_m", 130)))
     k_enter_milli = max(2, min(20, _safe_int("dp_lincoln_curve_k_enter", 4)))  # 0.002~0.020
     k_enter = k_enter_milli * 1e-3
-    k_exit = k_enter * 0.6
+    k_exit = k_enter * 0.70
     # 固定舒适横向上限 1.0 m/s²（不再暴露给用户调节）
     a_lat = 1.0
     decel_cm = _safe_int("dp_lincoln_curve_decel", -320)                       # cm/s^2, negative
@@ -183,10 +193,10 @@ class LongitudinalPlanner:
   def _map_calculate_distance(t: float, target_jerk: float, a_ego: float, v_ego: float) -> float:
     return t * v_ego + (a_ego / 2) * (t ** 2) + (target_jerk / 6) * (t ** 3)
 
-  def _map_turn_target_speed(self, v_ego: float, a_ego: float, lat: float, lon: float) -> float:
+  def _map_turn_target_speed(self, v_ego: float, a_ego: float, lat: float, lon: float, v_cruise: float) -> tuple[float, float]:
     target_velocities = self._map_target_velocities_list()
     if not target_velocities:
-      return 0.0
+      return 0.0, 0.0
 
     min_dist = 1e9
     min_idx = 0
@@ -194,8 +204,8 @@ class LongitudinalPlanner:
 
     for i, target_velocity in enumerate(target_velocities):
       try:
-        tlat = float(target_velocity.get("latitude", 0.0))
-        tlon = float(target_velocity.get("longitude", 0.0))
+        tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
+        tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
       except Exception:
         distances.append(1e9)
         continue
@@ -206,16 +216,36 @@ class LongitudinalPlanner:
         min_dist = d
         min_idx = i
 
+    self._map_min_dist_m = float(min_dist) if math.isfinite(min_dist) else 0.0
+
     forward_points = target_velocities[min_idx:]
     forward_distances = distances[min_idx:]
 
-    valid_velocities: list[float] = []
+    # 1) In-curve hold: use the current segment's map speed cap so we don't accelerate inside long curves/S-curves
+    #    even when v_ego is already below the cap.
+    v_hold = 0.0
+    if min_dist < 30.0 and forward_points:
+      try:
+        tv_here = float(forward_points[0].get("velocity", forward_points[0].get("speed", 0.0)))
+      except Exception:
+        tv_here = 0.0
+      if tv_here > 70.0:  # likely km/h
+        tv_here *= CV.KPH_TO_MS
+      if math.isfinite(tv_here) and tv_here > 0.1 and tv_here < (v_cruise - 1e-3):
+        v_hold = float(tv_here)
+
+    # 2) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
+    valid_velocities: list[tuple[float, float, float, float]] = []  # (target_v, dist_m, lat, lon)
     for i, target_velocity in enumerate(forward_points):
       try:
-        tv = float(target_velocity.get("velocity", 0.0))
+        tv = float(target_velocity.get("velocity", target_velocity.get("speed", 0.0)))
       except Exception:
         continue
-      if tv <= 0.0 or tv > v_ego:
+      if tv > 70.0:  # likely km/h
+        tv *= CV.KPH_TO_MS
+      if not math.isfinite(tv) or tv <= 0.0:
+        continue
+      if tv >= v_ego - 1e-3:
         continue
 
       d = float(forward_distances[i])
@@ -245,12 +275,70 @@ class LongitudinalPlanner:
         max_d += self._map_calculate_distance(t, 0.0, _MAP_TARGET_ACCEL, min_accel_v)
 
       if d < max_d + tv * _MAP_TARGET_OFFSET_S:
-        valid_velocities.append(tv)
+        try:
+          tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
+          tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
+        except Exception:
+          tlat = 0.0
+          tlon = 0.0
+        valid_velocities.append((float(tv), d, float(tlat), float(tlon)))
 
-    if not valid_velocities:
-      return 0.0
+    # 3) Lock map target until passed (prevents jitter/early release due to GPS/path noise).
+    lock_d = None
+    if self._map_lock_v > 0.1 and forward_points:
+      for i, target_velocity in enumerate(forward_points):
+        try:
+          tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
+          tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
+          tv = float(target_velocity.get("velocity", target_velocity.get("speed", 0.0)))
+        except Exception:
+          continue
+        if tv > 70.0:
+          tv *= CV.KPH_TO_MS
+        if (abs(tlat - self._map_lock_lat) < 1e-6 and abs(tlon - self._map_lock_lon) < 1e-6 and
+            abs(float(tv) - float(self._map_lock_v)) < 1e-3):
+          lock_d = float(forward_distances[i])
+          break
 
-    return float(min(valid_velocities))
+    v_target = 0.0
+    d_target = 0.0
+    if valid_velocities:
+      cand_v, cand_d, cand_lat, cand_lon = min(valid_velocities, key=lambda x: x[0])
+      v_target = float(cand_v)
+      d_target = float(cand_d)
+      self._map_lock_v = float(cand_v)
+      self._map_lock_lat = float(cand_lat)
+      self._map_lock_lon = float(cand_lon)
+    elif lock_d is not None:
+      v_target = float(self._map_lock_v)
+      d_target = float(lock_d)
+    else:
+      # Clear stale lock
+      self._map_lock_v = 0.0
+      self._map_lock_lat = 0.0
+      self._map_lock_lon = 0.0
+
+    # If no decel target is active, fall back to "in-curve hold" cap.
+    if v_target <= 0.1 and v_hold > 0.1:
+      return float(v_hold), 0.0
+
+    if v_target <= 0.1:
+      return 0.0, 0.0
+
+    # Only request decel when we're above the target speed; otherwise it's a pure speed cap.
+    if v_target >= v_ego - 1e-3:
+      return float(v_target), 0.0
+
+    d_use = max(d_target - v_ego * _MAP_TARGET_OFFSET_S, 1.0)
+    required_decel = (v_target ** 2 - v_ego ** 2) / (2.0 * d_use)
+    required_decel = min(0.0, float(required_decel))
+
+    # Always request *some* decel once map says it's time to slow down.
+    # Cap by the same comfort limit as the vision curve controller.
+    decel_cap = self._lincoln_curve_config().get("decel_max", -3.2)
+    map_a_target = max(float(decel_cap), min(-0.30, required_decel))
+
+    return float(v_target), float(map_a_target)
 
   @staticmethod
   def parse_model(model_msg):
@@ -282,6 +370,7 @@ class LongitudinalPlanner:
     model = sm['modelV2']
     car_state = sm['carState']
     v_ego = car_state.vEgo
+    self.curve_a_target = 0.0
 
     # 基础检查
     if len(model.position.x) != ModelConstants.IDX_N or len(model.orientationRate.z) != ModelConstants.IDX_N:
@@ -361,6 +450,7 @@ class LongitudinalPlanner:
       if log_enabled:
         self._log_curve(reason="below_enter", k=k_max, k_smooth=self.curve_k_smooth, v=v_ego)
       self.curve_v_target = None
+      self.curve_a_target = 0.0
       return accel_clip, v_cruise
 
     # 目标侧向加速度上限（舒适），带安全系数
@@ -372,6 +462,7 @@ class LongitudinalPlanner:
       if log_enabled:
         self._log_curve(reason="not_limiting_v_cruise", v=v_ego, v_limit=v_limit, v_cruise=v_cruise, k=self.curve_k_smooth)
       self.curve_v_target = None
+      self.curve_a_target = 0.0
       return accel_clip, v_cruise
 
     # 初始化一个“弯道期间的 v_cruise 上限”，确保图标出现时立即开始缓慢减速
@@ -416,6 +507,7 @@ class LongitudinalPlanner:
       if v_ego > 33.0:
         decel_cap = min(decel_cap, -4.0)
       required_decel = max(required_decel, decel_cap)
+      self.curve_a_target = float(required_decel)
 
       # 让 v_cruise 上限按 required_decel 逐步下降，图标出现即开始“慢慢减速”
       self.curve_v_target = max(v_limit, self.curve_v_target + required_decel * self.dt)
@@ -494,6 +586,12 @@ class LongitudinalPlanner:
         "window_m": cfg["window_m"],
         "exit_h": cfg["exit_h"],
         "decel_setting": decel_cap,
+        "v_map_target": getattr(self, "_map_v_target", 0.0),
+        "map_a_target": getattr(self, "_map_a_target", 0.0),
+        "map_active": getattr(self, "_map_turn_limit_active", False),
+        "map_data": getattr(self, "_map_data_available", False),
+        "map_points": getattr(self, "_map_points", 0),
+        "map_min_dist": getattr(self, "_map_min_dist_m", 0.0),
       })
     return accel_clip, v_cruise
 
@@ -563,6 +661,12 @@ class LongitudinalPlanner:
         "cs_available",
         "cs_speed",
         "alerts",
+        "v_map_target(m/s)",
+        "map_a_target(m/s^2)",
+        "map_active",
+        "map_data",
+        "map_points",
+        "map_min_dist(m)",
       ]
       values = [
         ts,
@@ -616,6 +720,12 @@ class LongitudinalPlanner:
         str(data.get('cs_available', False)),
         f"{data.get('cs_speed', 0.0):.2f}",
         f"\"{data.get('alerts','')}\"",
+        f"{data.get('v_map_target', 0.0):.2f}",
+        f"{data.get('map_a_target', 0.0):.2f}",
+        str(data.get('map_active', False)),
+        str(data.get('map_data', False)),
+        str(data.get('map_points', 0)),
+        f"{data.get('map_min_dist', 0.0):.1f}",
       ]
       line = ",".join(values) + "\n"
       fname = os.path.join(self.curve_log_dir, time.strftime("curve_%Y%m%d.log", time.localtime()))
@@ -646,7 +756,15 @@ class LongitudinalPlanner:
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
 
     # Map-based turn speed target (priority over vision curve limit when it actively limits v_cruise)
+    self._map_v_target = 0.0
+    self._map_a_target = 0.0
+    self._map_turn_limit_active = False
+    self._map_data_available = False
+    self._map_points = 0
+    self._map_min_dist_m = 0.0
+
     v_map_target = 0.0
+    map_a_target = 0.0
     map_turn_limit_active = False
     map_data_available = False
     if lincoln_osm_realtime_cruise and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
@@ -669,14 +787,19 @@ class LongitudinalPlanner:
 
       if lat_lon is not None:
         try:
-          v_map_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1])
+          v_map_target, map_a_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1], v_cruise)
           map_data_available = len(self._map_target_velocities) > 0
-          # "active" means map is actually tightening the cruise target (vs only having data).
-          map_turn_limit_active = v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3)
         except Exception:
           v_map_target = 0.0
+          map_a_target = 0.0
           map_turn_limit_active = False
           map_data_available = False
+
+    self._map_v_target = float(v_map_target)
+    self._map_a_target = float(map_a_target)
+    self._map_data_available = bool(map_data_available)
+    self._map_points = int(len(self._map_target_velocities)) if map_data_available else 0
+    self._map_turn_limit_active = bool(v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3))
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
@@ -696,11 +819,11 @@ class LongitudinalPlanner:
     else:
       accel_clip = [ACCEL_MIN, ACCEL_MAX]
 
-    # Map has priority only when it is actively limiting; otherwise allow vision curve limiting as a fallback.
-    if lincoln_curve_speed and not map_turn_limit_active:
+    if lincoln_curve_speed:
       accel_clip, v_cruise = self._apply_lincoln_curve_speed(sm, accel_clip, v_cruise, log_enabled=lincoln_curve_log)
     else:
       self.curve_v_target = None
+      self.curve_a_target = 0.0
 
     # 重要状态变化/告警即时记录（不受节流影响）
     if lincoln_curve_log:
@@ -746,6 +869,10 @@ class LongitudinalPlanner:
       clipped_accel_coast_interp = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [accel_clip[1], clipped_accel_coast])
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
 
+    # "active" means map is actually tightening the cruise target (vs only having data).
+    map_turn_limit_active = v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3)
+    self._map_turn_limit_active = bool(map_turn_limit_active)
+
     if force_slow_decel:
       v_cruise = 0.0
 
@@ -788,6 +915,14 @@ class LongitudinalPlanner:
     else:
       output_a_target = min(output_a_target_mpc, output_a_target_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
+
+    # Ensure curve speed control actually requests decel when active.
+    # Limiting v_cruise alone can be too soft depending on planner mode and cruise clipping.
+    if lincoln_curve_speed and not long_control_off and self.curve_a_target < -1e-3:
+      output_a_target = min(output_a_target, float(self.curve_a_target))
+
+    if lincoln_osm_realtime_cruise and map_turn_limit_active and not long_control_off and map_a_target < -1e-3:
+      output_a_target = min(output_a_target, float(map_a_target))
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)

@@ -154,8 +154,9 @@
 - 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.0 m/s²）
 - 弯道距离：取前方窗口内**首次**曲率达到 `k_enter` 的 `position.x`（兜底：最大曲率点距离）
 - 减速状态：
-  - `减速中`：检测到实际减速度 `carState.aEgo < -0.30` 或制动指令 `carOutput.actuatorsOutput.brake >= 0.05`
-  - 否则为 `准备减速`
+  - 若纵向未接管（`controlsState.longActive == 0`），显示 `仅提示`（避免误导为“正在减速”）
+  - `减速中`：检测到实际减速度 `carState.aEgo < -0.30`，或人工踩刹车 `carState.brakePressed == 1`
+  - 否则显示 `准备减速`
 - 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
 
 **资源与代码位置**
