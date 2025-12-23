@@ -370,32 +370,23 @@ class HudRenderer(Widget):
     dist = dist_m
     unit = "m"
 
-    ctrl_long_active = False
+    source_str = ""
     try:
-      if getattr(sm, "valid", {}).get("controlsState", False):
-        ctrl_long_active = bool(sm["controlsState"].longActive)
+      if getattr(sm, "valid", {}).get("longitudinalPlan", False):
+        src_val = int(getattr(sm["longitudinalPlan"], "curveSpeedSource", 0))
+      else:
+        src_val = 0
     except Exception:
-      ctrl_long_active = False
+      src_val = 0
 
-    if not ctrl_long_active:
-      # Don't claim we're slowing down when longitudinal control isn't active.
-      self._curve_state_str = "仅提示"
-    else:
-      decel_active = False
-      try:
-        a_ego = float(getattr(car_state, "aEgo", 0.0))
-        if math.isfinite(a_ego) and a_ego < -0.30:
-          decel_active = True
-      except Exception:
-        pass
-      if not decel_active:
-        try:
-          decel_active = bool(getattr(car_state, "brakePressed", False))
-        except Exception:
-          decel_active = False
+    if src_val == 2:
+      source_str = "地图融合"
+    elif src_val == 1:
+      source_str = "视觉"
 
-      self._curve_state_str = "减速中" if decel_active else "准备减速"
-    self._curve_dist_str = f"前方弯道 {max(0, int(round(dist)))} {unit} · {self._curve_state_str}"
+    base = f"前方弯道 {max(0, int(round(dist)))} {unit}"
+    self._curve_state_str = source_str
+    self._curve_dist_str = f"{base} · {source_str}" if source_str else base
     self._curve_show = True
 
   def _draw_curve_speed_control(self) -> None:

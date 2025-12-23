@@ -1254,6 +1254,10 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   allowThrottle @38: Bool;
   allowBrake @39: Bool;
 
+  # Lincoln/Ford curve speed HUD (custom): which limiter is currently tightening vCruise.
+  # 0: none, 1: vision, 2: map
+  curveSpeedSource @40 :CurveSpeedSource;
+
 
   solverExecutionTime @35 :Float32;
 
@@ -1263,6 +1267,12 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
     lead1 @2;
     lead2 @3;
     e2e @4;
+  }
+
+  enum CurveSpeedSource {
+    none @0;
+    vision @1;
+    map @2;
   }
 
   # deprecated

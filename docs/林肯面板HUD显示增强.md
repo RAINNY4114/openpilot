@@ -140,10 +140,10 @@
 
 **显示内容**
 - 弯道图标（根据弯道方向选择左/右图标）
-- 上行：`前方弯道 xx m · 准备减速/减速中`
+- 上行：`前方弯道 xx m · 视觉/地图融合`（来源标记：当前“实际收紧巡航目标”的限速器）
 - 下行：`目标 xx km/h/mph`
 
-**显示条件（与 FrogPilot 一致：只在“正在控速”时出现）**
+**显示条件（与 FrogPilot 一致：只在“预测会限速”时出现）**
 - `carParams.brand == "ford"`
 - 已设定巡航速度（左上角 `MAX` 有效数值）
 - `dp_lincoln_curve_speed == 1`
@@ -153,10 +153,10 @@
 - 使用 `modelV2.position.x / modelV2.velocity.x / modelV2.orientationRate.z` 计算前方窗口内曲率峰值并平滑
 - 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.0 m/s²）
 - 弯道距离：取前方窗口内**首次**曲率达到 `k_enter` 的 `position.x`（兜底：最大曲率点距离）
-- 减速状态：
-  - 若纵向未接管（`controlsState.longActive == 0`），显示 `仅提示`（避免误导为“正在减速”）
-  - `减速中`：检测到实际减速度 `carState.aEgo < -0.30`，或人工踩刹车 `carState.brakePressed == 1`
-  - 否则显示 `准备减速`
+- 来源标记：来自 `longitudinalPlan.curveSpeedSource`
+  - `1=视觉`：视觉弯道限速正在收紧 `vCruise`
+  - `2=地图融合`：地图弯道限速正在收紧 `vCruise`（此时视觉提示仍在工作，但地图更保守，最终以地图为准）
+  - `0=无`：纵向未接管/无控速（上行只显示 `前方弯道 xx m`，不追加来源标记）
 - 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
 
 **资源与代码位置**
@@ -173,7 +173,7 @@
   - 图标左上角：`x = set_speed_rect.x + set_speed_rect.width + UI_CONFIG.border_size`，`y = set_speed_rect.y`
   - 容器尺寸：`widget_size = UI_CONFIG.button_size * 1.25`
   - 蓝色信息框：`y + widget_size + 10`，高度 `100`（两行文字：前方弯道距离 + 目标速度）
-    - 宽度：按文本测量自动扩展（最小 `widget_size * 2`），避免长文案溢出到蓝框外（如 `前方弯道 xx m · 准备减速`）
+    - 宽度：按文本测量自动扩展（最小 `widget_size * 2`），避免长文案溢出到蓝框外（如 `前方弯道 xx m · 地图`）
 
 ### 2.6 HUD 底部性能条（道路名称/逆地理）
 

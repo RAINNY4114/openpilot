@@ -111,6 +111,7 @@ class LongitudinalPlanner:
     self._map_lock_lat = 0.0
     self._map_lock_lon = 0.0
     self._map_lock_v = 0.0
+    self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
 
   def _lincoln_curve_config(self):
     # 小环折加载，1s 内不重复读取参数
@@ -879,6 +880,15 @@ class LongitudinalPlanner:
     if lincoln_osm_realtime_cruise and map_turn_limit_active and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
       v_cruise = min(v_cruise, v_map_target)
 
+    # HUD source label: only report a source when longitudinal control is actually active.
+    control_active = (not long_control_off) and bool(getattr(sm['selfdriveState'], "enabled", False))
+    if control_active and map_turn_limit_active:
+      self._curve_speed_source = 2  # map
+    elif control_active and self.curve_v_target is not None:
+      self._curve_speed_source = 1  # vision
+    else:
+      self._curve_speed_source = 0
+
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
 
@@ -951,5 +961,6 @@ class LongitudinalPlanner:
     longitudinalPlan.shouldStop = bool(self.output_should_stop)
     longitudinalPlan.allowBrake = True
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
+    longitudinalPlan.curveSpeedSource = int(getattr(self, "_curve_speed_source", 0))
 
     pm.send('longitudinalPlan', plan_send)
