@@ -156,7 +156,7 @@
 - 来源标记：来自 `longitudinalPlan.curveSpeedSource`
   - `1=视觉`：视觉弯道限速正在收紧 `vCruise`
   - `2=地图融合`：地图弯道限速正在收紧 `vCruise`（此时视觉提示仍在工作，但地图更保守，最终以地图为准）
-  - `0=无`：纵向未接管/无控速（上行只显示 `前方弯道 xx m`，不追加来源标记）
+  - `0=无`：当前未收紧 `vCruise`（上行只显示 `前方弯道 xx m`，不追加来源标记）
 - 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
 
 **资源与代码位置**

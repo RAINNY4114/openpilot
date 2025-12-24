@@ -372,10 +372,7 @@ class HudRenderer(Widget):
 
     source_str = ""
     try:
-      if getattr(sm, "valid", {}).get("longitudinalPlan", False):
-        src_val = int(getattr(sm["longitudinalPlan"], "curveSpeedSource", 0))
-      else:
-        src_val = 0
+      src_val = int(getattr(sm["longitudinalPlan"], "curveSpeedSource", 0))
     except Exception:
       src_val = 0
 

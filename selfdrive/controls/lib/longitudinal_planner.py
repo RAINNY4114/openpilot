@@ -880,11 +880,12 @@ class LongitudinalPlanner:
     if lincoln_osm_realtime_cruise and map_turn_limit_active and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
       v_cruise = min(v_cruise, v_map_target)
 
-    # HUD source label: only report a source when longitudinal control is actually active.
-    control_active = (not long_control_off) and bool(getattr(sm['selfdriveState'], "enabled", False))
-    if control_active and map_turn_limit_active:
+    # HUD source label: report which limiter is actively tightening the cruise target.
+    # NOTE: Don't gate on `long_control_off`/`longActive` since Ford often runs stock ACC; users still want to know
+    # whether the limiting comes from map or vision.
+    if map_turn_limit_active:
       self._curve_speed_source = 2  # map
-    elif control_active and self.curve_v_target is not None:
+    elif self.curve_v_target is not None:
       self._curve_speed_source = 1  # vision
     else:
       self._curve_speed_source = 0
