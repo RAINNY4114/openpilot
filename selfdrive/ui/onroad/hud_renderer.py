@@ -1,3 +1,4 @@
+from importlib.resources import as_file
 import math
 import pyray as rl
 import time
@@ -5,7 +6,7 @@ from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import FONT_DIR, FONT_SCALE, font_fallback, gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
@@ -61,6 +62,12 @@ FONT_SIZES = FontSizes()
 COLORS = Colors()
 
 
+@dataclass
+class _DynamicFontCacheEntry:
+  font: rl.Font
+  last_used_t: float
+
+
 class HudRenderer(Widget):
   def __init__(self):
     super().__init__()
@@ -86,12 +93,15 @@ class HudRenderer(Widget):
     self._curve_speed_str: str = ""
     self._curve_dist_str: str = ""
     self._curve_state_str: str = ""
+    self._curve_speed_font = None
+    self._curve_dist_font = None
     self._curve_speed_flip: bool = False
     self._curve_show: bool = False
     self._curve_k_smooth: float = 0.0
     self._curve_active: bool = False
     self._curve_exit_timer: float = 0.0
     self._curve_last_update_t: float = time.monotonic()
+    self._curve_font_cache: dict[tuple[int, ...], _DynamicFontCacheEntry] = {}
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -106,6 +116,8 @@ class HudRenderer(Widget):
       self._curve_speed_str = ""
       self._curve_dist_str = ""
       self._curve_state_str = ""
+      self._curve_speed_font = None
+      self._curve_dist_font = None
       return
 
     controls_state = sm['controlsState']
@@ -248,6 +260,8 @@ class HudRenderer(Widget):
     self._curve_speed_str = ""
     self._curve_dist_str = ""
     self._curve_state_str = ""
+    self._curve_speed_font = None
+    self._curve_dist_font = None
 
     sm = ui_state.sm
     try:
@@ -404,6 +418,21 @@ class HudRenderer(Widget):
     base = f"前方弯道 {max(0, int(round(dist)))} {unit}"
     self._curve_state_str = source_str
     self._curve_dist_str = f"{base} · {source_str}" if source_str else base
+
+    try:
+      base_font = font_fallback(self._font_medium)
+      if self._font_has_missing_glyphs(base_font, self._curve_dist_str):
+        self._curve_dist_font = self._get_dynamic_unifont_font(self._curve_dist_str)
+    except Exception:
+      self._curve_dist_font = None
+
+    try:
+      base_font = font_fallback(self._font_bold)
+      if self._font_has_missing_glyphs(base_font, self._curve_speed_str):
+        self._curve_speed_font = self._get_dynamic_unifont_font(self._curve_speed_str)
+    except Exception:
+      self._curve_speed_font = None
+
     self._curve_show = True
 
   def _draw_curve_speed_control(self) -> None:
@@ -416,8 +445,15 @@ class HudRenderer(Widget):
 
     speed_text_size = 50
     dist_text_size = 34
-    speed_metrics = measure_text_cached(self._font_bold, self._curve_speed_str, speed_text_size)
-    dist_metrics = measure_text_cached(self._font_medium, self._curve_dist_str, dist_text_size)
+    if self._curve_speed_font is not None:
+      speed_metrics = self._measure_text_ex_no_fallback(self._curve_speed_font, self._curve_speed_str, speed_text_size)
+    else:
+      speed_metrics = measure_text_cached(self._font_bold, self._curve_speed_str, speed_text_size)
+
+    if self._curve_dist_font is not None:
+      dist_metrics = self._measure_text_ex_no_fallback(self._curve_dist_font, self._curve_dist_str, dist_text_size)
+    else:
+      dist_metrics = measure_text_cached(self._font_medium, self._curve_dist_str, dist_text_size)
 
     padding_x = 20.0
     # Keep a stable base width so the widget doesn't "jitter" as numbers update, but always
@@ -443,5 +479,96 @@ class HudRenderer(Widget):
     start_y = csc_rect.y + (csc_rect.height - total_h) / 2
     dist_pos = rl.Vector2(csc_rect.x + padding_x, start_y)
     speed_pos = rl.Vector2(csc_rect.x + padding_x, start_y + dist_metrics.y + 6)
-    rl.draw_text_ex(self._font_medium, self._curve_dist_str, dist_pos, dist_text_size, 0, COLORS.white)
-    rl.draw_text_ex(self._font_bold, self._curve_speed_str, speed_pos, speed_text_size, 0, COLORS.white)
+    if self._curve_dist_font is not None:
+      self._draw_text_ex_no_fallback(self._curve_dist_font, self._curve_dist_str, dist_pos, dist_text_size, 0, COLORS.white)
+    else:
+      rl.draw_text_ex(self._font_medium, self._curve_dist_str, dist_pos, dist_text_size, 0, COLORS.white)
+
+    if self._curve_speed_font is not None:
+      self._draw_text_ex_no_fallback(self._curve_speed_font, self._curve_speed_str, speed_pos, speed_text_size, 0, COLORS.white)
+    else:
+      rl.draw_text_ex(self._font_bold, self._curve_speed_str, speed_pos, speed_text_size, 0, COLORS.white)
+
+  @staticmethod
+  def _measure_text_ex_no_fallback(font: rl.Font, text: str, font_size: int, spacing: float = 0) -> rl.Vector2:
+    try:
+      return rl.measure_text_ex(font, text, font_size * FONT_SCALE, spacing)  # noqa: TID251
+    except Exception:
+      return rl.Vector2(0, 0)
+
+  @staticmethod
+  def _draw_text_ex_no_fallback(font: rl.Font, text: str, position: rl.Vector2, font_size: int, spacing: float, tint: rl.Color) -> None:
+    # application.py patches rl.draw_text_ex to always apply font_fallback().
+    # Use the original function so we can explicitly draw with a dynamic font.
+    if hasattr(rl, "_orig_draw_text_ex"):
+      rl._orig_draw_text_ex(font, text, position, font_size * FONT_SCALE, spacing, tint)
+    else:
+      rl.draw_text_ex(font, text, position, font_size, spacing, tint)
+
+  @staticmethod
+  def _font_has_missing_glyphs(font: rl.Font, text: str) -> bool:
+    try:
+      q = ord("?")
+      q_idx = rl.get_glyph_index(font, q)
+      for ch in text:
+        cp = ord(ch)
+        if cp == q:
+          continue
+        idx = rl.get_glyph_index(font, cp)
+        if idx != q_idx:
+          continue
+        gi = rl.get_glyph_info(font, cp)
+        if getattr(gi, "value", q) == q:
+          return True
+    except Exception:
+      return False
+    return False
+
+  def _get_dynamic_unifont_font(self, text: str) -> "rl.Font | None":
+    codepoints = tuple(sorted({ord(c) for c in text}))
+    if not codepoints:
+      return None
+
+    now = time.monotonic()
+    entry = self._curve_font_cache.get(codepoints)
+    if entry is not None:
+      entry.last_used_t = now
+      return entry.font
+
+    try:
+      with as_file(FONT_DIR) as font_dir:
+        font_path = font_dir / "unifont.otf"
+        if not font_path.exists():
+          return None
+
+        cp_buffer = rl.ffi.new("int[]", list(codepoints))
+        cp_ptr = rl.ffi.cast("int *", cp_buffer)
+        # Match the atlas generation default (UNIFONT_SIZE=64) for good downscaled clarity.
+        font = rl.load_font_ex(font_path.as_posix(), 64, cp_ptr, len(codepoints))
+
+      if getattr(font, "glyphCount", 0) <= 0 or getattr(font, "texture", None) is None or font.texture.id == 0:
+        try:
+          rl.unload_font(font)
+        except Exception:
+          pass
+        return None
+
+      rl.set_texture_filter(font.texture, rl.TextureFilter.TEXTURE_FILTER_BILINEAR)
+    except Exception:
+      return None
+
+    self._curve_font_cache[codepoints] = _DynamicFontCacheEntry(font=font, last_used_t=now)
+    self._prune_curve_font_cache(max_entries=8)
+    return font
+
+  def _prune_curve_font_cache(self, max_entries: int) -> None:
+    if len(self._curve_font_cache) <= max_entries:
+      return
+
+    items = sorted(self._curve_font_cache.items(), key=lambda kv: kv[1].last_used_t)
+    for key, entry in items[: max(0, len(items) - max_entries)]:
+      try:
+        rl.unload_font(entry.font)
+      except Exception:
+        pass
+      self._curve_font_cache.pop(key, None)
