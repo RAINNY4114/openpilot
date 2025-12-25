@@ -375,7 +375,8 @@ class HudRenderer(Widget):
     if v_limit_disp >= self.set_speed:
       return
 
-    display_speed = min(self.speed, v_limit_disp)
+    # Show the curve target speed itself (not clamped to current speed), so "目标" is always the limit.
+    display_speed = v_limit_disp
     speed_unit = tr("km/h") if ui_state.is_metric else tr("mph")
     self._curve_speed_str = f"目标 {round(display_speed)} {speed_unit}"
     self._curve_speed_flip = k_signed_at_max >= 0.0
@@ -412,7 +413,9 @@ class HudRenderer(Widget):
 
     if src_val == 2:
       source_str = "地图融合"
-    elif src_val == 1:
+    else:
+      # The curve widget itself is vision-triggered. If the planner hasn't published a limiter source yet,
+      # default to "视觉" so the UI always shows a consistent label while the widget is visible.
       source_str = "视觉"
 
     base = f"前方弯道 {max(0, int(round(dist)))} {unit}"

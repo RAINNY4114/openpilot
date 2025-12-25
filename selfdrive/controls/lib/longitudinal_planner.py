@@ -38,6 +38,9 @@ _MAP_TO_RADIANS = math.pi / 180.0
 _MAP_TARGET_JERK = -0.6   # m/s^3
 _MAP_TARGET_ACCEL = -1.2  # m/s^2
 _MAP_TARGET_OFFSET_S = 1.0
+_MAP_PREVIEW_TIME_S = 10.0
+_MAP_PREVIEW_MIN_HORIZON_M = 80.0
+_MAP_PREVIEW_MAX_HORIZON_M = 400.0
 
 class DPFlags:
   ACM = 1
@@ -235,7 +238,12 @@ class LongitudinalPlanner:
       if math.isfinite(tv_here) and tv_here > 0.1 and tv_here < (v_cruise - 1e-3):
         v_hold = float(tv_here)
 
-    # 2) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
+    # 2) Preview cap: prevent accelerating above upcoming low map targets within a short lookahead window.
+    #    This helps keep speed stable through long curves/S-curves even when no braking is needed yet.
+    preview_horizon = max(_MAP_PREVIEW_MIN_HORIZON_M, min(_MAP_PREVIEW_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_TIME_S))
+    v_preview = 0.0
+
+    # 3) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
     valid_velocities: list[tuple[float, float, float, float]] = []  # (target_v, dist_m, lat, lon)
     for i, target_velocity in enumerate(forward_points):
       try:
@@ -246,10 +254,12 @@ class LongitudinalPlanner:
         tv *= CV.KPH_TO_MS
       if not math.isfinite(tv) or tv <= 0.0:
         continue
+      d = float(forward_distances[i])
+      if d < preview_horizon and tv < (v_cruise - 1e-3):
+        v_preview = float(tv) if v_preview <= 0.1 else float(min(v_preview, tv))
+
       if tv >= v_ego - 1e-3:
         continue
-
-      d = float(forward_distances[i])
 
       a_diff = (a_ego - _MAP_TARGET_ACCEL)
       accel_t = abs(a_diff / _MAP_TARGET_JERK) if abs(_MAP_TARGET_JERK) > 1e-6 else 0.0
@@ -284,7 +294,7 @@ class LongitudinalPlanner:
           tlon = 0.0
         valid_velocities.append((float(tv), d, float(tlat), float(tlon)))
 
-    # 3) Lock map target until passed (prevents jitter/early release due to GPS/path noise).
+    # 4) Lock map target until passed (prevents jitter/early release due to GPS/path noise).
     lock_d = None
     if self._map_lock_v > 0.1 and forward_points:
       for i, target_velocity in enumerate(forward_points):
@@ -322,6 +332,8 @@ class LongitudinalPlanner:
     # If no decel target is active, fall back to "in-curve hold" cap.
     if v_target <= 0.1 and v_hold > 0.1:
       return float(v_hold), 0.0
+    if v_target <= 0.1 and v_preview > 0.1:
+      return float(v_preview), 0.0
 
     if v_target <= 0.1:
       return 0.0, 0.0
