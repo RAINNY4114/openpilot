@@ -371,8 +371,28 @@ class HudRenderer(Widget):
     unit = "m"
 
     source_str = ""
+    src_val = 0
     try:
-      src_val = int(getattr(sm["longitudinalPlan"], "curveSpeedSource", 0))
+      src = getattr(sm["longitudinalPlan"], "curveSpeedSource", None)
+      raw = getattr(src, "raw", None)
+      if raw is not None:
+        src_val = int(raw)
+      else:
+        try:
+          src_val = int(src)  # may be an int or an int-like enum
+        except Exception:
+          src_name = ""
+          if isinstance(src, str):
+            src_name = src
+          else:
+            src_name = getattr(src, "name", "") or str(src)
+          src_name = src_name.strip().lower()
+          if src_name.endswith("map"):
+            src_val = 2
+          elif src_name.endswith("vision"):
+            src_val = 1
+          else:
+            src_val = 0
     except Exception:
       src_val = 0
 
