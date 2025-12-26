@@ -38,9 +38,16 @@ _MAP_TO_RADIANS = math.pi / 180.0
 _MAP_TARGET_JERK = -0.6   # m/s^3
 _MAP_TARGET_ACCEL = -1.2  # m/s^2
 _MAP_TARGET_OFFSET_S = 1.0
-_MAP_PREVIEW_TIME_S = 10.0
-_MAP_PREVIEW_MIN_HORIZON_M = 80.0
-_MAP_PREVIEW_MAX_HORIZON_M = 400.0
+# Preview speed cap lookahead:
+# - Only engage once a limiting segment is within the "base" horizon (avoid slowing too early).
+# - Once engaged, use an "extended" horizon to capture the minimum target across the whole upcoming curve/S-curve
+#   to reduce step-downs mid-curve as new points enter the base window.
+_MAP_PREVIEW_BASE_TIME_S = 10.0
+_MAP_PREVIEW_BASE_MIN_HORIZON_M = 80.0
+_MAP_PREVIEW_BASE_MAX_HORIZON_M = 400.0
+_MAP_PREVIEW_EXT_TIME_S = 20.0
+_MAP_PREVIEW_EXT_MIN_HORIZON_M = 120.0
+_MAP_PREVIEW_EXT_MAX_HORIZON_M = 800.0
 
 class DPFlags:
   ACM = 1
@@ -114,6 +121,7 @@ class LongitudinalPlanner:
     self._map_lock_lat = 0.0
     self._map_lock_lon = 0.0
     self._map_lock_v = 0.0
+    self._map_preview_v = 0.0
     self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
 
   def _lincoln_curve_config(self):
@@ -238,10 +246,14 @@ class LongitudinalPlanner:
       if math.isfinite(tv_here) and tv_here > 0.1 and tv_here < (v_cruise - 1e-3):
         v_hold = float(tv_here)
 
-    # 2) Preview cap: prevent accelerating above upcoming low map targets within a short lookahead window.
-    #    This helps keep speed stable through long curves/S-curves even when no braking is needed yet.
-    preview_horizon = max(_MAP_PREVIEW_MIN_HORIZON_M, min(_MAP_PREVIEW_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_TIME_S))
-    v_preview = 0.0
+    # 2) Preview cap:
+    #    - Only engage once the next limiting segment is within a short "base" horizon (avoid slowing too early).
+    #    - When engaged, use a longer "extended" horizon to capture the minimum speed across the upcoming curve/S-curve
+    #      (reduces step-downs mid-curve as more points become visible).
+    preview_base_horizon = max(_MAP_PREVIEW_BASE_MIN_HORIZON_M, min(_MAP_PREVIEW_BASE_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_BASE_TIME_S))
+    preview_ext_horizon = max(_MAP_PREVIEW_EXT_MIN_HORIZON_M, min(_MAP_PREVIEW_EXT_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_EXT_TIME_S))
+    v_preview_base = 0.0
+    v_preview_ext = 0.0
 
     # 3) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
     valid_velocities: list[tuple[float, float, float, float]] = []  # (target_v, dist_m, lat, lon)
@@ -255,8 +267,11 @@ class LongitudinalPlanner:
       if not math.isfinite(tv) or tv <= 0.0:
         continue
       d = float(forward_distances[i])
-      if d < preview_horizon and tv < (v_cruise - 1e-3):
-        v_preview = float(tv) if v_preview <= 0.1 else float(min(v_preview, tv))
+      if tv < (v_cruise - 1e-3):
+        if d < preview_base_horizon:
+          v_preview_base = float(tv) if v_preview_base <= 0.1 else float(min(v_preview_base, tv))
+        if d < preview_ext_horizon:
+          v_preview_ext = float(tv) if v_preview_ext <= 0.1 else float(min(v_preview_ext, tv))
 
       if tv >= v_ego - 1e-3:
         continue
@@ -329,12 +344,33 @@ class LongitudinalPlanner:
       self._map_lock_lat = 0.0
       self._map_lock_lon = 0.0
 
+    # Enable the preview cap only when a limiting segment is within the base horizon.
+    v_preview = float(v_preview_ext) if v_preview_base > 0.1 and v_preview_ext > 0.1 else 0.0
+
     # If no decel target is active, fall back to "in-curve hold" cap.
     if v_target <= 0.1 and v_hold > 0.1:
+      self._map_preview_v = 0.0
       return float(v_hold), 0.0
     if v_target <= 0.1 and v_preview > 0.1:
-      return float(v_preview), 0.0
+      # Smooth preview cap to reduce jitter and step-like behavior:
+      # - Tighten immediately (safety).
+      # - Relax slowly (comfort + avoid accelerate/decelerate oscillations).
+      try:
+        vp = float(v_preview)
+      except Exception:
+        vp = 0.0
+      if self._map_preview_v <= 0.1 or not math.isfinite(self._map_preview_v):
+        self._map_preview_v = vp
+      elif math.isfinite(vp) and vp > 0.1:
+        if vp < self._map_preview_v:
+          self._map_preview_v = vp
+        else:
+          tau_s = 2.0
+          alpha = float(self.dt / (tau_s + self.dt)) if self.dt > 0.0 else 0.0
+          self._map_preview_v = float(self._map_preview_v + (vp - self._map_preview_v) * alpha)
+      return float(self._map_preview_v), 0.0
 
+    self._map_preview_v = 0.0
     if v_target <= 0.1:
       return 0.0, 0.0
 
@@ -349,7 +385,10 @@ class LongitudinalPlanner:
     # Always request *some* decel once map says it's time to slow down.
     # Cap by the same comfort limit as the vision curve controller.
     decel_cap = self._lincoln_curve_config().get("decel_max", -3.2)
-    map_a_target = max(float(decel_cap), min(-0.30, required_decel))
+    # Fade out the minimum decel as we approach the target speed to avoid a hard "-0.30 -> 0" step.
+    dv = max(0.0, float(v_ego - v_target))
+    min_decel = -0.30 * min(1.0, dv / 2.0)  # 0..-0.30 for dv in [0..2] m/s
+    map_a_target = max(float(decel_cap), min(float(min_decel), required_decel))
 
     return float(v_target), float(map_a_target)
 
