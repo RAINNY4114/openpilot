@@ -129,6 +129,19 @@ class LincolnLayout(Widget):
         decimals=2,
         suffix=tr(" m/s^2"),
       ),
+      simple_item(title=lambda: tr("### Obstacle Avoidance (Experimental) ###")),
+      toggle_item(
+        title=lambda: tr("Auto avoidance"),
+        description=lambda: tr("When cones/vehicles are detected in-path, automatically slow down then initiate a lane change to pass, and return when clear. Pedestrians trigger a stop (no auto lane change). Experimental and requires blindspot sensors."),
+        initial_state=self._params.get_bool("dp_lincoln_auto_avoid"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_auto_avoid", val),
+      ),
+      toggle_item(
+        title=lambda: tr("Hazard alerts"),
+        description=lambda: tr("Play a warning chime when pedestrians/vehicles are detected in-path. Visualization only; no steering/braking changes."),
+        initial_state=self._params.get_bool("dp_lincoln_hazard_alert"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_hazard_alert", val),
+      ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(
         title=lambda: tr("HUD drawing enhancements"),

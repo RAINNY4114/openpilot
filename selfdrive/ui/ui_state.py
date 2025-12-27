@@ -60,6 +60,7 @@ class UIState:
         "rawAudioData",
         "dpControlsState",
         "liveTracks", # dp - for dp_ui_lead
+        "customReservedRawData0",
       ]
     )
 

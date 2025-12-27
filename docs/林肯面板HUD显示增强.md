@@ -203,3 +203,72 @@
 
 - 本功能只影响**标准 UI（MainLayout / `selfdrive/ui/onroad/*`）** 的绘制；如需同步到 `mici` UI，需要单独实现。
 - 新增 Param 需要重新编译 `common/params_pyx`（正常 `scons` 构建会自动处理），否则会出现 `UnknownKeyName: b'dp_lincoln_hud_enhanced'`。
+
+## 4. 障碍物自动避让（实验）+ HUD 目标框（锥桶/行人/车辆）
+
+> 目标：检测到“前方障碍物（锥桶/车辆等）”时，先自动减速到低速，再自动发起一次变道绕行，并在障碍物清除后自动回到原车道；同时在 HUD（设备 UI）上叠加绘制检测到的目标框（锥桶/行人/车辆等）。
+>
+> 说明：**行人**按更保守策略处理（触发停车，不做自动变道）。
+
+### 4.1 用户开关（Lincoln 面板）
+- 面板位置：`Lincoln` → `### Obstacle Avoidance (Experimental) ###` → `Auto avoidance`
+- Param：`dp_lincoln_auto_avoid`（bool，默认 `0`）
+- 重要前提：需要盲点传感器（BSM）。未检测到 `carParams.enableBsm==1` 时，不会自动发起变道。
+- 可选提示音：`Lincoln` → `### Obstacle Avoidance (Experimental) ###` → `Hazard alerts`
+  - Param：`dp_lincoln_hazard_alert`（bool，默认 `0`）
+  - 仅用于“危险提示音 + 可视化目标框”，不改变方向/制动控制逻辑。
+
+### 4.2 数据与流程（端到端）
+
+1) `coned`（目标检测进程）
+- 进程配置：`system/manager/process_config.py`
+- 启动条件：上路且（`dp_lat_cone_detection` 或 `dp_lincoln_auto_avoid` 或 `dp_lincoln_hazard_alert`）为 true
+- 模型文件：`selfdrive/modeld/models/Cone_YOLO11n.onnx`（构建产物：`Cone_YOLO11n_tinygrad.pkl`）
+- 输出：向 `customReservedRawData0` 发布 JSON（含 `inPath`、`personInPath`、`vehicleInPath`、`hazInPath`、`cones`、`objs`，以及用于稳定性/平顺性的 `*Metric` 与 `*Raw` 字段；其中 `inPath/personInPath/vehicleInPath` 为去抖后的稳定信号）；`objs` 当前包含：
+  - `cone(80)`（锥桶）
+  - `person(0)`（行人）
+  - `bicycle(1)`、`car(2)`、`motorcycle(3)`、`bus(5)`、`truck(7)`（车辆类）
+  - 说明：
+    - `personInPath/vehicleInPath` 用于“自动减速/自动绕行（车辆类）”的触发门控
+    - `hazInPath` 是对“行人/车辆”在当前车道前方的保守危险判断，用于提示音/显示
+
+2) `plannerd`（自动减速入口）
+- 位置：`selfdrive/controls/lib/longitudinal_planner.py`
+- 订阅 `customReservedRawData0`
+- 在 `dp_lincoln_auto_avoid==1` 时：
+  - `cone/vehicle in-path`：基于 `obstacleMetric` 逐步压低巡航目标（默认约 `35mph → 12mph`，并对速度上限做 rate-limit），避免继续加速接近障碍物
+  - `person in-path`：触发停车（`v_cruise=0`），不做自动变道
+  - 若障碍物持续存在且 3s 内未开始变道，则进一步触发停车（防止“减速后仍无法绕行”）
+
+3) `modeld`（自动绕行请求入口）
+- 订阅 `customReservedRawData0`，解析 `inPath/vehicleInPath`
+- 在 `dp_lincoln_auto_avoid==1` 且 `carParams.enableBsm==1` 时：
+  - `selfdrive/controls/lib/auto_avoidance.py` 在“先减速等待一小段时间”后，且相邻车道“持续安全”一段时间（BSM + 路沿检测稳定）才生成自动变道方向（left/right），减少抖动/误触发；若变道请求被取消会自动重试/回退
+  - `selfdrive/controls/lib/desire_helper.py` 接受 `auto_lane_change_direction` 并自动触发变道（无需驾驶员施加方向盘扭矩）
+  - 变道完成后等待障碍物清除一段时间，再自动回正变道回去
+
+4) Ford 真实外转向灯（自动打灯）
+- 位置：`opendbc_repo/opendbc/car/ford/carcontroller.py`
+- 逻辑：当 `CarControl.leftBlinker/rightBlinker` 显示正在变道，且变道开始时驾驶员没有主动打灯，则通过 `Steering_Data_FD1` 注入 `TurnLghtSwtch_D_Stat` 让车外灯闪烁；变道结束后自动停止注入。
+
+### 4.3 HUD 目标框（美观叠加）
+- 订阅：`selfdrive/ui/ui_state.py` 添加 `customReservedRawData0`
+- 绘制：`selfdrive/ui/onroad/augmented_road_view.py` → `_draw_object_detections()`
+  - `cone(80)`：橙色框 `C`
+  - `person(0)`：蓝色框 `P`
+  - 车辆类：红色框 `V`
+  - 仅做可视化叠加：自动绕行触发条件为 `cone inPath` + `vehicleInPath`；`personInPath` 仅触发停车，不做自动变道。
+
+### 4.4 避让提示音（alert_chime.wav）
+- 目的：当“自动避让”即将触发时给驾驶员一个明确提示（不需要驾驶员手动打灯/介入）。
+- 音频文件：`selfdrive/assets/sounds/alert_chime.wav`
+- 播放进程：`selfdrive/ui/soundd.py`
+  - 订阅 `customReservedRawData0`，检测 `inPath/vehicleInPath` 从 `False→True` 的跃迁后播放一次
+  - 仅在 `dp_lincoln_auto_avoid==1`、`carParams.enableBsm==1`、驾驶员未打灯、且车速 ≥ 10mph 时播放（避免无效/误提示）
+
+### 4.5 危险提示音（warning_immediate.wav）
+- 目的：当检测到“行人/车辆”等危险目标进入当前车道前方时，给驾驶员强提醒（用于防碰撞提示）。
+- 音频文件：`selfdrive/assets/sounds/warning_immediate.wav`
+- 播放进程：`selfdrive/ui/soundd.py`
+  - 订阅 `customReservedRawData0`，检测 `hazInPath` 从 `False→True` 的跃迁后播放一次
+  - 仅在 `dp_lincoln_hazard_alert==1`、驾驶员未打灯、且车速 ≥ 10mph 时播放（避免无效/误提示）

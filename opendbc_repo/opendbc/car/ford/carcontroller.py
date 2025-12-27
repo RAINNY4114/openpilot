@@ -75,6 +75,10 @@ class CarController(CarControllerBase):
     self.lead_distance_bars_last = None
     self.distance_bar_frame = 0
 
+    # Auto-turn-signal latch (for auto-requested lane changes)
+    self._auto_blinker_dir = 0  # 0=off, 1=left, 2=right
+    self._prev_cc_blinker_dir = 0
+
   def update(self, CC, CS, now_nanos):
     can_sends = []
 
@@ -84,6 +88,21 @@ class CarController(CarControllerBase):
     main_on = CS.out.cruiseState.available
     steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
+
+    # Latch whether this lane-change blinker request is "auto" (driver stalk was not active at start).
+    cc_blinker_dir = 0
+    if CC.leftBlinker and not CC.rightBlinker:
+      cc_blinker_dir = 1
+    elif CC.rightBlinker and not CC.leftBlinker:
+      cc_blinker_dir = 2
+
+    if cc_blinker_dir != self._prev_cc_blinker_dir:
+      if cc_blinker_dir == 0:
+        self._auto_blinker_dir = 0
+      elif self._prev_cc_blinker_dir == 0:
+        driver_signaling = bool(CS.out.leftBlinker or CS.out.rightBlinker)
+        self._auto_blinker_dir = 0 if driver_signaling else cc_blinker_dir
+    self._prev_cc_blinker_dir = cc_blinker_dir
 
     ### acc buttons ###
     if CC.cruiseControl.cancel:
@@ -96,6 +115,10 @@ class CarController(CarControllerBase):
     # the stock system checks for steering pressed, and eventually disengages cruise control
     elif CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0 and (self.frame % CarControllerParams.ACC_UI_STEP) == 0:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, tja_toggle=True))
+
+    # Auto blinker (exterior) during auto-requested lane changes.
+    if self._auto_blinker_dir != 0 and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
+      can_sends.append(fordcan.create_turn_signal_msg(self.packer, self.CAN.main, CS.buttons_stock_values, self._auto_blinker_dir))
 
     ### lateral control ###
     # send steer msg at 20Hz

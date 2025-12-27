@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
 from importlib.resources import as_file
@@ -24,6 +26,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCamera
 from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
+from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
@@ -62,6 +65,12 @@ PERF_PADDING = 12
 PERF_MARGIN_BOTTOM = UI_BORDER_SIZE // 2
 PERF_ITEM_GAP = 140
 PERF_BG_COLOR = rl.Color(0, 0, 0, 120)
+DET_STALE_TIMEOUT_S = 1.0
+DET_COLOR_CONE = rl.Color(255, 149, 0, 220)
+DET_COLOR_PERSON = rl.Color(0, 170, 255, 220)
+DET_COLOR_VEHICLE = rl.Color(255, 60, 60, 220)
+DET_LABEL_COLOR = rl.WHITE
+DET_LABEL_BG_ALPHA = 180
 
 
 @dataclass
@@ -117,6 +126,10 @@ class AugmentedRoadView(CameraView):
     # Lincoln HUD enhancements
     self._hud_brake_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
 
+    # Object detections (coned -> customReservedRawData0)
+    self._det_payload: dict | None = None
+    self._det_last_update_t = 0.0
+
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
     start_draw = time.monotonic()
@@ -167,6 +180,7 @@ class AugmentedRoadView(CameraView):
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
+    self._draw_object_detections(rect)
 
     # End clipping region
     rl.end_scissor_mode()
@@ -178,6 +192,106 @@ class AugmentedRoadView(CameraView):
     msg = messaging.new_message('uiDebug')
     msg.uiDebug.drawTimeMillis = (time.monotonic() - start_draw) * 1000
     self._pm.send('uiDebug', msg)
+
+  def _get_camera_dst_rect(self, rect: rl.Rectangle) -> "rl.Rectangle | None":
+    if self.frame is None:
+      return None
+
+    transform = self._calc_frame_matrix(rect)
+    scale_x = rect.width * float(transform[0, 0])  # zx
+    scale_y = rect.height * float(transform[1, 1])  # zy
+
+    x_offset = rect.x + (rect.width - scale_x) / 2.0
+    y_offset = rect.y + (rect.height - scale_y) / 2.0
+
+    x_offset += float(transform[0, 2]) * rect.width / 2.0
+    y_offset += float(transform[1, 2]) * rect.height / 2.0
+
+    return rl.Rectangle(float(x_offset), float(y_offset), float(scale_x), float(scale_y))
+
+  def _draw_object_detections(self, rect: rl.Rectangle) -> None:
+    sm = ui_state.sm
+    if sm.updated.get("customReservedRawData0", False):
+      try:
+        raw = sm["customReservedRawData0"].customReservedRawData0
+        payload = decode_cone_detections(raw) if raw else None
+        if payload is not None:
+          self._det_payload = payload
+          self._det_last_update_t = time.monotonic()
+      except Exception:
+        self._det_payload = None
+        self._det_last_update_t = 0.0
+
+    if self._det_payload is None:
+      return
+
+    if time.monotonic() - self._det_last_update_t > DET_STALE_TIMEOUT_S:
+      self._det_payload = None
+      return
+
+    cam_dst = self._get_camera_dst_rect(rect)
+    if cam_dst is None:
+      return
+
+    img_w = int(self._det_payload.get("imgW", 0) or 0)
+    img_h = int(self._det_payload.get("imgH", 0) or 0)
+    if img_w <= 0 or img_h <= 0:
+      return
+
+    objs = self._det_payload.get("objs", [])
+    if not isinstance(objs, list) or not objs:
+      return
+
+    thickness = 2
+    font = gui_app.font(FontWeight.MEDIUM)
+    font_size = 18
+    spacing = 1.0
+
+    for o in objs:
+      if not isinstance(o, dict):
+        continue
+
+      cls = int(o.get("c", -1))
+      x1 = float(o.get("x1", 0.0))
+      y1 = float(o.get("y1", 0.0))
+      x2 = float(o.get("x2", 0.0))
+      y2 = float(o.get("y2", 0.0))
+      score = float(o.get("s", 0.0))
+
+      if x2 <= x1 or y2 <= y1:
+        continue
+
+      if cls == 0:
+        color = DET_COLOR_PERSON
+        label = f"P {score:.2f}"
+      elif cls == 80:
+        color = DET_COLOR_CONE
+        label = f"C {score:.2f}"
+      elif cls in (1, 2, 3, 5, 7):
+        color = DET_COLOR_VEHICLE
+        label = f"V {score:.2f}"
+      else:
+        continue
+
+      sx1 = cam_dst.x + (x1 / img_w) * cam_dst.width
+      sy1 = cam_dst.y + (y1 / img_h) * cam_dst.height
+      sx2 = cam_dst.x + (x2 / img_w) * cam_dst.width
+      sy2 = cam_dst.y + (y2 / img_h) * cam_dst.height
+
+      w = sx2 - sx1
+      h = sy2 - sy1
+      if w < 2.0 or h < 2.0:
+        continue
+
+      box = rl.Rectangle(float(sx1), float(sy1), float(w), float(h))
+      rl.draw_rectangle_lines_ex(box, thickness, color)
+
+      label_size = measure_text_cached(font, label, font_size, spacing)
+      pad = 4
+      bg = rl.Color(color.r, color.g, color.b, DET_LABEL_BG_ALPHA)
+      label_rect = rl.Rectangle(box.x, max(cam_dst.y, box.y - (label_size.y + pad * 2)), label_size.x + pad * 2, label_size.y + pad * 2)
+      rl.draw_rectangle_rec(label_rect, bg)
+      rl.draw_text_ex(font, label, rl.Vector2(label_rect.x + pad, label_rect.y + pad), font_size, spacing, DET_LABEL_COLOR)
 
   def _handle_mouse_press(self, _):
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:

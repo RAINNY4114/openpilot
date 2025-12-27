@@ -24,12 +24,14 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.selfdrive.controls.lib.auto_avoidance import AutoAvoidanceHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.models.commonmodel_pyx import DrivingModelFrame, CLContext
 from openpilot.selfdrive.modeld.runners.tinygrad_helpers import qcom_tensor_from_opencl_address
+from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from dragonpilot.selfdrive.controls.lib.road_edge_detector import RoadEdgeDetector
 
 
@@ -263,7 +265,8 @@ def main(demo=False):
 
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelExt"])
-  sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"])
+  sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay",
+                  "carParams", "customReservedRawData0"])
 
   publish_state = PublishState()
   params = Params()
@@ -297,6 +300,10 @@ def main(demo=False):
   dp_lat_lca_auto_sec = float(params.get("dp_lat_lca_auto_sec"))
   DH = DesireHelper(dp_lat_lca_speed=dp_lat_lca_speed, dp_lat_lca_auto_sec=dp_lat_lca_auto_sec)
   RED = RoadEdgeDetector(params.get_bool("dp_lat_road_edge_detection"))
+  AA = AutoAvoidanceHelper()
+  cone_in_path = False
+  vehicle_in_path = False
+  cone_last_update_t = 0.0
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -332,6 +339,22 @@ def main(demo=False):
       meta_extra = meta_main
 
     sm.update(0)
+
+    if sm.updated.get("customReservedRawData0", False):
+      try:
+        raw = sm["customReservedRawData0"].customReservedRawData0
+        payload = decode_cone_detections(raw) if raw else None
+        if payload is not None:
+          cone_in_path = bool(payload.get("inPath", False))
+          vehicle_in_path = bool(payload.get("vehicleInPath", False))
+          cone_last_update_t = time.monotonic()
+      except Exception:
+        cloudlog.exception("failed to parse cone detections")
+
+    if time.monotonic() - cone_last_update_t > 1.0:
+      cone_in_path = False
+      vehicle_in_path = False
+
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
@@ -395,7 +418,26 @@ def main(demo=False):
       RED.update(modelv2_send.modelV2.roadEdgeStds, modelv2_send.modelV2.laneLineProbs)
       model_ext_send.modelExt.leftEdgeDetected = RED.left_edge_detected
       model_ext_send.modelExt.rightEdgeDetected = RED.right_edge_detected
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected)
+
+      cs = sm["carState"]
+      lat_active = bool(sm["carControl"].latActive)
+      one_blinker = cs.leftBlinker != cs.rightBlinker
+      bsm_available = bool(sm.valid.get("carParams", False) and sm["carParams"].enableBsm)
+      left_ok = bsm_available and (not cs.leftBlindspot) and (not RED.left_edge_detected)
+      right_ok = bsm_available and (not cs.rightBlindspot) and (not RED.right_edge_detected)
+      auto_dir = AA.update(
+        enabled=params.get_bool("dp_lincoln_auto_avoid") and lat_active,
+        obstacle_in_path=cone_in_path or vehicle_in_path,
+        lc_state=DH.lane_change_state,
+        v_ego=v_ego,
+        left_ok=left_ok,
+        right_ok=right_ok,
+        is_rhd=bool(is_rhd),
+        manual_blinker=bool(one_blinker),
+        bsm_available=bsm_available,
+      )
+      DH.update(cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,
+                auto_lane_change_direction=auto_dir)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state

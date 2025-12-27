@@ -8,6 +8,8 @@ LaneChangeDirection = log.LaneChangeDirection
 
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
+AUTO_LANE_CHANGE_SPEED_MIN = 10 * CV.MPH_TO_MS
+AUTO_LANE_CHANGE_START_DELAY_SEC = 0.5
 
 DESIRES = {
   LaneChangeDirection.none: {
@@ -39,6 +41,9 @@ class DesireHelper:
     self.lane_change_ll_prob = 1.0
     self.keep_pulse_timer = 0.0
     self.prev_one_blinker = False
+    self.prev_lane_change_request = False
+    self._auto_requested = False
+    self._auto_request_start_t = 0.0
     self.desire = log.Desire.none
     self.dp_lat_lca_speed = float(dp_lat_lca_speed * CV.MPH_TO_MS)
     self.dp_lat_lca_auto_sec = dp_lat_lca_auto_sec
@@ -48,30 +53,44 @@ class DesireHelper:
   def get_lane_change_direction(CS):
     return LaneChangeDirection.left if CS.leftBlinker else LaneChangeDirection.right
 
-  def update(self, carstate, lateral_active, lane_change_prob, left_edge_detected, right_edge_detected):
+  def update(self, carstate, lateral_active, lane_change_prob, left_edge_detected, right_edge_detected,
+             auto_lane_change_direction: LaneChangeDirection = LaneChangeDirection.none):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
+
+    # Ignore auto requests while the driver is explicitly signaling.
+    auto_request = (auto_lane_change_direction in (LaneChangeDirection.left, LaneChangeDirection.right)) and not one_blinker
+    lane_change_request = one_blinker or auto_request
+
     below_lane_change_speed = True if self.dp_lat_lca_speed == 0. else v_ego < self.dp_lat_lca_speed
+    if auto_request:
+      below_lane_change_speed = v_ego < AUTO_LANE_CHANGE_SPEED_MIN
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
       self.lane_change_direction = LaneChangeDirection.none
+      self._auto_requested = False
     else:
       # LaneChangeState.off
       c_time = time.monotonic()
-      if self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker and not below_lane_change_speed:
+      if self.lane_change_state == LaneChangeState.off and lane_change_request and not self.prev_lane_change_request and not below_lane_change_speed:
         self.lane_change_state = LaneChangeState.preLaneChange
         self.lane_change_ll_prob = 1.0
+        self._auto_requested = auto_request
+        self._auto_request_start_t = c_time
         if self.dp_lat_lca_auto_sec > 0.:
           self.dp_lat_lca_auto_sec_start = c_time
 
         # Initialize lane change direction to prevent UI alert flicker
-        self.lane_change_direction = self.get_lane_change_direction(carstate)
+        self.lane_change_direction = auto_lane_change_direction if auto_request else self.get_lane_change_direction(carstate)
 
       # LaneChangeState.preLaneChange
       elif self.lane_change_state == LaneChangeState.preLaneChange:
         # Update lane change direction
-        self.lane_change_direction = self.get_lane_change_direction(carstate)
+        if self._auto_requested and auto_request:
+          self.lane_change_direction = auto_lane_change_direction
+        elif one_blinker:
+          self.lane_change_direction = self.get_lane_change_direction(carstate)
 
         torque_applied = carstate.steeringPressed and \
                          ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
@@ -79,6 +98,9 @@ class DesireHelper:
 
         blindspot_detected = (((carstate.leftBlindspot or left_edge_detected) and self.lane_change_direction == LaneChangeDirection.left) or
                               ((carstate.rightBlindspot or right_edge_detected) and self.lane_change_direction == LaneChangeDirection.right))
+
+        if self._auto_requested and not blindspot_detected and (c_time - self._auto_request_start_t) >= AUTO_LANE_CHANGE_START_DELAY_SEC:
+          torque_applied = True
 
         # reset timer
         if self.dp_lat_lca_auto_sec > 0.:
@@ -88,9 +110,10 @@ class DesireHelper:
             if (c_time - self.dp_lat_lca_auto_sec_start) >= self.dp_lat_lca_auto_sec:
               torque_applied = True
 
-        if not one_blinker or below_lane_change_speed:
+        if not lane_change_request or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off
           self.lane_change_direction = LaneChangeDirection.none
+          self._auto_requested = False
         elif torque_applied and not blindspot_detected:
           self.lane_change_state = LaneChangeState.laneChangeStarting
 
@@ -114,6 +137,7 @@ class DesireHelper:
             self.lane_change_state = LaneChangeState.preLaneChange
           else:
             self.lane_change_state = LaneChangeState.off
+          self._auto_requested = False
 
     if self.lane_change_state in (LaneChangeState.off, LaneChangeState.preLaneChange):
       self.lane_change_timer = 0.0
@@ -121,6 +145,7 @@ class DesireHelper:
       self.lane_change_timer += DT_MDL
 
     self.prev_one_blinker = one_blinker
+    self.prev_lane_change_request = lane_change_request
 
     self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]
 

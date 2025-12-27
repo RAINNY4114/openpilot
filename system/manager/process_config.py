@@ -68,6 +68,11 @@ def dashy_with_video(started: bool, params: Params, CP: car.CarParams) -> bool:
 def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not params.get_bool("dp_dev_disable_connect")
 
+def coned(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return started and (params.get_bool("dp_lat_cone_detection") or
+                      params.get_bool("dp_lincoln_auto_avoid") or
+                      params.get_bool("dp_lincoln_hazard_alert"))
+
 def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Run mapd when:
   # - user requested an offline maps download, or
@@ -104,6 +109,7 @@ procs = [
   PythonProcess("timed", "system.timed", always_run, enabled=not PC),
 
   PythonProcess("modeld", "selfdrive.modeld.modeld", only_onroad),
+  PythonProcess("coned", "selfdrive.modeld.coned", coned),
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC) and not LITE),
 
   PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC),

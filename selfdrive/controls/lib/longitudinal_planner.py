@@ -5,6 +5,7 @@ import os
 import time
 import numpy as np
 
+from cereal import log
 import cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
@@ -20,6 +21,7 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 from dragonpilot.selfdrive.controls.lib.acm import ACM
 from dragonpilot.selfdrive.controls.lib.aem import AEM
+from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -27,6 +29,14 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
+OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
+OBSTACLE_SLOW_SPEED_MPH = 12.0
+OBSTACLE_STOP_DELAY_S = 3.0
+OBSTACLE_APPROACH_SPEED_MPH = 35.0
+OBSTACLE_METRIC_START = 0.15
+OBSTACLE_METRIC_FULL = 0.75
+OBSTACLE_V_CAP_DOWN_RATE = 8.0  # m/s^2 (rate-limit on reducing v_cap)
+OBSTACLE_V_CAP_UP_RATE = 2.0    # m/s^2 (rate-limit on releasing v_cap)
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -123,6 +133,15 @@ class LongitudinalPlanner:
     self._map_lock_v = 0.0
     self._map_preview_v = 0.0
     self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
+    self._obstacle_last_det_t = 0.0
+    self._obstacle_cone_in_path = False
+    self._obstacle_person_in_path = False
+    self._obstacle_vehicle_in_path = False
+    self._obstacle_metric = 0.0
+    self._haz_metric = 0.0
+    self._obstacle_present_prev = False
+    self._obstacle_present_since: float | None = None
+    self._obstacle_v_cap = float("nan")
 
   def _lincoln_curve_config(self):
     # 小环折加载，1s 内不重复读取参数
@@ -806,6 +825,36 @@ class LongitudinalPlanner:
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
+    now = time.monotonic()
+
+    # Obstacle detections (from coned via customReservedRawData0).
+    if sm.updated.get("customReservedRawData0", False):
+      try:
+        raw = sm["customReservedRawData0"].customReservedRawData0
+        payload = decode_cone_detections(raw) if raw else None
+        if payload is not None:
+          self._obstacle_cone_in_path = bool(payload.get("inPath", False))
+          self._obstacle_person_in_path = bool(payload.get("personInPath", False))
+          self._obstacle_vehicle_in_path = bool(payload.get("vehicleInPath", False))
+          self._obstacle_metric = float(payload.get("obstacleMetric", 0.0) or 0.0)
+          self._haz_metric = float(payload.get("hazMetric", 0.0) or 0.0)
+          self._obstacle_last_det_t = now
+      except Exception:
+        pass
+
+    if (now - self._obstacle_last_det_t) > OBSTACLE_DET_STALE_TIMEOUT_S:
+      self._obstacle_cone_in_path = False
+      self._obstacle_person_in_path = False
+      self._obstacle_vehicle_in_path = False
+      self._obstacle_metric = 0.0
+      self._haz_metric = 0.0
+
+    obstacle_present = self._obstacle_cone_in_path or self._obstacle_person_in_path or self._obstacle_vehicle_in_path
+    if obstacle_present and not self._obstacle_present_prev:
+      self._obstacle_present_since = now
+    if not obstacle_present:
+      self._obstacle_present_since = None
+    self._obstacle_present_prev = obstacle_present
 
     # Map-based turn speed target (priority over vision curve limit when it actively limits v_cruise)
     self._map_v_target = 0.0
@@ -930,6 +979,53 @@ class LongitudinalPlanner:
 
     if lincoln_osm_realtime_cruise and map_turn_limit_active and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
       v_cruise = min(v_cruise, v_map_target)
+
+    dp_auto_avoid = self._params.get_bool("dp_lincoln_auto_avoid")
+
+    # Auto obstacle slowdown (experimental):
+    # - cones/vehicles: progressively cap cruise speed, then attempt an auto lane change (handled in modeld).
+    # - pedestrians: stop (no auto lane change).
+    if dp_auto_avoid and obstacle_present and getattr(sm['selfdriveState'], "enabled", False):
+      accel_clip[1] = min(accel_clip[1], 0.0)  # prevent accelerating towards the obstacle
+
+      v_cap_target = 0.0
+      if not self._obstacle_person_in_path:
+        bsm_available = bool(getattr(self.CP, "enableBsm", False))
+        if bsm_available:
+          m = float(max(0.0, min(1.0, self._obstacle_metric)))
+          if m <= OBSTACLE_METRIC_START:
+            v_cap_target = float(OBSTACLE_APPROACH_SPEED_MPH * CV.MPH_TO_MS)
+          elif m >= OBSTACLE_METRIC_FULL:
+            v_cap_target = float(OBSTACLE_SLOW_SPEED_MPH * CV.MPH_TO_MS)
+          else:
+            alpha = (m - OBSTACLE_METRIC_START) / max(1e-3, (OBSTACLE_METRIC_FULL - OBSTACLE_METRIC_START))
+            v_cap_target_mph = (1.0 - alpha) * OBSTACLE_APPROACH_SPEED_MPH + alpha * OBSTACLE_SLOW_SPEED_MPH
+            v_cap_target = float(v_cap_target_mph * CV.MPH_TO_MS)
+
+          # If we failed to start a lane change for a while, stop as a last-resort to avoid collision.
+          if self._obstacle_present_since is not None and (now - self._obstacle_present_since) >= OBSTACLE_STOP_DELAY_S:
+            lane_change_state = int(getattr(sm['modelV2'].meta, "laneChangeState", log.LaneChangeState.off))
+            if lane_change_state in (int(log.LaneChangeState.off), int(log.LaneChangeState.preLaneChange)):
+              v_cap_target = 0.0
+
+      # Rate limit to avoid step changes in cruise cap (tighten fast, release slower).
+      if not math.isfinite(self._obstacle_v_cap):
+        self._obstacle_v_cap = float(v_cruise)
+
+      if v_cap_target <= 1e-3:
+        self._obstacle_v_cap = 0.0
+      else:
+        down_step = float(OBSTACLE_V_CAP_DOWN_RATE * self.dt)
+        up_step = float(OBSTACLE_V_CAP_UP_RATE * self.dt)
+        if v_cap_target < self._obstacle_v_cap:
+          self._obstacle_v_cap = max(float(v_cap_target), float(self._obstacle_v_cap - down_step))
+        else:
+          self._obstacle_v_cap = min(float(v_cap_target), float(self._obstacle_v_cap + up_step))
+
+      v_cruise = min(v_cruise, float(self._obstacle_v_cap))
+    else:
+      # Reset limiter state when disabled or no obstacle (prevents stale cap when toggling quickly).
+      self._obstacle_v_cap = float("nan")
 
     # HUD source label: report which limiter is actively tightening the cruise target.
     # NOTE: Don't gate on `long_control_off`/`longActive` since Ford often runs stock ACC; users still want to know

@@ -21,6 +21,7 @@ def main():
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance'])
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState',
                            'gpsLocationExternal', 'gpsLocation',
+                           'customReservedRawData0',
                            'modelV2', 'selfdriveState'],
                            poll='modelV2')
 
