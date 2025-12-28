@@ -133,7 +133,7 @@ class DesireHelper:
 
         if self.lane_change_ll_prob > 0.99:
           self.lane_change_direction = LaneChangeDirection.none
-          if one_blinker:
+          if one_blinker and not self._auto_requested:
             self.lane_change_state = LaneChangeState.preLaneChange
           else:
             self.lane_change_state = LaneChangeState.off

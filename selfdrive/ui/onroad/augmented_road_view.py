@@ -27,6 +27,7 @@ from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
+from openpilot.selfdrive.ui.onroad.object_tracker import ObjectTracker
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
@@ -129,6 +130,9 @@ class AugmentedRoadView(CameraView):
     # Object detections (coned -> customReservedRawData0)
     self._det_payload: dict | None = None
     self._det_last_update_t = 0.0
+    self._det_img_w = 0
+    self._det_img_h = 0
+    self._det_tracker = ObjectTracker()
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -218,15 +222,29 @@ class AugmentedRoadView(CameraView):
         if payload is not None:
           self._det_payload = payload
           self._det_last_update_t = time.monotonic()
+          img_w = int(self._det_payload.get("imgW", 0) or 0)
+          img_h = int(self._det_payload.get("imgH", 0) or 0)
+          if img_w > 0 and img_h > 0 and (img_w != self._det_img_w or img_h != self._det_img_h):
+            self._det_img_w = img_w
+            self._det_img_h = img_h
+            self._det_tracker.reset()
+
+          self._det_tracker.update(objs=self._det_payload.get("objs", []), now=self._det_last_update_t)
       except Exception:
         self._det_payload = None
         self._det_last_update_t = 0.0
+        self._det_img_w = 0
+        self._det_img_h = 0
+        self._det_tracker.reset()
 
     if self._det_payload is None:
       return
 
     if time.monotonic() - self._det_last_update_t > DET_STALE_TIMEOUT_S:
       self._det_payload = None
+      self._det_img_w = 0
+      self._det_img_h = 0
+      self._det_tracker.reset()
       return
 
     cam_dst = self._get_camera_dst_rect(rect)
@@ -238,37 +256,33 @@ class AugmentedRoadView(CameraView):
     if img_w <= 0 or img_h <= 0:
       return
 
-    objs = self._det_payload.get("objs", [])
-    if not isinstance(objs, list) or not objs:
+    tracks = self._det_tracker.get_tracked(now=time.monotonic())
+    if not tracks:
       return
 
-    thickness = 2
     font = gui_app.font(FontWeight.MEDIUM)
-    font_size = 18
     spacing = 1.0
 
-    for o in objs:
-      if not isinstance(o, dict):
-        continue
-
-      cls = int(o.get("c", -1))
-      x1 = float(o.get("x1", 0.0))
-      y1 = float(o.get("y1", 0.0))
-      x2 = float(o.get("x2", 0.0))
-      y2 = float(o.get("y2", 0.0))
-      score = float(o.get("s", 0.0))
+    for o in tracks:
+      cls = int(o.cls)
+      x1 = float(max(0.0, min(float(img_w), o.x1)))
+      y1 = float(max(0.0, min(float(img_h), o.y1)))
+      x2 = float(max(0.0, min(float(img_w), o.x2)))
+      y2 = float(max(0.0, min(float(img_h), o.y2)))
+      score = float(o.score)
+      missed = int(o.missed)
 
       if x2 <= x1 or y2 <= y1:
         continue
 
       if cls == 0:
-        color = DET_COLOR_PERSON
+        base_color = DET_COLOR_PERSON
         label = f"P {score:.2f}"
       elif cls == 80:
-        color = DET_COLOR_CONE
+        base_color = DET_COLOR_CONE
         label = f"C {score:.2f}"
       elif cls in (1, 2, 3, 5, 7):
-        color = DET_COLOR_VEHICLE
+        base_color = DET_COLOR_VEHICLE
         label = f"V {score:.2f}"
       else:
         continue
@@ -282,6 +296,14 @@ class AugmentedRoadView(CameraView):
       h = sy2 - sy1
       if w < 2.0 or h < 2.0:
         continue
+
+      # Size-adaptive styling
+      min_dim = float(min(w, h))
+      thickness = int(max(1.0, min(4.0, min_dim / 90.0)))
+      font_size = int(max(14.0, min(22.0, min_dim / 8.0)))
+
+      fade = float(max(0.35, 1.0 - 0.14 * missed))
+      color = rl.Color(base_color.r, base_color.g, base_color.b, int(base_color.a * fade))
 
       box = rl.Rectangle(float(sx1), float(sy1), float(w), float(h))
       rl.draw_rectangle_lines_ex(box, thickness, color)

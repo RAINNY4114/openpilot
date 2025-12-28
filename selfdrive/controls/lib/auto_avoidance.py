@@ -70,7 +70,17 @@ class AutoAvoidanceHelper:
     now = time.monotonic()
     request = LaneChangeDirection.none
 
-    if not enabled or not bsm_available or manual_blinker or v_ego < AUTO_AVOID_MIN_SPEED:
+    # Gate hard requirements first.
+    if not enabled or not bsm_available or v_ego < AUTO_AVOID_MIN_SPEED:
+      self.reset()
+      self._last_lc_state = lc_state
+      return request
+
+    # Don't start avoidance while the driver is explicitly signaling.
+    #
+    # NOTE: Some platforms inject/echo turn-signal state during auto lane changes (for exterior blinkers),
+    # which would otherwise reset this helper mid-maneuver and prevent the "return to lane" behavior.
+    if manual_blinker and self._mode == "idle":
       self.reset()
       self._last_lc_state = lc_state
       return request
