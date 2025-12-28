@@ -213,7 +213,7 @@ class AugmentedRoadView(CameraView):
     sm = ui_state.sm
     if sm.updated.get("customReservedRawData0", False):
       try:
-        raw = sm["customReservedRawData0"].customReservedRawData0
+        raw = sm["customReservedRawData0"]
         payload = decode_cone_detections(raw) if raw else None
         if payload is not None:
           self._det_payload = payload

@@ -345,7 +345,7 @@ class Soundd:
     vehicle_in_path = False
     haz_in_path = False
     if sm.updated.get("customReservedRawData0", False):
-      raw = sm["customReservedRawData0"].customReservedRawData0
+      raw = sm["customReservedRawData0"]
       payload = decode_cone_detections(raw) if raw else None
       if payload is not None:
         in_path = bool(payload.get("inPath", False))

@@ -491,7 +491,9 @@ def main() -> None:
       vehicle_in_path_raw=vehicle_in_path_raw,
       hazard_in_path_raw=hazard_in_path_raw,
     )
-    msg = messaging.new_message("customReservedRawData0", valid=True)
+    # `customReservedRawData0` is `Data` in `cereal/log.capnp`, so we must not `init()` it without a size.
+    # Assigning bytes sets the union + size correctly.
+    msg = messaging.new_message(None, valid=True)
     msg.customReservedRawData0 = payload
     pm.send("customReservedRawData0", msg)
 
