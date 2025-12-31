@@ -70,8 +70,7 @@ def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def coned(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and (params.get_bool("dp_lat_cone_detection") or
-                      params.get_bool("dp_lincoln_auto_avoid") or
-                      params.get_bool("dp_lincoln_hazard_alert"))
+                      params.get_bool("dp_lincoln_auto_avoid"))
 
 def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Run mapd when:

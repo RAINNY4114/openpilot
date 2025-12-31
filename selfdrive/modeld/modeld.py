@@ -18,6 +18,7 @@ from cereal.messaging import PubMaster, SubMaster
 from msgq.visionipc import VisionIpcClient, VisionStreamType, VisionBuf
 from opendbc.car.car_helpers import get_demo_car_params
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
@@ -25,7 +26,9 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.auto_avoidance import AutoAvoidanceHelper
+from openpilot.selfdrive.controls.lib.auto_overtake import AutoOvertakeHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
+from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
@@ -266,7 +269,7 @@ def main(demo=False):
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelExt"])
   sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay",
-                  "carParams", "customReservedRawData0"])
+                  "carParams", "customReservedRawData0", "radarState"])
 
   publish_state = PublishState()
   params = Params()
@@ -301,6 +304,7 @@ def main(demo=False):
   DH = DesireHelper(dp_lat_lca_speed=dp_lat_lca_speed, dp_lat_lca_auto_sec=dp_lat_lca_auto_sec)
   RED = RoadEdgeDetector(params.get_bool("dp_lat_road_edge_detection"))
   AA = AutoAvoidanceHelper()
+  AO = AutoOvertakeHelper()
   cone_in_path = False
   vehicle_in_path = False
   cone_last_update_t = 0.0
@@ -425,7 +429,40 @@ def main(demo=False):
       bsm_available = bool(sm.valid.get("carParams", False) and sm["carParams"].enableBsm)
       left_ok = bsm_available and (not cs.leftBlindspot) and (not RED.left_edge_detected)
       right_ok = bsm_available and (not cs.rightBlindspot) and (not RED.right_edge_detected)
-      auto_dir = AA.update(
+
+      # Highway auto-overtake (lead-based). Uses radarState (which is also populated on radarless platforms).
+      lead_present = False
+      lead_d = 0.0
+      v_lead = 0.0
+      if sm.valid.get("radarState", False):
+        lead_one = sm["radarState"].leadOne
+        lead_present = bool(getattr(lead_one, "status", False))
+        if lead_present:
+          lead_d = float(getattr(lead_one, "dRel", 0.0))
+          v_lead = float(getattr(lead_one, "vLead", 0.0))
+          if not np.isfinite(v_lead) or v_lead <= 0.0:
+            v_rel = float(getattr(lead_one, "vRel", 0.0))
+            v_lead = float(v_ego + v_rel)
+
+      v_cruise_kph = float(getattr(cs, "vCruise", V_CRUISE_UNSET))
+      v_cruise = float(v_ego if v_cruise_kph == V_CRUISE_UNSET or v_cruise_kph <= 0.0 else (v_cruise_kph * CV.KPH_TO_MS))
+      cruise_enabled = bool(getattr(cs.cruiseState, "enabled", False))
+      overtake_dir = AO.update(
+        enabled=params.get_bool("dp_lincoln_auto_overtake") and lat_active and cruise_enabled,
+        lc_state=DH.lane_change_state,
+        v_ego=v_ego,
+        v_cruise=v_cruise,
+        lead_present=lead_present,
+        lead_d=lead_d,
+        v_lead=v_lead,
+        left_ok=left_ok,
+        right_ok=right_ok,
+        is_rhd=bool(is_rhd),
+        manual_blinker=bool(one_blinker),
+        bsm_available=bsm_available,
+      )
+
+      avoid_dir = AA.update(
         enabled=params.get_bool("dp_lincoln_auto_avoid") and lat_active,
         obstacle_in_path=cone_in_path or vehicle_in_path,
         lc_state=DH.lane_change_state,
@@ -436,6 +473,8 @@ def main(demo=False):
         manual_blinker=bool(one_blinker),
         bsm_available=bsm_available,
       )
+
+      auto_dir = avoid_dir if avoid_dir != log.LaneChangeDirection.none else overtake_dir
       DH.update(cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,
                 auto_lane_change_direction=auto_dir)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state

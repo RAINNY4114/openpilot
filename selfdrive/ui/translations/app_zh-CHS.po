@@ -2300,3 +2300,23 @@ msgstr "删除"
 #: selfdrive/ui/layouts/settings/osm_maps.py
 msgid "Unknown error"
 msgstr "未知错误"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "### Obstacle Avoidance (Experimental) ###"
+msgstr "### 障碍物避让（实验性） ###"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Auto avoidance"
+msgstr "自动避让"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "When cones/vehicles are detected in-path, automatically slow down then initiate a lane change to pass, and return when clear. Pedestrians trigger a stop (no auto lane change). Experimental and requires blindspot sensors."
+msgstr "当检测到本车道前方有锥桶/车辆时，会先自动减速，然后发起变道绕行，目标清除后自动回到原车道。行人会触发停车（不自动变道）。实验性功能，需要盲点传感器（BSM）。"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Auto overtake"
+msgstr "自动超车"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Highway-only: when a slower lead vehicle is detected ahead and the passing lane is clear, automatically initiate a lane change to pass, and return when clear. Experimental and requires blindspot sensors."
+msgstr "仅高速/高速公路：当前方检测到慢车且超车道清空时，自动发起变道超车，超车完成后自动回到原车道。实验性功能，需要盲点传感器（BSM）。"

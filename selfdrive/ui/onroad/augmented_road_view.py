@@ -133,6 +133,7 @@ class AugmentedRoadView(CameraView):
     self._det_img_w = 0
     self._det_img_h = 0
     self._det_tracker = ObjectTracker()
+    self._det_tracker_uses_sof_time = False
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -215,6 +216,8 @@ class AugmentedRoadView(CameraView):
 
   def _draw_object_detections(self, rect: rl.Rectangle) -> None:
     sm = ui_state.sm
+    det_ts_sof_ns = 0
+    det_t_s: float | None = None
     if sm.updated.get("customReservedRawData0", False):
       try:
         raw = sm["customReservedRawData0"]
@@ -222,6 +225,9 @@ class AugmentedRoadView(CameraView):
         if payload is not None:
           self._det_payload = payload
           self._det_last_update_t = time.monotonic()
+          det_ts_sof_ns = int(self._det_payload.get("timestampSof", 0) or 0)
+          if det_ts_sof_ns > 0:
+            det_t_s = float(det_ts_sof_ns) * 1e-9
           img_w = int(self._det_payload.get("imgW", 0) or 0)
           img_h = int(self._det_payload.get("imgH", 0) or 0)
           if img_w > 0 and img_h > 0 and (img_w != self._det_img_w or img_h != self._det_img_h):
@@ -229,22 +235,29 @@ class AugmentedRoadView(CameraView):
             self._det_img_h = img_h
             self._det_tracker.reset()
 
-          self._det_tracker.update(objs=self._det_payload.get("objs", []), now=self._det_last_update_t)
+          objs = self._det_payload.get("objsR", [])
+          if not objs:
+            objs = self._det_payload.get("objs", [])
+          self._det_tracker_uses_sof_time = det_t_s is not None
+          self._det_tracker.update(objs=objs, now=det_t_s if det_t_s is not None else self._det_last_update_t)
       except Exception:
         self._det_payload = None
         self._det_last_update_t = 0.0
         self._det_img_w = 0
         self._det_img_h = 0
         self._det_tracker.reset()
+        self._det_tracker_uses_sof_time = False
 
     if self._det_payload is None:
       return
 
-    if time.monotonic() - self._det_last_update_t > DET_STALE_TIMEOUT_S:
+    draw_now = time.monotonic()
+    if draw_now - self._det_last_update_t > DET_STALE_TIMEOUT_S:
       self._det_payload = None
       self._det_img_w = 0
       self._det_img_h = 0
       self._det_tracker.reset()
+      self._det_tracker_uses_sof_time = False
       return
 
     cam_dst = self._get_camera_dst_rect(rect)
@@ -256,7 +269,18 @@ class AugmentedRoadView(CameraView):
     if img_w <= 0 or img_h <= 0:
       return
 
-    tracks = self._det_tracker.get_tracked(now=time.monotonic())
+    # Align tracking to the currently displayed camera frame timestamp, otherwise boxes will lag by
+    # the detector pipeline latency (coned runs asynchronously at low Hz).
+    draw_t_s = draw_now
+    if self._det_tracker_uses_sof_time:
+      try:
+        frame_ts_sof_ns = int(getattr(self.frame, "timestamp_sof", 0) or 0) if self.frame is not None else 0
+        if frame_ts_sof_ns > 0:
+          draw_t_s = float(frame_ts_sof_ns) * 1e-9
+      except Exception:
+        draw_t_s = draw_now
+
+    tracks = self._det_tracker.get_tracked(now=draw_t_s)
     if not tracks:
       return
 

@@ -214,15 +214,18 @@
 - 面板位置：`Lincoln` → `### Obstacle Avoidance (Experimental) ###` → `Auto avoidance`
 - Param：`dp_lincoln_auto_avoid`（bool，默认 `0`）
 - 重要前提：需要盲点传感器（BSM）。未检测到 `carParams.enableBsm==1` 时，不会自动发起变道。
-- 可选提示音：`Lincoln` → `### Obstacle Avoidance (Experimental) ###` → `Hazard alerts`
-  - Param：`dp_lincoln_hazard_alert`（bool，默认 `0`）
+- 同一分组下另有（高速自动超车）：
+  - 面板位置：`Lincoln` → `### Obstacle Avoidance (Experimental) ###` → `Auto overtake`
+  - Param：`dp_lincoln_auto_overtake`（bool，默认 `0`）
+  - 基于 `radarState.leadOne` 的慢车触发（高速），自动发起一次变道超车并在满足条件后回正；同样需要 BSM
+- 提示音（默认开启，无独立开关）
   - 仅用于“危险提示音 + 可视化目标框”，不改变方向/制动控制逻辑。
 
 ### 4.2 数据与流程（端到端）
 
 1) `coned`（目标检测进程）
 - 进程配置：`system/manager/process_config.py`
-- 启动条件：上路且（`dp_lat_cone_detection` 或 `dp_lincoln_auto_avoid` 或 `dp_lincoln_hazard_alert`）为 true
+- 启动条件：上路且（`dp_lat_cone_detection` 或 `dp_lincoln_auto_avoid`）为 true
 - 模型文件：`selfdrive/modeld/models/Cone_YOLO11n.onnx`（构建产物：`Cone_YOLO11n_tinygrad.pkl`）
 - 输出：向 `customReservedRawData0` 发布 JSON（含 `inPath`、`personInPath`、`vehicleInPath`、`hazInPath`、`cones`、`objs`，以及用于稳定性/平顺性的 `*Metric` 与 `*Raw` 字段；其中 `inPath/personInPath/vehicleInPath` 为去抖后的稳定信号）；`objs` 当前包含：
   - `cone(80)`（锥桶）
@@ -271,4 +274,4 @@
 - 音频文件：`selfdrive/assets/sounds/warning_immediate.wav`
 - 播放进程：`selfdrive/ui/soundd.py`
   - 订阅 `customReservedRawData0`，检测 `hazInPath` 从 `False→True` 的跃迁后播放一次
-  - 仅在 `dp_lincoln_hazard_alert==1`、驾驶员未打灯、且车速 ≥ 10mph 时播放（避免无效/误提示）
+  - 仅在驾驶员未打灯、且车速 ≥ 10mph 时播放（避免无效/误提示）

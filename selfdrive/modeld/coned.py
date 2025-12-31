@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import math
 import pickle
 import time
 from pathlib import Path
@@ -38,11 +39,23 @@ TRUCK_CLASS_IDX = 7
 CONE_SCORE_MIN = float(os.getenv("CONE_SCORE_MIN", "0.10"))
 PERSON_SCORE_MIN = float(os.getenv("PERSON_SCORE_MIN", "0.25"))
 VEHICLE_SCORE_MIN = float(os.getenv("VEHICLE_SCORE_MIN", "0.30"))
+PERSON_AREA_MIN_FRAC = float(os.getenv("CONE_PERSON_AREA_MIN_FRAC", "0.004"))
+VEHICLE_AREA_MIN_FRAC = float(os.getenv("CONE_VEHICLE_AREA_MIN_FRAC", "0.010"))
+TWOWHEEL_AREA_MIN_FRAC = float(os.getenv("CONE_TWOWHEEL_AREA_MIN_FRAC", "0.006"))
 NMS_IOU_THRES = float(os.getenv("CONE_NMS_IOU", "0.45"))
 MAX_DET = int(os.getenv("CONE_MAX_DET", "8"))
-PUB_HZ = float(os.getenv("CONE_PUB_HZ", "5"))
+PUB_HZ = float(os.getenv("CONE_PUB_HZ", "10"))
 
-ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid", "dp_lincoln_hazard_alert")
+# Optional edge-based bbox refinement (for visualization).
+# This refines YOLO boxes by running a cheap edge pass inside the ROI and taking the
+# best contour's bounding rect. It's not true instance segmentation; use as a best-effort.
+REFINE_EDGES = bool(int(os.getenv("CONE_REFINE_EDGES", "1")))
+REFINE_MAX_SIDE = int(os.getenv("CONE_REFINE_MAX_SIDE", "320"))
+REFINE_PAD_FRAC = float(os.getenv("CONE_REFINE_PAD_FRAC", "0.08"))
+REFINE_MIN_AREA_FRAC = float(os.getenv("CONE_REFINE_MIN_AREA_FRAC", "0.02"))
+REFINE_IOU_MIN = float(os.getenv("CONE_REFINE_IOU_MIN", "0.25"))
+
+ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid")
 
 
 def _letterbox_rgb(img_rgb: np.ndarray, out_size: int) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -180,6 +193,140 @@ def _dets_metric(dets: list[ConeDet], img_w: int, img_h: int, *, area_min_frac: 
       metric = max(metric, 0.6 * y_score + 0.4 * area_score)
 
   return float(metric)
+
+
+def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+  ax1, ay1, ax2, ay2 = a
+  bx1, by1, bx2, by2 = b
+  ix1 = max(ax1, bx1)
+  iy1 = max(ay1, by1)
+  ix2 = min(ax2, bx2)
+  iy2 = min(ay2, by2)
+  iw = max(0.0, ix2 - ix1)
+  ih = max(0.0, iy2 - iy1)
+  inter = iw * ih
+  if inter <= 0.0:
+    return 0.0
+  area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+  area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+  union = area_a + area_b - inter
+  if union <= 0.0:
+    return 0.0
+  return float(inter / union)
+
+
+def _refine_bbox_edges(img_rgb: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float] | None:
+  h, w = img_rgb.shape[:2]
+  if w <= 0 or h <= 0:
+    return None
+
+  x1 = float(max(0.0, min(float(w), x1)))
+  y1 = float(max(0.0, min(float(h), y1)))
+  x2 = float(max(0.0, min(float(w), x2)))
+  y2 = float(max(0.0, min(float(h), y2)))
+  if x2 <= x1 or y2 <= y1:
+    return None
+
+  bw = x2 - x1
+  bh = y2 - y1
+  pad = int(max(4.0, REFINE_PAD_FRAC * float(max(bw, bh))))
+  rx1 = max(0, int(math.floor(x1)) - pad)
+  ry1 = max(0, int(math.floor(y1)) - pad)
+  rx2 = min(w, int(math.ceil(x2)) + pad)
+  ry2 = min(h, int(math.ceil(y2)) + pad)
+  if rx2 - rx1 < 8 or ry2 - ry1 < 8:
+    return None
+
+  roi = img_rgb[ry1:ry2, rx1:rx2]
+  roi_h, roi_w = roi.shape[:2]
+
+  # Downsample large ROIs for speed, keep aspect ratio.
+  scale = 1.0
+  max_side = float(max(roi_w, roi_h))
+  if REFINE_MAX_SIDE > 0 and max_side > float(REFINE_MAX_SIDE):
+    scale = float(REFINE_MAX_SIDE) / max_side
+    new_w = max(8, int(round(roi_w * scale)))
+    new_h = max(8, int(round(roi_h * scale)))
+    roi = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    roi_h, roi_w = roi.shape[:2]
+
+  gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+  gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+  v = float(np.median(gray))
+  sigma = 0.33
+  lower = int(max(0.0, (1.0 - sigma) * v))
+  upper = int(min(255.0, (1.0 + sigma) * v))
+  edges = cv2.Canny(gray, lower, upper)
+
+  # Close gaps a bit.
+  k = np.ones((3, 3), np.uint8)
+  edges = cv2.dilate(edges, k, iterations=1)
+  edges = cv2.erode(edges, k, iterations=1)
+
+  cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+  if not cnts:
+    return None
+
+  roi_area = float(roi_w * roi_h)
+  min_area = roi_area * float(max(0.0, REFINE_MIN_AREA_FRAC))
+  cx0 = roi_w * 0.5
+  cy0 = roi_h * 0.5
+  best_score = -1.0
+  best_rect: tuple[int, int, int, int] | None = None
+  for c in cnts:
+    x, y, cw, ch = cv2.boundingRect(c)
+    if cw <= 1 or ch <= 1:
+      continue
+    area = float(cw * ch)
+    if area < min_area:
+      continue
+
+    cx = x + cw * 0.5
+    cy = y + ch * 0.5
+    dist = math.hypot(cx - cx0, cy - cy0) / max(1.0, float(max(roi_w, roi_h)))
+    border = (x <= 0) or (y <= 0) or (x + cw >= roi_w - 1) or (y + ch >= roi_h - 1)
+    border_pen = 0.75 if border else 1.0
+    score = area * (1.0 - min(0.9, dist)) * border_pen
+    if score > best_score:
+      best_score = score
+      best_rect = (x, y, cw, ch)
+
+  if best_rect is None:
+    return None
+
+  x, y, cw, ch = best_rect
+  # Scale back to original ROI coordinates.
+  if scale != 1.0:
+    inv = 1.0 / scale
+    x = int(round(x * inv))
+    y = int(round(y * inv))
+    cw = int(round(cw * inv))
+    ch = int(round(ch * inv))
+
+  gx1 = float(rx1 + x)
+  gy1 = float(ry1 + y)
+  gx2 = float(rx1 + x + cw)
+  gy2 = float(ry1 + y + ch)
+
+  gx1 = float(max(0.0, min(float(w), gx1)))
+  gy1 = float(max(0.0, min(float(h), gy1)))
+  gx2 = float(max(0.0, min(float(w), gx2)))
+  gy2 = float(max(0.0, min(float(h), gy2)))
+  if gx2 <= gx1 or gy2 <= gy1:
+    return None
+
+  iou = _bbox_iou((x1, y1, x2, y2), (gx1, gy1, gx2, gy2))
+  if iou < REFINE_IOU_MIN:
+    return None
+
+  # Small padding to avoid cutting off the object.
+  pad2 = int(max(2.0, 0.02 * float(max(bw, bh))))
+  gx1 = float(max(0.0, gx1 - pad2))
+  gy1 = float(max(0.0, gy1 - pad2))
+  gx2 = float(min(float(w), gx2 + pad2))
+  gy2 = float(min(float(h), gy2 + pad2))
+  return gx1, gy1, gx2, gy2
 
 
 class _BoolDebouncer:
@@ -403,6 +550,7 @@ def main() -> None:
     next_pub_t = now + pub_dt
 
     enabled = any(params.get_bool(p) for p in ENABLE_PARAMS)
+    img_rgb: np.ndarray | None = None
     cones: list[ConeDet] = []
     objs: list[ObjDet] = []
     cone_in_path_raw = False
@@ -425,14 +573,20 @@ def main() -> None:
         cone_in_path_raw = _cones_in_path(cones, img_rgb.shape[1], img_rgb.shape[0])
         # "Hazard" is a conservative heuristic for driver alerting (not used for auto lane changes).
         persons = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls == PERSON_CLASS_IDX]
-        vehicles = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (BICYCLE_CLASS_IDX, CAR_CLASS_IDX, MOTORCYCLE_CLASS_IDX, BUS_CLASS_IDX, TRUCK_CLASS_IDX)]
-        person_in_path_raw = _dets_in_path(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.004)
-        vehicle_in_path_raw = _dets_in_path(vehicles, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.010)
+        two_wheel = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (BICYCLE_CLASS_IDX, MOTORCYCLE_CLASS_IDX)]
+        four_wheel = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (CAR_CLASS_IDX, BUS_CLASS_IDX, TRUCK_CLASS_IDX)]
+
+        person_in_path_raw = _dets_in_path(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=PERSON_AREA_MIN_FRAC)
+        two_wheel_in_path_raw = _dets_in_path(two_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=TWOWHEEL_AREA_MIN_FRAC)
+        four_wheel_in_path_raw = _dets_in_path(four_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=VEHICLE_AREA_MIN_FRAC)
+        vehicle_in_path_raw = two_wheel_in_path_raw or four_wheel_in_path_raw
         hazard_in_path_raw = person_in_path_raw or vehicle_in_path_raw
 
         cone_metric = _dets_metric(cones, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.0)
-        person_metric = _dets_metric(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.004)
-        vehicle_metric = _dets_metric(vehicles, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.010)
+        person_metric = _dets_metric(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=PERSON_AREA_MIN_FRAC)
+        two_wheel_metric = _dets_metric(two_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=TWOWHEEL_AREA_MIN_FRAC)
+        four_wheel_metric = _dets_metric(four_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=VEHICLE_AREA_MIN_FRAC)
+        vehicle_metric = max(two_wheel_metric, four_wheel_metric)
       except Exception:
         cloudlog.exception("cone detection failed")
         cones = []
@@ -451,6 +605,21 @@ def main() -> None:
       cone_metric_hold = 0.0
       person_metric_hold = 0.0
       vehicle_metric_hold = 0.0
+
+    objs_refined: list[ObjDet] = list(objs)
+    if enabled and REFINE_EDGES and img_rgb is not None and objs:
+      objs_refined = []
+      try:
+        for o in objs:
+          refined = _refine_bbox_edges(img_rgb, o.x1, o.y1, o.x2, o.y2)
+          if refined is None:
+            objs_refined.append(o)
+          else:
+            rx1, ry1, rx2, ry2 = refined
+            objs_refined.append(ObjDet(int(o.cls), float(rx1), float(ry1), float(rx2), float(ry2), float(o.score)))
+      except Exception:
+        # Best-effort only; fall back to raw boxes on any failure.
+        objs_refined = list(objs)
 
     # Debounce (2 frames to turn on, 3 frames to turn off)
     cone_in_path = cone_deb.update(cone_in_path_raw)
@@ -478,6 +647,7 @@ def main() -> None:
       cones=cones,
       in_path=cone_in_path,
       objects=objs,
+      objects_refined=objs_refined,
       hazard_in_path=hazard_in_path,
       person_in_path=person_in_path,
       vehicle_in_path=vehicle_in_path,

@@ -87,8 +87,11 @@ class CarInterface(CarInterfaceBase):
       ret.minEnableSpeed = 20.0 * CV.MPH_TO_MS
 
     # BSM: Side_Detect_L_Stat, Side_Detect_R_Stat
+    # On some platforms these messages can be routed on different buses (e.g. CAN FD camera bus),
+    # so check both main and camera fingerprints.
     # TODO: detect bsm in car_fw?
-    ret.enableBsm = 0x3A6 in fingerprint[CAN.main] and 0x3A7 in fingerprint[CAN.main]
+    ret.enableBsm = ((0x3A6 in fingerprint[CAN.main] and 0x3A7 in fingerprint[CAN.main]) or
+                     (0x3A6 in fingerprint[CAN.camera] and 0x3A7 in fingerprint[CAN.camera]))
 
     # LCA can steer down to zero
     ret.minSteerSpeed = 0.

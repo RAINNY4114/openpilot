@@ -23,7 +23,9 @@ class ObjDet:
 
 
 def encode_cone_detections(*, frame_id: int, timestamp_sof: int, img_width: int, img_height: int,
-                           cones: list[ConeDet], in_path: bool, objects: list[ObjDet] | None = None,
+                           cones: list[ConeDet], in_path: bool,
+                           objects: list[ObjDet] | None = None,
+                           objects_refined: list[ObjDet] | None = None,
                            hazard_in_path: bool = False, person_in_path: bool = False, vehicle_in_path: bool = False,
                            cone_metric: float = 0.0, person_metric: float = 0.0, vehicle_metric: float = 0.0,
                            obstacle_metric: float = 0.0, hazard_metric: float = 0.0,
@@ -56,6 +58,10 @@ def encode_cone_detections(*, frame_id: int, timestamp_sof: int, img_width: int,
     "objs": [
       {"c": int(o.cls), "x1": float(o.x1), "y1": float(o.y1), "x2": float(o.x2), "y2": float(o.y2), "s": float(o.score)}
       for o in (objects or [])
+    ],
+    "objsR": [
+      {"c": int(o.cls), "x1": float(o.x1), "y1": float(o.y1), "x2": float(o.x2), "y2": float(o.y2), "s": float(o.score)}
+      for o in (objects_refined or [])
     ],
   }
   return json.dumps(payload, separators=(",", ":")).encode("utf-8")

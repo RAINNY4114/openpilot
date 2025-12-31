@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class _Track:
   vy2: float = 0.0
   last_update_t: float = 0.0
   missed: int = 0
+  P: np.ndarray = field(default_factory=lambda: np.diag([100.0, 100.0, 100.0, 100.0, 10000.0, 10000.0, 10000.0, 10000.0]).astype(np.float32))
 
   def bbox_at(self, now: float) -> tuple[float, float, float, float]:
     dt = max(0.0, float(now - self.last_update_t))
@@ -91,8 +93,8 @@ class ObjectTracker:
   """
   Light-weight tracker (SORT-style track-by-detection) with:
   - IoU matching
-  - simple constant-velocity prediction
-  - EMA smoothing for bbox and score
+  - Kalman filter for bbox smoothing/prediction (constant velocity)
+  - EMA smoothing for score
 
   Designed for small `MAX_DET` inputs from `coned` (<= ~8 objects).
   """
@@ -188,24 +190,65 @@ class ObjectTracker:
         t = self._tracks[ti]
         d = dets[di]
 
-        # Predict to `now` then update with EMA smoothing.
-        px1, py1, px2, py2 = t.bbox_at(now)
         dt = max(1e-3, float(now - t.last_update_t))
-        inst_vx1 = (d.x1 - px1) / dt
-        inst_vy1 = (d.y1 - py1) / dt
-        inst_vx2 = (d.x2 - px2) / dt
-        inst_vy2 = (d.y2 - py2) / dt
 
-        t.vx1 = self._vel_alpha * t.vx1 + (1.0 - self._vel_alpha) * inst_vx1
-        t.vy1 = self._vel_alpha * t.vy1 + (1.0 - self._vel_alpha) * inst_vy1
-        t.vx2 = self._vel_alpha * t.vx2 + (1.0 - self._vel_alpha) * inst_vx2
-        t.vy2 = self._vel_alpha * t.vy2 + (1.0 - self._vel_alpha) * inst_vy2
+        # 8D Kalman state: [x1, y1, x2, y2, vx1, vy1, vx2, vy2]
+        x = np.array([t.x1, t.y1, t.x2, t.y2, t.vx1, t.vy1, t.vx2, t.vy2], dtype=np.float32)
 
-        a = self._bbox_alpha
-        t.x1 = a * d.x1 + (1.0 - a) * px1
-        t.y1 = a * d.y1 + (1.0 - a) * py1
-        t.x2 = a * d.x2 + (1.0 - a) * px2
-        t.y2 = a * d.y2 + (1.0 - a) * py2
+        F = np.eye(8, dtype=np.float32)
+        F[0, 4] = dt
+        F[1, 5] = dt
+        F[2, 6] = dt
+        F[3, 7] = dt
+
+        # Predict
+        x = F @ x
+        P = F @ t.P @ F.T
+
+        bw = max(1.0, float(d.x2 - d.x1))
+        bh = max(1.0, float(d.y2 - d.y1))
+        size = max(bw, bh)
+
+        # Process noise (scaled with object size and dt)
+        q_pos = float(max(4.0, 0.02 * size)) ** 2
+        q_vel = float(max(20.0, 0.20 * size)) ** 2
+        Q = np.diag([q_pos, q_pos, q_pos, q_pos, q_vel, q_vel, q_vel, q_vel]).astype(np.float32) * dt
+        P = P + Q
+
+        # Measurement update
+        z = np.array([d.x1, d.y1, d.x2, d.y2], dtype=np.float32)
+        H = np.zeros((4, 8), dtype=np.float32)
+        H[0, 0] = 1.0
+        H[1, 1] = 1.0
+        H[2, 2] = 1.0
+        H[3, 3] = 1.0
+
+        r_x = float(max(3.0, 0.03 * bw))
+        r_y = float(max(3.0, 0.03 * bh))
+        R = np.diag([r_x * r_x, r_y * r_y, r_x * r_x, r_y * r_y]).astype(np.float32)
+
+        y = z - (H @ x)
+        S = H @ P @ H.T + R
+        PHT = P @ H.T
+        # K = PHT @ inv(S)  (use solve for stability)
+        K = np.linalg.solve(S, PHT.T).T
+        x = x + (K @ y)
+        P = (np.eye(8, dtype=np.float32) - (K @ H)) @ P
+
+        # Write back
+        t.x1, t.y1, t.x2, t.y2, t.vx1, t.vy1, t.vx2, t.vy2 = (float(v) for v in x.tolist())
+        t.P = P
+
+        # Sanity: keep bbox valid
+        if t.x2 <= t.x1:
+          mid = 0.5 * (t.x1 + t.x2)
+          t.x1 = mid - 1.0
+          t.x2 = mid + 1.0
+        if t.y2 <= t.y1:
+          mid = 0.5 * (t.y1 + t.y2)
+          t.y1 = mid - 1.0
+          t.y2 = mid + 1.0
+
         t.score = self._score_alpha * float(d.score) + (1.0 - self._score_alpha) * float(t.score)
         t.cls = int(d.cls)
         t.last_update_t = float(now)

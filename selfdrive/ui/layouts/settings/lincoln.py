@@ -137,10 +137,10 @@ class LincolnLayout(Widget):
         callback=lambda val: self._params.put_bool("dp_lincoln_auto_avoid", val),
       ),
       toggle_item(
-        title=lambda: tr("Hazard alerts"),
-        description=lambda: tr("Play a warning chime when pedestrians/vehicles are detected in-path. Visualization only; no steering/braking changes."),
-        initial_state=self._params.get_bool("dp_lincoln_hazard_alert"),
-        callback=lambda val: self._params.put_bool("dp_lincoln_hazard_alert", val),
+        title=lambda: tr("Auto overtake"),
+        description=lambda: tr("Highway-only: when a slower lead vehicle is detected ahead and the passing lane is clear, automatically initiate a lane change to pass, and return when clear. Experimental and requires blindspot sensors."),
+        initial_state=self._params.get_bool("dp_lincoln_auto_overtake"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_auto_overtake", val),
       ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(

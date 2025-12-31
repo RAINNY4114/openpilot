@@ -176,6 +176,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_htd_torque_release_nm", {PERSISTENT, FLOAT, "0.6"}},
     {"dp_htd_recovery_delay", {PERSISTENT, FLOAT, "1.0"}},
     {"dp_lincoln_auto_avoid", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_auto_overtake", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_hazard_alert", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_hud_enhanced", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_perf_info_enabled", {PERSISTENT, BOOL, "0"}},

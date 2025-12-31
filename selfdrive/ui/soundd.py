@@ -4,7 +4,7 @@ import numpy as np
 import time
 import wave
 
-from cereal import car, messaging
+from cereal import car, messaging, log
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -35,8 +35,11 @@ AUTO_AVOID_CHIME_MIN_INTERVAL_S = 2.0
 AUTO_AVOID_CHIME_STALE_TIMEOUT_S = 1.0
 AUTO_AVOID_CHIME_SPEED_MIN = 10 * CV.MPH_TO_MS
 HAZARD_CHIME_MIN_INTERVAL_S = 2.0
+MANEUVER_VOICE_MIN_INTERVAL_S = 2.0
 
 AudibleAlert = car.CarControl.HUDControl.AudibleAlert
+LaneChangeState = log.LaneChangeState
+LaneChangeDirection = log.LaneChangeDirection
 
 
 sound_list: dict[int, tuple[str, int | None, float]] = {
@@ -98,10 +101,17 @@ class Soundd:
     self.dp_voice_frame = 0
     self.dp_voice_prev_left = False
     self.dp_voice_prev_right = False
+    self._dp_maneuver_voice_playing = False
+    self._dp_maneuver_voice_sound: np.ndarray | None = None
+    self._dp_maneuver_voice_frame = 0
+    self._dp_maneuver_voice_next_allowed = 0.0
+    self._dp_maneuver_prev_lc_state = LaneChangeState.off
+    self._dp_maneuver_prev_lc_dir = LaneChangeDirection.none
 
     # dp lincoln auto-avoid chime (plays alert_chime.wav once when avoidance triggers)
     self._dp_auto_avoid_enabled = self._params.get_bool("dp_lincoln_auto_avoid")
-    self._dp_hazard_alert_enabled = self._params.get_bool("dp_lincoln_hazard_alert")
+    self._dp_auto_overtake_enabled = self._params.get_bool("dp_lincoln_auto_overtake")
+    self._dp_hazard_alert_enabled = True
     self._dp_auto_avoid_last_param_check = 0.0
     self._dp_auto_avoid_prev_in_path = False
     self._dp_auto_avoid_last_det_t = 0.0
@@ -134,7 +144,18 @@ class Soundd:
     self.dp_voice_sounds: dict[str, np.ndarray] = {}
     base = os.path.join(BASEDIR, "selfdrive", "assets", "sounds")
     for side in ("left", "right"):
-      path = os.path.join(base, f"{side}.wav")
+      # Prefer directional voice prompts (e.g. "left-side.wav") when available,
+      # but fall back to the original filenames for backwards compatibility.
+      candidates = (f"{side}-side.wav", f"{side}.wav")
+      path = None
+      for fname in candidates:
+        p = os.path.join(base, fname)
+        if os.path.exists(p):
+          path = p
+          break
+      if path is None:
+        cloudlog.warning(f"Missing blindspot voice file(s): {', '.join(candidates)}")
+        continue
       try:
         with wave.open(path, 'r') as wavefile:
           assert wavefile.getnchannels() == 1
@@ -199,6 +220,7 @@ class Soundd:
 
     base_audio = ret * self.current_volume
     base_audio += self._dp_voice_get_frames(frames)
+    base_audio += self._dp_maneuver_voice_get_frames(frames)
     base_audio += self._dp_auto_avoid_get_frames(frames)
     base_audio += self._dp_hazard_get_frames(frames)
     return np.clip(base_audio, -1.0, 1.0)
@@ -223,7 +245,8 @@ class Soundd:
     self._dp_auto_avoid_last_param_check = now
     try:
       self._dp_auto_avoid_enabled = self._params.get_bool("dp_lincoln_auto_avoid")
-      self._dp_hazard_alert_enabled = self._params.get_bool("dp_lincoln_hazard_alert")
+      self._dp_auto_overtake_enabled = self._params.get_bool("dp_lincoln_auto_overtake")
+      self._dp_hazard_alert_enabled = True
     except Exception:
       cloudlog.exception("Failed refreshing Lincoln auto-avoid params")
 
@@ -241,6 +264,23 @@ class Soundd:
     if self.dp_voice_frame >= sound.shape[0]:
       self.dp_voice_playing = False
       self.dp_voice_sound = None
+    return out * self.dp_voice_volume
+
+  def _dp_maneuver_voice_get_frames(self, frames: int) -> np.ndarray:
+    if not self._dp_maneuver_voice_playing or self._dp_maneuver_voice_sound is None:
+      return np.zeros(frames, dtype=np.float32)
+
+    sound = self._dp_maneuver_voice_sound
+    out = np.zeros(frames, dtype=np.float32)
+    remaining = sound.shape[0] - self._dp_maneuver_voice_frame
+    to_copy = min(frames, remaining)
+    if to_copy > 0:
+      out[:to_copy] = sound[self._dp_maneuver_voice_frame:self._dp_maneuver_voice_frame + to_copy]
+      self._dp_maneuver_voice_frame += to_copy
+    if self._dp_maneuver_voice_frame >= sound.shape[0]:
+      self._dp_maneuver_voice_playing = False
+      self._dp_maneuver_voice_sound = None
+      self._dp_maneuver_voice_frame = 0
     return out * self.dp_voice_volume
 
   def _dp_auto_avoid_get_frames(self, frames: int) -> np.ndarray:
@@ -300,6 +340,19 @@ class Soundd:
     self.dp_voice_playing = True
     self.dp_voice_next_allowed = now + self.dp_voice_interval
 
+  def _maybe_start_dp_maneuver_voice(self, side: str, now: float) -> None:
+    if now < self._dp_maneuver_voice_next_allowed:
+      return
+    if self.current_alert != AudibleAlert.none or self.dp_voice_playing or self._dp_maneuver_voice_playing:
+      return
+    sound = self.dp_voice_sounds.get(side)
+    if sound is None or sound.size == 0:
+      return
+    self._dp_maneuver_voice_sound = sound
+    self._dp_maneuver_voice_frame = 0
+    self._dp_maneuver_voice_playing = True
+    self._dp_maneuver_voice_next_allowed = now + MANEUVER_VOICE_MIN_INTERVAL_S
+
   def _maybe_start_dp_auto_avoid_chime(self, now: float) -> None:
     if not self._dp_auto_avoid_enabled:
       return
@@ -339,6 +392,34 @@ class Soundd:
 
     self.dp_voice_prev_left = left
     self.dp_voice_prev_right = right
+
+  def _update_dp_maneuver_voice_state(self, sm, now: float) -> None:
+    # Voice prompts for automatic lane-change maneuvers (avoidance/overtake).
+    if not (self._dp_auto_avoid_enabled or self._dp_auto_overtake_enabled):
+      self._dp_maneuver_prev_lc_state = LaneChangeState.off
+      self._dp_maneuver_prev_lc_dir = LaneChangeDirection.none
+      return
+
+    if not sm.valid.get("modelV2", False):
+      return
+
+    if not getattr(sm["selfdriveState"], "enabled", False):
+      self._dp_maneuver_prev_lc_state = LaneChangeState.off
+      self._dp_maneuver_prev_lc_dir = LaneChangeDirection.none
+      return
+
+    meta = sm["modelV2"].meta
+    lc_state = getattr(meta, "laneChangeState", LaneChangeState.off)
+    lc_dir = getattr(meta, "laneChangeDirection", LaneChangeDirection.none)
+
+    started = (self._dp_maneuver_prev_lc_state != LaneChangeState.laneChangeStarting and
+               lc_state == LaneChangeState.laneChangeStarting)
+    if started and lc_dir in (LaneChangeDirection.left, LaneChangeDirection.right):
+      side = "left" if lc_dir == LaneChangeDirection.left else "right"
+      self._maybe_start_dp_maneuver_voice(side, now)
+
+    self._dp_maneuver_prev_lc_state = lc_state
+    self._dp_maneuver_prev_lc_dir = lc_dir
 
   def _update_dp_auto_avoid_state(self, sm, now: float) -> None:
     in_path = False
@@ -416,7 +497,7 @@ class Soundd:
     # sounddevice must be imported after forking processes
     import sounddevice as sd
 
-    sm = messaging.SubMaster(['selfdriveState', 'soundPressure', 'carState', 'carParams', 'customReservedRawData0'])
+    sm = messaging.SubMaster(['selfdriveState', 'soundPressure', 'carState', 'carParams', 'customReservedRawData0', 'modelV2'])
 
     with self.get_stream(sd) as stream:
       rk = Ratekeeper(20)
@@ -436,6 +517,7 @@ class Soundd:
         if sm.alive['carState']:
           self._update_dp_voice_state(sm['carState'], now)
         self._update_dp_auto_avoid_state(sm, now)
+        self._update_dp_maneuver_voice_state(sm, now)
 
         rk.keep_time()
 
