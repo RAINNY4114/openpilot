@@ -25,8 +25,8 @@ WEBRTCD_HOST, WEBRTCD_PORT = "localhost", 5001
 ## UTILS
 async def play_sound(sound: str):
   SOUNDS = {
-    "engage": "selfdrive/assets/sounds/engage.wav",
-    "disengage": "selfdrive/assets/sounds/disengage.wav",
+    "engage": "selfdrive/assets/sounds/Autopilot Engage.wav",
+    "disengage": "selfdrive/assets/sounds/Autopilot Disengage.wav",
     "error": "selfdrive/assets/sounds/warning_immediate.wav",
   }
   assert sound in SOUNDS

@@ -44,8 +44,8 @@ LaneChangeDirection = log.LaneChangeDirection
 
 sound_list: dict[int, tuple[str, int | None, float]] = {
   # AudibleAlert, file name, play count (none for infinite)
-  AudibleAlert.engage: ("engage.wav", 1, MAX_VOLUME),
-  AudibleAlert.disengage: ("disengage.wav", 1, MAX_VOLUME),
+  AudibleAlert.engage: ("Autopilot Engage.wav", 1, MAX_VOLUME),
+  AudibleAlert.disengage: ("Autopilot Disengage.wav", 1, MAX_VOLUME),
   AudibleAlert.refuse: ("refuse.wav", 1, MAX_VOLUME),
 
   AudibleAlert.prompt: ("prompt.wav", 1, MAX_VOLUME),
@@ -55,11 +55,6 @@ sound_list: dict[int, tuple[str, int | None, float]] = {
   AudibleAlert.warningSoft: ("warning_soft.wav", None, MAX_VOLUME),
   AudibleAlert.warningImmediate: ("warning_immediate.wav", None, MAX_VOLUME),
 }
-if HARDWARE.get_device_type() == "tizi":
-  sound_list.update({
-    AudibleAlert.engage: ("engage_tizi.wav", 1, MAX_VOLUME),
-    AudibleAlert.disengage: ("disengage_tizi.wav", 1, MAX_VOLUME),
-  })
 
 def check_selfdrive_timeout_alert(sm):
   ss_missing = time.monotonic() - sm.recv_time['selfdriveState']
@@ -76,6 +71,7 @@ class Soundd:
     self._params = Params()
     self.load_sounds()
     self.load_dp_voice_sounds()
+    self.load_dp_maneuver_voice_sounds()
     self.load_dp_avoid_sounds()
 
     self.current_alert = AudibleAlert.none
@@ -144,9 +140,9 @@ class Soundd:
     self.dp_voice_sounds: dict[str, np.ndarray] = {}
     base = os.path.join(BASEDIR, "selfdrive", "assets", "sounds")
     for side in ("left", "right"):
-      # Prefer directional voice prompts (e.g. "left-side.wav") when available,
-      # but fall back to the original filenames for backwards compatibility.
-      candidates = (f"{side}-side.wav", f"{side}.wav")
+      # Blindspot voice prompts: prefer the original filenames ("left.wav"/"right.wav").
+      # Fall back to "{side}-side.wav" only for backwards compatibility if needed.
+      candidates = (f"{side}.wav", f"{side}-side.wav")
       path = None
       for fname in candidates:
         p = os.path.join(base, fname)
@@ -168,6 +164,35 @@ class Soundd:
         cloudlog.warning(f"Missing blindspot voice file: {path}")
       except Exception:
         cloudlog.exception(f"Failed loading blindspot voice file: {path}")
+
+  def load_dp_maneuver_voice_sounds(self) -> None:
+    # Automatic lane-change maneuver voice prompts (avoidance/overtake):
+    # prefer "{side}-side.wav", fall back to "{side}.wav".
+    self.dp_maneuver_voice_sounds: dict[str, np.ndarray] = {}
+    base = os.path.join(BASEDIR, "selfdrive", "assets", "sounds")
+    for side in ("left", "right"):
+      candidates = (f"{side}-side.wav", f"{side}.wav")
+      path = None
+      for fname in candidates:
+        p = os.path.join(base, fname)
+        if os.path.exists(p):
+          path = p
+          break
+      if path is None:
+        cloudlog.warning(f"Missing maneuver voice file(s): {', '.join(candidates)}")
+        continue
+      try:
+        with wave.open(path, 'r') as wavefile:
+          assert wavefile.getnchannels() == 1
+          assert wavefile.getsampwidth() == 2
+          assert wavefile.getframerate() == SAMPLE_RATE
+          length = wavefile.getnframes()
+          data = np.frombuffer(wavefile.readframes(length), dtype=np.int16).astype(np.float32) / (2**16/2)
+          self.dp_maneuver_voice_sounds[side] = data
+      except FileNotFoundError:
+        cloudlog.warning(f"Missing maneuver voice file: {path}")
+      except Exception:
+        cloudlog.exception(f"Failed loading maneuver voice file: {path}")
 
   def load_dp_avoid_sounds(self):
     self._dp_avoid_chime_sound: np.ndarray | None = None
@@ -345,7 +370,7 @@ class Soundd:
       return
     if self.current_alert != AudibleAlert.none or self.dp_voice_playing or self._dp_maneuver_voice_playing:
       return
-    sound = self.dp_voice_sounds.get(side)
+    sound = self.dp_maneuver_voice_sounds.get(side)
     if sound is None or sound.size == 0:
       return
     self._dp_maneuver_voice_sound = sound
