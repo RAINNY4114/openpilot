@@ -309,7 +309,7 @@ class HudRenderer(Widget):
 
     window_m = max(30, min(190, self._safe_int_param("dp_lincoln_curve_window_m", 130)))
     k_enter_milli = max(2, min(20, self._safe_int_param("dp_lincoln_curve_k_enter", 4)))
-    k_enter = (k_enter_milli / 1000.0) * self._interp(v_ego, (0.0, 25.0, 40.0), (1.0, 0.9, 0.8))
+    k_enter = (k_enter_milli / 1000.0)
     k_exit = k_enter * 0.70
 
     k_max = 0.0
@@ -328,7 +328,7 @@ class HudRenderer(Widget):
       except Exception:
         continue
 
-      v_pred_f = max(1.0, min(100.0, v_pred_f))
+      v_pred_f = max(max(1.0, v_ego * 0.7), min(100.0, v_pred_f))
       k_signed = turn_rate_f / v_pred_f
       k = abs(k_signed)
       k = min(k, 0.02)
@@ -365,7 +365,7 @@ class HudRenderer(Widget):
     if not self._curve_active:
       return
 
-    v_limit = math.sqrt(1.0 / max(self._curve_k_smooth, 1e-4))
+    v_limit = math.sqrt(1.8 / max(self._curve_k_smooth, 1e-4))
     speed_conversion = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
     v_limit_disp = v_limit * speed_conversion
     if not math.isfinite(v_limit_disp) or v_limit_disp <= 0.0:

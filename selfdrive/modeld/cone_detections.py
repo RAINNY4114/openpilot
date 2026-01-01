@@ -24,14 +24,15 @@ class ObjDet:
 
 def encode_cone_detections(*, frame_id: int, timestamp_sof: int, img_width: int, img_height: int,
                            cones: list[ConeDet], in_path: bool,
-                           objects: list[ObjDet] | None = None,
-                           objects_refined: list[ObjDet] | None = None,
-                           hazard_in_path: bool = False, person_in_path: bool = False, vehicle_in_path: bool = False,
-                           cone_metric: float = 0.0, person_metric: float = 0.0, vehicle_metric: float = 0.0,
-                           obstacle_metric: float = 0.0, hazard_metric: float = 0.0,
-                           in_path_raw: bool = False, person_in_path_raw: bool = False, vehicle_in_path_raw: bool = False,
-                           hazard_in_path_raw: bool = False,
-                           version: int = 1) -> bytes:
+                            objects: list[ObjDet] | None = None,
+                            objects_refined: list[ObjDet] | None = None,
+                            hazard_in_path: bool = False, person_in_path: bool = False, vehicle_in_path: bool = False,
+                            cone_metric: float = 0.0, person_metric: float = 0.0, vehicle_metric: float = 0.0,
+                            obstacle_metric: float = 0.0, hazard_metric: float = 0.0,
+                            in_path_raw: bool = False, person_in_path_raw: bool = False, vehicle_in_path_raw: bool = False,
+                            hazard_in_path_raw: bool = False,
+                            left_lane_haz_dist_m: float = 0.0, right_lane_haz_dist_m: float = 0.0,
+                            version: int = 1) -> bytes:
   payload = {
     "v": int(version),
     "frameId": int(frame_id),
@@ -51,6 +52,8 @@ def encode_cone_detections(*, frame_id: int, timestamp_sof: int, img_width: int,
     "vehicleMetric": float(vehicle_metric),
     "obstacleMetric": float(obstacle_metric),
     "hazMetric": float(hazard_metric),
+    "leftLaneHazDistM": float(left_lane_haz_dist_m),
+    "rightLaneHazDistM": float(right_lane_haz_dist_m),
     "cones": [
       {"x1": float(c.x1), "y1": float(c.y1), "x2": float(c.x2), "y2": float(c.y2), "s": float(c.score)}
       for c in cones

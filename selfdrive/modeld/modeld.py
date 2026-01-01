@@ -50,6 +50,12 @@ LAT_SMOOTH_SECONDS = 0.1
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
 
+# Auto lane-change safety: block auto lane changes when the target lane has a detected hazard
+# within a conservative forward distance. Distance is derived from a time-gap and clamped.
+AUTO_LC_TARGET_LANE_TGAP_S = float(os.getenv("DP_LINCOLN_AUTO_LC_TGAP_S", "2.0"))
+AUTO_LC_TARGET_LANE_MIN_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MIN_DIST_M", "25.0"))
+AUTO_LC_TARGET_LANE_MAX_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MAX_DIST_M", "90.0"))
+
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
@@ -307,6 +313,8 @@ def main(demo=False):
   AO = AutoOvertakeHelper()
   cone_in_path = False
   vehicle_in_path = False
+  left_lane_haz_dist_m = 0.0
+  right_lane_haz_dist_m = 0.0
   cone_last_update_t = 0.0
 
   while True:
@@ -351,6 +359,12 @@ def main(demo=False):
         if payload is not None:
           cone_in_path = bool(payload.get("inPath", False))
           vehicle_in_path = bool(payload.get("vehicleInPath", False))
+          try:
+            left_lane_haz_dist_m = float(payload.get("leftLaneHazDistM", 0.0) or 0.0)
+            right_lane_haz_dist_m = float(payload.get("rightLaneHazDistM", 0.0) or 0.0)
+          except Exception:
+            left_lane_haz_dist_m = 0.0
+            right_lane_haz_dist_m = 0.0
           cone_last_update_t = time.monotonic()
       except Exception:
         cloudlog.exception("failed to parse cone detections")
@@ -358,6 +372,8 @@ def main(demo=False):
     if time.monotonic() - cone_last_update_t > 1.0:
       cone_in_path = False
       vehicle_in_path = False
+      left_lane_haz_dist_m = 0.0
+      right_lane_haz_dist_m = 0.0
 
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
@@ -429,6 +445,14 @@ def main(demo=False):
       bsm_available = bool(sm.valid.get("carParams", False) and sm["carParams"].enableBsm)
       left_ok = bsm_available and (not cs.leftBlindspot) and (not RED.left_edge_detected)
       right_ok = bsm_available and (not cs.rightBlindspot) and (not RED.right_edge_detected)
+      # Additional forward check: don't auto lane-change into an occupied target lane.
+      # This is based on coned's YOLO detections; values are 0.0 when not available.
+      target_lane_block_dist_m = max(AUTO_LC_TARGET_LANE_MIN_DIST_M,
+                                     min(AUTO_LC_TARGET_LANE_MAX_DIST_M, float(v_ego) * AUTO_LC_TARGET_LANE_TGAP_S))
+      if left_lane_haz_dist_m > 0.1 and left_lane_haz_dist_m < target_lane_block_dist_m:
+        left_ok = False
+      if right_lane_haz_dist_m > 0.1 and right_lane_haz_dist_m < target_lane_block_dist_m:
+        right_ok = False
 
       # Highway auto-overtake (lead-based). Uses radarState (which is also populated on radarless platforms).
       lead_present = False

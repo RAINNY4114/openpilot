@@ -16,6 +16,7 @@ from msgq.visionipc import VisionIpcClient, VisionStreamType, VisionBuf
 from openpilot.common.params import Params
 from openpilot.common.realtime import config_realtime_process
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from tinygrad.tensor import Tensor
 
 from openpilot.selfdrive.modeld.cone_detections import ConeDet, encode_cone_detections
@@ -34,6 +35,9 @@ CAR_CLASS_IDX = 2
 MOTORCYCLE_CLASS_IDX = 3
 BUS_CLASS_IDX = 5
 TRUCK_CLASS_IDX = 7
+
+# Lane-change safety: treat these classes as "vehicles" for adjacent-lane occupancy.
+LC_VEHICLE_CLASS_IDS = {BICYCLE_CLASS_IDX, MOTORCYCLE_CLASS_IDX, CAR_CLASS_IDX, BUS_CLASS_IDX, TRUCK_CLASS_IDX}
 
 # Runtime tuning via env (keeps defaults safe-ish, but still experimental)
 CONE_SCORE_MIN = float(os.getenv("CONE_SCORE_MIN", "0.10"))
@@ -55,7 +59,17 @@ REFINE_PAD_FRAC = float(os.getenv("CONE_REFINE_PAD_FRAC", "0.08"))
 REFINE_MIN_AREA_FRAC = float(os.getenv("CONE_REFINE_MIN_AREA_FRAC", "0.02"))
 REFINE_IOU_MIN = float(os.getenv("CONE_REFINE_IOU_MIN", "0.25"))
 
-ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid")
+ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid", "dp_lincoln_auto_overtake")
+
+# Target-lane forward occupancy (for auto lane-change safety).
+# Distance is estimated from bbox height using a simple pinhole approximation.
+LC_ASSUMED_VEHICLE_HEIGHT_M = float(os.getenv("CONE_LC_ASSUMED_VEHICLE_HEIGHT_M", "1.5"))
+LC_ASSUMED_PERSON_HEIGHT_M = float(os.getenv("CONE_LC_ASSUMED_PERSON_HEIGHT_M", "1.7"))
+LC_LANE_Y_MIN_FRAC = float(os.getenv("CONE_LC_LANE_Y_MIN_FRAC", "0.20"))
+LC_LEFT_LANE_X_MIN_FRAC = float(os.getenv("CONE_LC_LEFT_LANE_X_MIN_FRAC", "0.05"))
+LC_LEFT_LANE_X_MAX_FRAC = float(os.getenv("CONE_LC_LEFT_LANE_X_MAX_FRAC", "0.35"))
+LC_RIGHT_LANE_X_MIN_FRAC = float(os.getenv("CONE_LC_RIGHT_LANE_X_MIN_FRAC", "0.65"))
+LC_RIGHT_LANE_X_MAX_FRAC = float(os.getenv("CONE_LC_RIGHT_LANE_X_MAX_FRAC", "0.95"))
 
 
 def _letterbox_rgb(img_rgb: np.ndarray, out_size: int) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -193,6 +207,61 @@ def _dets_metric(dets: list[ConeDet], img_w: int, img_h: int, *, area_min_frac: 
       metric = max(metric, 0.6 * y_score + 0.4 * area_score)
 
   return float(metric)
+
+
+def _focal_length_candidates(img_w: int, img_h: int) -> list[float]:
+  focals: set[float] = set()
+  for cfg in DEVICE_CAMERAS.values():
+    for _, cam in cfg.all_cams():
+      try:
+        if int(cam.width) == int(img_w) and int(cam.height) == int(img_h) and float(cam.focal_length) > 1.0:
+          focals.add(float(cam.focal_length))
+      except Exception:
+        continue
+  return sorted(focals)
+
+
+def _focal_length_for_stream(img_w: int, img_h: int, stream: VisionStreamType) -> float:
+  focals = _focal_length_candidates(img_w, img_h)
+  if not focals:
+    # Last-resort fallback; only used for very rough distance estimates.
+    return float(max(img_w, img_h))
+  if stream == VisionStreamType.VISION_STREAM_WIDE_ROAD:
+    return float(min(focals))
+  return float(max(focals))
+
+
+def _lane_min_distance_m(objs: list[ObjDet], img_w: int, img_h: int, *, x_min_frac: float, x_max_frac: float, y_min_frac: float,
+                         class_ids: set[int], score_min: float, focal_length_px: float, obj_height_m: float) -> float:
+  if not objs or focal_length_px <= 1.0 or obj_height_m <= 0.1:
+    return 0.0
+
+  x_min = float(img_w) * float(x_min_frac)
+  x_max = float(img_w) * float(x_max_frac)
+  y_min = float(img_h) * float(y_min_frac)
+
+  min_dist = float("inf")
+  for o in objs:
+    if int(o.cls) not in class_ids:
+      continue
+    if float(o.score) < float(score_min):
+      continue
+
+    cx = (float(o.x1) + float(o.x2)) * 0.5
+    if not (x_min <= cx <= x_max):
+      continue
+    if float(o.y2) < y_min:
+      continue
+
+    h_px = max(1.0, float(o.y2) - float(o.y1))
+    dist_m = (float(focal_length_px) * float(obj_height_m)) / h_px
+    if dist_m < min_dist:
+      min_dist = dist_m
+
+  if not math.isfinite(min_dist) or min_dist <= 0.0:
+    return 0.0
+  # Clamp to a reasonable range; consumers treat 0 as "no data / no object".
+  return float(min(300.0, max(0.0, min_dist)))
 
 
 def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -524,6 +593,7 @@ def main() -> None:
     time.sleep(0.1)
 
   cloudlog.warning(f"{PROCESS_NAME} connected to stream={stream} ({vipc.width}x{vipc.height}, stride={vipc.stride}, uv_offset={vipc.uv_offset})")
+  focal_length_px = _focal_length_for_stream(int(vipc.width), int(vipc.height), stream)
 
   detector = ConeDetector()
 
@@ -639,6 +709,41 @@ def main() -> None:
     obstacle_metric = max(cone_metric_hold, vehicle_metric_hold)
     hazard_metric = max(person_metric_hold, vehicle_metric_hold)
 
+    left_lane_haz_dist_m = 0.0
+    right_lane_haz_dist_m = 0.0
+    if enabled and objs_refined:
+      # Compute min estimated distance for any hazard in the adjacent lanes.
+      left_vehicle_dist_m = _lane_min_distance_m(
+        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        x_min_frac=LC_LEFT_LANE_X_MIN_FRAC, x_max_frac=LC_LEFT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
+        class_ids=LC_VEHICLE_CLASS_IDS, score_min=VEHICLE_SCORE_MIN,
+        focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_VEHICLE_HEIGHT_M,
+      )
+      right_vehicle_dist_m = _lane_min_distance_m(
+        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        x_min_frac=LC_RIGHT_LANE_X_MIN_FRAC, x_max_frac=LC_RIGHT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
+        class_ids=LC_VEHICLE_CLASS_IDS, score_min=VEHICLE_SCORE_MIN,
+        focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_VEHICLE_HEIGHT_M,
+      )
+      left_person_dist_m = _lane_min_distance_m(
+        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        x_min_frac=LC_LEFT_LANE_X_MIN_FRAC, x_max_frac=LC_LEFT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
+        class_ids={PERSON_CLASS_IDX}, score_min=PERSON_SCORE_MIN,
+        focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_PERSON_HEIGHT_M,
+      )
+      right_person_dist_m = _lane_min_distance_m(
+        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        x_min_frac=LC_RIGHT_LANE_X_MIN_FRAC, x_max_frac=LC_RIGHT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
+        class_ids={PERSON_CLASS_IDX}, score_min=PERSON_SCORE_MIN,
+        focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_PERSON_HEIGHT_M,
+      )
+
+      # Merge (min non-zero).
+      left_candidates = [d for d in (left_vehicle_dist_m, left_person_dist_m) if d > 0.0]
+      right_candidates = [d for d in (right_vehicle_dist_m, right_person_dist_m) if d > 0.0]
+      left_lane_haz_dist_m = float(min(left_candidates)) if left_candidates else 0.0
+      right_lane_haz_dist_m = float(min(right_candidates)) if right_candidates else 0.0
+
     payload = encode_cone_detections(
       frame_id=int(vipc.frame_id),
       timestamp_sof=int(vipc.timestamp_sof),
@@ -660,6 +765,8 @@ def main() -> None:
       person_in_path_raw=person_in_path_raw,
       vehicle_in_path_raw=vehicle_in_path_raw,
       hazard_in_path_raw=hazard_in_path_raw,
+      left_lane_haz_dist_m=left_lane_haz_dist_m,
+      right_lane_haz_dist_m=right_lane_haz_dist_m,
     )
     # `customReservedRawData0` is `Data` in `cereal/log.capnp`, so we must not `init()` it without a size.
     # Assigning bytes sets the union + size correctly.

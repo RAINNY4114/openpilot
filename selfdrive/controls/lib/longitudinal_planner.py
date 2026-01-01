@@ -160,8 +160,8 @@ class LongitudinalPlanner:
     k_enter_milli = max(2, min(20, _safe_int("dp_lincoln_curve_k_enter", 4)))  # 0.002~0.020
     k_enter = k_enter_milli * 1e-3
     k_exit = k_enter * 0.70
-    # 固定舒适横向上限 1.0 m/s²（不再暴露给用户调节）
-    a_lat = 1.0
+    # 固定舒适横向上限 1.8 m/s²（不再暴露给用户调节）
+    a_lat = 1.8
     decel_cm = _safe_int("dp_lincoln_curve_decel", -320)                       # cm/s^2, negative
     decel_max = min(-0.5, max(-500, decel_cm) / 100.0)                         # clamp to [-5.0, -0.5]
     self._curve_cfg = {
@@ -463,7 +463,8 @@ class LongitudinalPlanner:
     cfg = self._lincoln_curve_config()
 
     # 计算曲率，并截断到车辆可下发的信号范围
-    curvatures = np.abs(turn_rates / np.clip(v_pred, 1.0, 100.0))
+    v_denom = np.clip(v_pred, max(1.0, v_ego * 0.7), 100.0)
+    curvatures = np.abs(turn_rates / v_denom)
     curvatures = np.clip(curvatures, 0.0, 0.02)  # Ford 非 CAN FD 信号上限
     window_mask = positions <= cfg["window_m"]  # 关注前方窗口
     if not np.any(window_mask):
@@ -479,11 +480,11 @@ class LongitudinalPlanner:
     critical_distance = float(pos_window[critical_idx])
     k_p80 = float(np.quantile(k_window, 0.8)) if k_window.size else 0.0
     # 原始模型曲率（未截断）与粗略置信度（std 或 0）
-    k_window_raw = np.abs(turn_rates / np.clip(v_pred, 1.0, 100.0))[window_mask]
+    k_window_raw = np.abs(turn_rates / v_denom)[window_mask]
     k_model_max = float(np.max(k_window_raw)) if k_window_raw.size else 0.0
     try:
       orient_std = getattr(model.orientationRateStd, "z", [])
-      k_std_window = np.abs(np.array(orient_std)) / np.clip(v_pred, 1.0, 100.0)
+      k_std_window = np.abs(np.array(orient_std)) / v_denom
       k_model_std = float(np.max(k_std_window[window_mask])) if len(k_std_window) == len(v_pred) else 0.0
     except Exception:
       k_model_std = 0.0
@@ -497,10 +498,8 @@ class LongitudinalPlanner:
     # 平滑曲率，进入/退出滞回，减弱抖动
     alpha = 0.6
     self.curve_k_smooth = alpha * k_max + (1 - alpha) * self.curve_k_smooth
-    # 高速段适当降低触发阈值，加快响应
-    speed_factor = np.interp(v_ego, [0., 25., 40.], [1.0, 0.9, 0.8])
-    k_enter = cfg["k_enter"] * speed_factor
-    k_exit = cfg["k_exit"] * speed_factor
+    k_enter = cfg["k_enter"]
+    k_exit = cfg["k_exit"]
     enter_now = np.any(k_window >= k_enter)
 
     if self.curve_active:
@@ -572,11 +571,6 @@ class LongitudinalPlanner:
     decel_cap = cfg["decel_max"]
     if v_ego > v_limit + 1e-3:
       required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
-      # 高速允许更大预刹（与配置取最保守值）
-      if v_ego > 25.0:
-        decel_cap = min(decel_cap, -3.5)
-      if v_ego > 33.0:
-        decel_cap = min(decel_cap, -4.0)
       required_decel = max(required_decel, decel_cap)
       self.curve_a_target = float(required_decel)
 
