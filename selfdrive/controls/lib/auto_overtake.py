@@ -17,15 +17,19 @@ OVERTAKE_HEADWAY_MAX_S = 2.8  # only consider overtake when we're close to being
 OVERTAKE_LEAD_STABLE_SEC = 1.0
 
 PREPARE_BEFORE_LC_SEC = 0.6
-RETURN_CLEAR_DELAY_SEC = 2.0
-RETURN_MIN_TIME_AFTER_OUT_SEC = 2.0
+RETURN_CLEAR_DELAY_SEC = 5.0
+RETURN_MIN_TIME_AFTER_OUT_SEC = 4.0
 OVERTAKE_COOLDOWN_SEC = 20.0
 CLEAR_LANE_STABLE_SEC = 0.6
+
+LANE_PREF_AUTO = 0
+LANE_PREF_KEEP_LEFT = 1
+LANE_PREF_KEEP_RIGHT = 2
 
 
 class AutoOvertakeHelper:
   def __init__(self):
-    self._mode: str = "idle"  # idle|preparing|changing_out|waiting_return|changing_back
+    self._mode: str = "idle"  # idle|preparing|changing_out|holding|waiting_return|changing_back
     self._out_dir = LaneChangeDirection.none
     self._return_dir = LaneChangeDirection.none
     self._cooldown_until = 0.0
@@ -85,9 +89,12 @@ class AutoOvertakeHelper:
 
   def update(self, *, enabled: bool, lc_state: LaneChangeState, v_ego: float, v_cruise: float,
              lead_present: bool, lead_d: float, v_lead: float,
-             left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool) -> LaneChangeDirection:
+             left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool,
+             lane_preference: int = LANE_PREF_AUTO) -> LaneChangeDirection:
     now = time.monotonic()
     request = LaneChangeDirection.none
+
+    lane_preference = lane_preference if lane_preference in (LANE_PREF_AUTO, LANE_PREF_KEEP_LEFT, LANE_PREF_KEEP_RIGHT) else LANE_PREF_AUTO
 
     if (not enabled) or (not bsm_available):
       self.reset()
@@ -112,6 +119,9 @@ class AutoOvertakeHelper:
     pass_ok = right_stable if is_rhd else left_stable
     return_dir = self._opposite(pass_dir)
     return_ok = left_stable if is_rhd else right_stable
+
+    # When set, "keep left/right" means: after a pass, prefer staying on that physical side (no auto return).
+    stay_in_pass_lane = (lane_preference == LANE_PREF_KEEP_LEFT and not is_rhd) or (lane_preference == LANE_PREF_KEEP_RIGHT and is_rhd)
 
     need_overtake = self._update_need_overtake(
       now=now,
@@ -158,8 +168,14 @@ class AutoOvertakeHelper:
         else:
           self.reset()
       if lc_finished:
-        self._mode = "waiting_return"
+        self._mode = "holding" if stay_in_pass_lane else "waiting_return"
         self._out_finished_t = now
+        self._clear_since = None
+
+    elif self._mode == "holding":
+      # Stay in the passing lane until user preference changes away from the passing side.
+      if not stay_in_pass_lane:
+        self._mode = "waiting_return"
         self._clear_since = None
 
     elif self._mode == "waiting_return":
@@ -191,4 +207,3 @@ class AutoOvertakeHelper:
 
     self._last_lc_state = lc_state
     return request
-

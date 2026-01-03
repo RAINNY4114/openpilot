@@ -269,8 +269,17 @@ class LongitudinalPlanner:
     #    - Only engage once the next limiting segment is within a short "base" horizon (avoid slowing too early).
     #    - When engaged, use a longer "extended" horizon to capture the minimum speed across the upcoming curve/S-curve
     #      (reduces step-downs mid-curve as more points become visible).
-    preview_base_horizon = max(_MAP_PREVIEW_BASE_MIN_HORIZON_M, min(_MAP_PREVIEW_BASE_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_BASE_TIME_S))
-    preview_ext_horizon = max(_MAP_PREVIEW_EXT_MIN_HORIZON_M, min(_MAP_PREVIEW_EXT_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_EXT_TIME_S))
+    # High-speed tuning: reduce early, step-like slowdowns from map preview caps on gentle highway curves,
+    # while keeping the existing behavior for lower speeds (e.g. 国道/省道).
+    high_speed_preview = bool(v_ego >= (110.0 * CV.KPH_TO_MS))
+    preview_base_time_s = float(_MAP_PREVIEW_BASE_TIME_S)
+    preview_ext_time_s = float(_MAP_PREVIEW_EXT_TIME_S)
+    if high_speed_preview:
+      preview_base_time_s = min(preview_base_time_s, 6.0)
+      preview_ext_time_s = min(preview_ext_time_s, 12.0)
+
+    preview_base_horizon = max(_MAP_PREVIEW_BASE_MIN_HORIZON_M, min(_MAP_PREVIEW_BASE_MAX_HORIZON_M, v_ego * preview_base_time_s))
+    preview_ext_horizon = max(_MAP_PREVIEW_EXT_MIN_HORIZON_M, min(_MAP_PREVIEW_EXT_MAX_HORIZON_M, v_ego * preview_ext_time_s))
     v_preview_base = 0.0
     v_preview_ext = 0.0
 
@@ -379,10 +388,20 @@ class LongitudinalPlanner:
       except Exception:
         vp = 0.0
       if self._map_preview_v <= 0.1 or not math.isfinite(self._map_preview_v):
-        self._map_preview_v = vp
+        if high_speed_preview and v_cruise > 0.1 and v_ego > 0.1:
+          # Seed from current speed to avoid an instant large clamp on first engagement.
+          self._map_preview_v = float(min(v_cruise, max(vp, v_ego)))
+        else:
+          self._map_preview_v = vp
       elif math.isfinite(vp) and vp > 0.1:
         if vp < self._map_preview_v:
-          self._map_preview_v = vp
+          if high_speed_preview and self.dt > 0.0:
+            # Rate-limit tightening at highway speeds to prevent "hard" step-downs from noisy map segments.
+            tighten_rate_mps = 1.0  # m/s per second
+            down_step = float(tighten_rate_mps * self.dt)
+            self._map_preview_v = float(max(vp, self._map_preview_v - down_step))
+          else:
+            self._map_preview_v = vp
         else:
           tau_s = 2.0
           alpha = float(self.dt / (tau_s + self.dt)) if self.dt > 0.0 else 0.0

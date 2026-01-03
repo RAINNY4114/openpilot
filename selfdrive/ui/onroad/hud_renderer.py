@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.lane_pref_button import LanePrefButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import FONT_DIR, FONT_SCALE, font_fallback, gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -84,6 +85,8 @@ class HudRenderer(Widget):
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
 
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
+    self._lane_pref_button_size: int = int(UI_CONFIG.button_size * 0.85)
+    self._lane_pref_button: LanePrefButton = LanePrefButton(self._lane_pref_button_size)
 
     self._torque_bar = TorqueBar()
 
@@ -163,11 +166,27 @@ class HudRenderer(Widget):
     button_y = rect.y + UI_CONFIG.border_size
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
 
+    # Lane preference button: left side, between MAX set-speed box (top-left)
+    # and the driver monitoring icon (bottom-left).
+    max_box_bottom_y = rect.y + 45 + UI_CONFIG.set_speed_height
+    if self._set_speed_rect is not None:
+      max_box_bottom_y = float(self._set_speed_rect.y + self._set_speed_rect.height)
+
+    dm_box_top_y = rect.y + rect.height - (UI_CONFIG.border_size + UI_CONFIG.button_size)
+    pref_center_y = (max_box_bottom_y + dm_box_top_y) / 2.0
+    pref_y = float(pref_center_y - self._lane_pref_button_size / 2.0)
+
+    # Align X with the driver monitoring icon center for consistent left-column layout.
+    dm_center_x = rect.x + UI_CONFIG.border_size + UI_CONFIG.button_size / 2.0
+    pref_x = float(dm_center_x - self._lane_pref_button_size / 2.0)
+
+    self._lane_pref_button.render(rl.Rectangle(pref_x, pref_y, self._lane_pref_button_size, self._lane_pref_button_size))
+
     if ui_state.sm['controlsState'].lateralControlState.which() != 'angleState':
       self._torque_bar.render(rect)
 
   def user_interacting(self) -> bool:
-    return self._exp_button.is_pressed
+    return self._exp_button.is_pressed or self._lane_pref_button.is_pressed
 
   def _draw_set_speed(self, rect: rl.Rectangle) -> None:
     """Draw the MAX speed indicator box."""

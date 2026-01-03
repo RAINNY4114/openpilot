@@ -313,6 +313,7 @@ def main(demo=False):
   AO = AutoOvertakeHelper()
   cone_in_path = False
   vehicle_in_path = False
+  vehicle_metric = 0.0
   left_lane_haz_dist_m = 0.0
   right_lane_haz_dist_m = 0.0
   cone_last_update_t = 0.0
@@ -360,6 +361,10 @@ def main(demo=False):
           cone_in_path = bool(payload.get("inPath", False))
           vehicle_in_path = bool(payload.get("vehicleInPath", False))
           try:
+            vehicle_metric = float(payload.get("vehicleMetric", 0.0) or 0.0)
+          except Exception:
+            vehicle_metric = 0.0
+          try:
             left_lane_haz_dist_m = float(payload.get("leftLaneHazDistM", 0.0) or 0.0)
             right_lane_haz_dist_m = float(payload.get("rightLaneHazDistM", 0.0) or 0.0)
           except Exception:
@@ -372,6 +377,7 @@ def main(demo=False):
     if time.monotonic() - cone_last_update_t > 1.0:
       cone_in_path = False
       vehicle_in_path = False
+      vehicle_metric = 0.0
       left_lane_haz_dist_m = 0.0
       right_lane_haz_dist_m = 0.0
 
@@ -454,6 +460,26 @@ def main(demo=False):
       if right_lane_haz_dist_m > 0.1 and right_lane_haz_dist_m < target_lane_block_dist_m:
         right_ok = False
 
+      # Block *starting* auto lane changes in curves. This does not cancel an in-progress auto lane change.
+      curve_block = False
+      try:
+        if DH.lane_change_state == log.LaneChangeState.off:
+          yaw_rate = float(getattr(cs, "yawRate", 0.0))
+          if np.isfinite(yaw_rate) and v_ego > 5.0:
+            k_cur = abs(yaw_rate) / max(v_ego, 0.1)
+            # Speed-dependent threshold: block more aggressively as speed rises.
+            v0, v1 = 22.0, 35.0  # ~80 km/h .. ~126 km/h
+            k0, k1 = 0.004, 0.002
+            if v_ego <= v0:
+              k_th = k0
+            elif v_ego >= v1:
+              k_th = k1
+            else:
+              k_th = k0 + (k1 - k0) * (v_ego - v0) / (v1 - v0)
+            curve_block = k_cur > k_th
+      except Exception:
+        curve_block = False
+
       # Highway auto-overtake (lead-based). Uses radarState (which is also populated on radarless platforms).
       lead_present = False
       lead_d = 0.0
@@ -471,6 +497,17 @@ def main(demo=False):
       v_cruise_kph = float(getattr(cs, "vCruise", V_CRUISE_UNSET))
       v_cruise = float(v_ego if v_cruise_kph == V_CRUISE_UNSET or v_cruise_kph <= 0.0 else (v_cruise_kph * CV.KPH_TO_MS))
       cruise_enabled = bool(getattr(cs.cruiseState, "enabled", False))
+
+      # Lane preference: 0=auto, 1=keep left, 2=keep right (HUD cycles this).
+      try:
+        raw_pref = params.get("dp_lincoln_lane_preference") or b"0"
+        if isinstance(raw_pref, bytes):
+          raw_pref = raw_pref.decode("utf-8", errors="ignore")
+        lane_pref = int(str(raw_pref).strip() or "0")
+      except Exception:
+        lane_pref = 0
+      lane_pref = lane_pref if lane_pref in (0, 1, 2) else 0
+
       overtake_dir = AO.update(
         enabled=params.get_bool("dp_lincoln_auto_overtake") and lat_active and cruise_enabled,
         lc_state=DH.lane_change_state,
@@ -484,11 +521,16 @@ def main(demo=False):
         is_rhd=bool(is_rhd),
         manual_blinker=bool(one_blinker),
         bsm_available=bsm_available,
+        lane_preference=lane_pref,
       )
+
+      # Treat "vehicle in path" as an avoidance obstacle only when it's likely stopped/very slow and close enough.
+      vehicle_obstacle = bool(vehicle_in_path and (vehicle_metric >= 0.35) and ((not lead_present) or (v_lead < 3.0)))
+      obstacle_in_path_for_avoid = bool(cone_in_path or vehicle_obstacle)
 
       avoid_dir = AA.update(
         enabled=params.get_bool("dp_lincoln_auto_avoid") and lat_active,
-        obstacle_in_path=cone_in_path or vehicle_in_path,
+        obstacle_in_path=obstacle_in_path_for_avoid,
         lc_state=DH.lane_change_state,
         v_ego=v_ego,
         left_ok=left_ok,
@@ -497,6 +539,11 @@ def main(demo=False):
         manual_blinker=bool(one_blinker),
         bsm_available=bsm_available,
       )
+
+      # Don't start new auto lane changes in a curve (manual blinkers still allowed).
+      if curve_block and not one_blinker and DH.lane_change_state == log.LaneChangeState.off:
+        overtake_dir = log.LaneChangeDirection.none
+        avoid_dir = log.LaneChangeDirection.none
 
       auto_dir = avoid_dir if avoid_dir != log.LaneChangeDirection.none else overtake_dir
       DH.update(cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,

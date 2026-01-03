@@ -8,7 +8,8 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 
-AUTO_AVOID_MIN_SPEED = 10 * CV.MPH_TO_MS
+# Disable auto-lane-change avoidance at low speeds to reduce churn in city traffic.
+AUTO_AVOID_MIN_SPEED = 30 * CV.KPH_TO_MS
 SLOWDOWN_BEFORE_LC_SEC = 1.0
 OBSTACLE_CLEAR_DELAY_SEC = 2.0
 AVOID_COOLDOWN_SEC = 8.0
