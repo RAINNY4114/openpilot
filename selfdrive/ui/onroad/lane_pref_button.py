@@ -71,7 +71,13 @@ class LanePrefButton(Widget):
 
   def _set_pref(self, v: int) -> None:
     v = v if v in (0, 1, 2) else 0
-    self._params.put(self._KEY, str(v))
+    # NOTE: `dp_lincoln_lane_preference` is registered as ParamKeyType.INT, so we must write an int.
+    # Use non-blocking to avoid UI stalls on slow storage.
+    try:
+      self._params.put_nonblocking(self._KEY, int(v))
+    except Exception:
+      # Never crash UI due to a params write failure.
+      pass
 
   def _handle_mouse_release(self, mouse_pos) -> bool:
     super()._handle_mouse_release(mouse_pos)

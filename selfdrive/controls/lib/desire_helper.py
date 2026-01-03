@@ -9,7 +9,9 @@ LaneChangeDirection = log.LaneChangeDirection
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 AUTO_LANE_CHANGE_SPEED_MIN = 10 * CV.MPH_TO_MS
-AUTO_LANE_CHANGE_START_DELAY_SEC = 2.0
+# Auto lane-change: wait for turn-signal lead time before applying the "virtual torque"
+# to start the lane change (see preLaneChange -> laneChangeStarting).
+AUTO_LANE_CHANGE_START_DELAY_SEC = 3.0
 
 DESIRES = {
   LaneChangeDirection.none: {

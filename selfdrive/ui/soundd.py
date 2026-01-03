@@ -103,6 +103,7 @@ class Soundd:
     self._dp_maneuver_voice_next_allowed = 0.0
     self._dp_maneuver_prev_lc_state = LaneChangeState.off
     self._dp_maneuver_prev_lc_dir = LaneChangeDirection.none
+    self._dp_maneuver_voice_issued = False
 
     # dp lincoln auto-avoid chime (plays alert_chime.wav once when avoidance triggers)
     self._dp_auto_avoid_enabled = self._params.get_bool("dp_lincoln_auto_avoid")
@@ -365,18 +366,19 @@ class Soundd:
     self.dp_voice_playing = True
     self.dp_voice_next_allowed = now + self.dp_voice_interval
 
-  def _maybe_start_dp_maneuver_voice(self, side: str, now: float) -> None:
+  def _maybe_start_dp_maneuver_voice(self, side: str, now: float) -> bool:
     if now < self._dp_maneuver_voice_next_allowed:
-      return
+      return False
     if self.current_alert != AudibleAlert.none or self.dp_voice_playing or self._dp_maneuver_voice_playing:
-      return
+      return False
     sound = self.dp_maneuver_voice_sounds.get(side)
     if sound is None or sound.size == 0:
-      return
+      return False
     self._dp_maneuver_voice_sound = sound
     self._dp_maneuver_voice_frame = 0
     self._dp_maneuver_voice_playing = True
     self._dp_maneuver_voice_next_allowed = now + MANEUVER_VOICE_MIN_INTERVAL_S
+    return True
 
   def _maybe_start_dp_auto_avoid_chime(self, now: float) -> None:
     if not self._dp_auto_avoid_enabled:
@@ -423,6 +425,7 @@ class Soundd:
     if not (self._dp_auto_avoid_enabled or self._dp_auto_overtake_enabled):
       self._dp_maneuver_prev_lc_state = LaneChangeState.off
       self._dp_maneuver_prev_lc_dir = LaneChangeDirection.none
+      self._dp_maneuver_voice_issued = False
       return
 
     if not sm.valid.get("modelV2", False):
@@ -431,17 +434,38 @@ class Soundd:
     if not getattr(sm["selfdriveState"], "enabled", False):
       self._dp_maneuver_prev_lc_state = LaneChangeState.off
       self._dp_maneuver_prev_lc_dir = LaneChangeDirection.none
+      self._dp_maneuver_voice_issued = False
       return
 
     meta = sm["modelV2"].meta
     lc_state = getattr(meta, "laneChangeState", LaneChangeState.off)
     lc_dir = getattr(meta, "laneChangeDirection", LaneChangeDirection.none)
 
-    started = (self._dp_maneuver_prev_lc_state != LaneChangeState.laneChangeStarting and
-               lc_state == LaneChangeState.laneChangeStarting)
-    if started and lc_dir in (LaneChangeDirection.left, LaneChangeDirection.right):
-      side = "left" if lc_dir == LaneChangeDirection.left else "right"
-      self._maybe_start_dp_maneuver_voice(side, now)
+    if lc_state == LaneChangeState.off:
+      self._dp_maneuver_voice_issued = False
+
+    # Prefer starting the maneuver voice at the *intent* stage for auto lane changes
+    # (preLaneChange), so the prompt and blinker lead time happen before the car moves.
+    if not self._dp_maneuver_voice_issued and lc_dir in (LaneChangeDirection.left, LaneChangeDirection.right):
+      pre_started = (self._dp_maneuver_prev_lc_state == LaneChangeState.off and
+                     lc_state == LaneChangeState.preLaneChange)
+
+      manual_blinker = False
+      if pre_started and sm.alive.get("carState", False):
+        cs = sm["carState"]
+        manual_blinker = bool(cs.leftBlinker != cs.rightBlinker)
+
+      # Only play at preLaneChange if the driver didn't manually signal at the time of intent.
+      if pre_started and not manual_blinker:
+        side = "left" if lc_dir == LaneChangeDirection.left else "right"
+        self._dp_maneuver_voice_issued = self._maybe_start_dp_maneuver_voice(side, now)
+
+      # Fallback: play when the lane change actually starts (manual lane change, or if pre prompt was suppressed).
+      started = (self._dp_maneuver_prev_lc_state != LaneChangeState.laneChangeStarting and
+                 lc_state == LaneChangeState.laneChangeStarting)
+      if started and not self._dp_maneuver_voice_issued:
+        side = "left" if lc_dir == LaneChangeDirection.left else "right"
+        self._dp_maneuver_voice_issued = self._maybe_start_dp_maneuver_voice(side, now)
 
     self._dp_maneuver_prev_lc_state = lc_state
     self._dp_maneuver_prev_lc_dir = lc_dir
