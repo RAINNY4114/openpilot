@@ -56,13 +56,30 @@ class _Track:
 
 
 def _group_for_cls(cls: int) -> int:
+  cls = int(cls)
+  if cls < 0:
+    return -1
+
+  # Keep a few "driving-relevant" super-groups stable across occasional misclassification.
   if cls == 0:  # person
     return 0
-  if cls == 80:  # traffic cone
-    return 1
-  if cls in (1, 2, 3, 5, 7):  # bicycle + vehicles
-    return 2
-  return -1
+  if cls == 80:  # traffic cone (custom label)
+    return 80
+
+  # COCO vehicle-ish classes (including bicycle/motorcycle).
+  if cls in (1, 2, 3, 4, 5, 6, 7, 8):
+    return 100
+
+  # Traffic control / roadside fixtures.
+  if cls in (9, 10, 11, 12):
+    return 101
+
+  # Animals.
+  if 14 <= cls <= 23:
+    return 102
+
+  # Default: one group per class for everything else.
+  return 200 + cls
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -96,7 +113,7 @@ class ObjectTracker:
   - Kalman filter for bbox smoothing/prediction (constant velocity)
   - EMA smoothing for score
 
-  Designed for small `MAX_DET` inputs from `coned` (<= ~8 objects).
+  Used for HUD visualization only (not for control).
   """
 
   def __init__(self, *, iou_thres: float = 0.30, max_missed: int = 5,

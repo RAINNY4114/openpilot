@@ -29,7 +29,12 @@ class AutoAvoidanceHelper:
     self._right_ok_since: float | None = None
 
   @staticmethod
-  def _pick_out_direction(left_ok: bool, right_ok: bool, is_rhd: bool) -> LaneChangeDirection:
+  def _pick_out_direction(left_ok: bool, right_ok: bool, is_rhd: bool,
+                          prefer_dir: LaneChangeDirection = LaneChangeDirection.none) -> LaneChangeDirection:
+    if prefer_dir == LaneChangeDirection.left and left_ok:
+      return LaneChangeDirection.left
+    if prefer_dir == LaneChangeDirection.right and right_ok:
+      return LaneChangeDirection.right
     if left_ok and right_ok:
       return LaneChangeDirection.right if is_rhd else LaneChangeDirection.left
     if left_ok:
@@ -67,7 +72,8 @@ class AutoAvoidanceHelper:
     return None, False
 
   def update(self, *, enabled: bool, obstacle_in_path: bool, lc_state: LaneChangeState, v_ego: float,
-             left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool) -> LaneChangeDirection:
+             left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool,
+             prefer_dir: LaneChangeDirection = LaneChangeDirection.none) -> LaneChangeDirection:
     now = time.monotonic()
     request = LaneChangeDirection.none
 
@@ -106,7 +112,7 @@ class AutoAvoidanceHelper:
         self.reset()
       else:
         if self._out_dir == LaneChangeDirection.none:
-          self._out_dir = self._pick_out_direction(left_stable, right_stable, is_rhd)
+          self._out_dir = self._pick_out_direction(left_stable, right_stable, is_rhd, prefer_dir=prefer_dir)
         else:
           # If the chosen side becomes blocked, opportunistically switch to the other side (once) if stable.
           if self._out_dir == LaneChangeDirection.left and (not left_stable) and right_stable:

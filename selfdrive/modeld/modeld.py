@@ -55,6 +55,13 @@ MIN_LAT_CONTROL_SPEED = 0.3
 AUTO_LC_TARGET_LANE_TGAP_S = float(os.getenv("DP_LINCOLN_AUTO_LC_TGAP_S", "2.0"))
 AUTO_LC_TARGET_LANE_MIN_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MIN_DIST_M", "25.0"))
 AUTO_LC_TARGET_LANE_MAX_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MAX_DIST_M", "90.0"))
+AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC = float(os.getenv("DP_LINCOLN_AUTO_LC_BLOCK_HOLD_SEC", "0.8"))
+
+# Auto-avoid trigger tightening: keep slowdown behavior, but avoid starting lane changes on weak/noisy detections.
+AVOID_CONE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_CONE_METRIC_MIN", "0.25"))
+AVOID_VEHICLE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN", "0.45"))
+AVOID_VEHICLE_METRIC_MIN_NO_LEAD = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN_NO_LEAD", "0.65"))
+AVOID_STOPPED_LEAD_SPEED_MS = float(os.getenv("DP_LINCOLN_AVOID_STOPPED_LEAD_SPEED_MS", "3.0"))
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -313,9 +320,14 @@ def main(demo=False):
   AO = AutoOvertakeHelper()
   cone_in_path = False
   vehicle_in_path = False
+  cone_metric = 0.0
   vehicle_metric = 0.0
+  avoid_obstacle_x_offset = 0.0
+  avoid_obstacle_x_valid = False
   left_lane_haz_dist_m = 0.0
   right_lane_haz_dist_m = 0.0
+  left_lane_blocked_until = 0.0
+  right_lane_blocked_until = 0.0
   cone_last_update_t = 0.0
 
   while True:
@@ -361,6 +373,10 @@ def main(demo=False):
           cone_in_path = bool(payload.get("inPath", False))
           vehicle_in_path = bool(payload.get("vehicleInPath", False))
           try:
+            cone_metric = float(payload.get("coneMetric", 0.0) or 0.0)
+          except Exception:
+            cone_metric = 0.0
+          try:
             vehicle_metric = float(payload.get("vehicleMetric", 0.0) or 0.0)
           except Exception:
             vehicle_metric = 0.0
@@ -370,6 +386,51 @@ def main(demo=False):
           except Exception:
             left_lane_haz_dist_m = 0.0
             right_lane_haz_dist_m = 0.0
+
+          # Best-effort obstacle lateral position (for avoidance side preference).
+          # We intentionally keep this simple: pick the closest in-path cone/vehicle bbox and use its x offset.
+          avoid_obstacle_x_valid = False
+          avoid_obstacle_x_offset = 0.0
+          try:
+            img_w = int(payload.get("imgW", 0) or 0)
+            img_h = int(payload.get("imgH", 0) or 0)
+            objs = payload.get("objsR", None) or payload.get("objs", None) or []
+            if img_w > 0 and img_h > 0 and isinstance(objs, list):
+              x_min = float(img_w) * 0.35
+              x_max = float(img_w) * 0.65
+              y_min = float(img_h) * 0.55
+              best_y2 = -1.0
+              best_cx = 0.0
+              for o in objs:
+                if not isinstance(o, dict):
+                  continue
+                try:
+                  cls = int(o.get("c", -1))
+                  if cls not in (0, 1, 2, 3, 5, 7, 80):
+                    continue
+                  x1 = float(o.get("x1", 0.0))
+                  y1 = float(o.get("y1", 0.0))
+                  x2 = float(o.get("x2", 0.0))
+                  y2 = float(o.get("y2", 0.0))
+                except Exception:
+                  continue
+                if not (np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2)):
+                  continue
+                if x2 <= x1 or y2 <= y1:
+                  continue
+                cx = 0.5 * (x1 + x2)
+                if not (x_min <= cx <= x_max and y2 >= y_min):
+                  continue
+                if y2 > best_y2:
+                  best_y2 = y2
+                  best_cx = cx
+              if best_y2 > 0.0:
+                avoid_obstacle_x_offset = float((best_cx - float(img_w) * 0.5) / max(float(img_w) * 0.5, 1.0))
+                avoid_obstacle_x_offset = float(max(-1.0, min(1.0, avoid_obstacle_x_offset)))
+                avoid_obstacle_x_valid = True
+          except Exception:
+            avoid_obstacle_x_valid = False
+            avoid_obstacle_x_offset = 0.0
           cone_last_update_t = time.monotonic()
       except Exception:
         cloudlog.exception("failed to parse cone detections")
@@ -377,9 +438,14 @@ def main(demo=False):
     if time.monotonic() - cone_last_update_t > 1.0:
       cone_in_path = False
       vehicle_in_path = False
+      cone_metric = 0.0
       vehicle_metric = 0.0
+      avoid_obstacle_x_offset = 0.0
+      avoid_obstacle_x_valid = False
       left_lane_haz_dist_m = 0.0
       right_lane_haz_dist_m = 0.0
+      left_lane_blocked_until = 0.0
+      right_lane_blocked_until = 0.0
 
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
@@ -453,11 +519,23 @@ def main(demo=False):
       right_ok = bsm_available and (not cs.rightBlindspot) and (not RED.right_edge_detected)
       # Additional forward check: don't auto lane-change into an occupied target lane.
       # This is based on coned's YOLO detections; values are 0.0 when not available.
+      now_mono = time.monotonic()
       target_lane_block_dist_m = max(AUTO_LC_TARGET_LANE_MIN_DIST_M,
                                      min(AUTO_LC_TARGET_LANE_MAX_DIST_M, float(v_ego) * AUTO_LC_TARGET_LANE_TGAP_S))
+      if AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC > 0.0:
+        if left_lane_haz_dist_m > 0.1 and left_lane_haz_dist_m < target_lane_block_dist_m:
+          left_lane_blocked_until = max(float(left_lane_blocked_until), now_mono + AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC)
+        if right_lane_haz_dist_m > 0.1 and right_lane_haz_dist_m < target_lane_block_dist_m:
+          right_lane_blocked_until = max(float(right_lane_blocked_until), now_mono + AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC)
+
       if left_lane_haz_dist_m > 0.1 and left_lane_haz_dist_m < target_lane_block_dist_m:
         left_ok = False
       if right_lane_haz_dist_m > 0.1 and right_lane_haz_dist_m < target_lane_block_dist_m:
+        right_ok = False
+
+      if now_mono < float(left_lane_blocked_until):
+        left_ok = False
+      if now_mono < float(right_lane_blocked_until):
         right_ok = False
 
       # Block *starting* auto lane changes in curves. This does not cancel an in-progress auto lane change.
@@ -525,8 +603,20 @@ def main(demo=False):
       )
 
       # Treat "vehicle in path" as an avoidance obstacle only when it's likely stopped/very slow and close enough.
-      vehicle_obstacle = bool(vehicle_in_path and (vehicle_metric >= 0.35) and ((not lead_present) or (v_lead < 3.0)))
-      obstacle_in_path_for_avoid = bool(cone_in_path or vehicle_obstacle)
+      # Cones are gated by a metric threshold to avoid weak/edge detections triggering lane changes too early.
+      cone_obstacle = bool(cone_in_path and (cone_metric >= AVOID_CONE_METRIC_MIN))
+      vehicle_obstacle = bool(vehicle_in_path and (
+        (lead_present and (v_lead < AVOID_STOPPED_LEAD_SPEED_MS) and (vehicle_metric >= AVOID_VEHICLE_METRIC_MIN)) or
+        ((not lead_present) and (vehicle_metric >= AVOID_VEHICLE_METRIC_MIN_NO_LEAD))
+      ))
+      obstacle_in_path_for_avoid = bool(cone_obstacle or vehicle_obstacle)
+
+      avoid_prefer_dir = log.LaneChangeDirection.none
+      if avoid_obstacle_x_valid:
+        if avoid_obstacle_x_offset > 0.10:
+          avoid_prefer_dir = log.LaneChangeDirection.left
+        elif avoid_obstacle_x_offset < -0.10:
+          avoid_prefer_dir = log.LaneChangeDirection.right
 
       avoid_dir = AA.update(
         enabled=params.get_bool("dp_lincoln_auto_avoid") and lat_active,
@@ -538,6 +628,7 @@ def main(demo=False):
         is_rhd=bool(is_rhd),
         manual_blinker=bool(one_blinker),
         bsm_available=bsm_available,
+        prefer_dir=avoid_prefer_dir,
       )
 
       # Don't start new auto lane changes in a curve (manual blinkers still allowed).

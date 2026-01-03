@@ -43,11 +43,12 @@ LC_VEHICLE_CLASS_IDS = {BICYCLE_CLASS_IDX, MOTORCYCLE_CLASS_IDX, CAR_CLASS_IDX, 
 CONE_SCORE_MIN = float(os.getenv("CONE_SCORE_MIN", "0.10"))
 PERSON_SCORE_MIN = float(os.getenv("PERSON_SCORE_MIN", "0.25"))
 VEHICLE_SCORE_MIN = float(os.getenv("VEHICLE_SCORE_MIN", "0.30"))
+OTHER_SCORE_MIN = float(os.getenv("CONE_OTHER_SCORE_MIN", "0.25"))
 PERSON_AREA_MIN_FRAC = float(os.getenv("CONE_PERSON_AREA_MIN_FRAC", "0.004"))
 VEHICLE_AREA_MIN_FRAC = float(os.getenv("CONE_VEHICLE_AREA_MIN_FRAC", "0.010"))
 TWOWHEEL_AREA_MIN_FRAC = float(os.getenv("CONE_TWOWHEEL_AREA_MIN_FRAC", "0.006"))
 NMS_IOU_THRES = float(os.getenv("CONE_NMS_IOU", "0.45"))
-MAX_DET = int(os.getenv("CONE_MAX_DET", "8"))
+MAX_DET = int(os.getenv("CONE_MAX_DET", "64"))
 PUB_HZ = float(os.getenv("CONE_PUB_HZ", "10"))
 
 # Optional edge-based bbox refinement (for visualization).
@@ -58,6 +59,7 @@ REFINE_MAX_SIDE = int(os.getenv("CONE_REFINE_MAX_SIDE", "320"))
 REFINE_PAD_FRAC = float(os.getenv("CONE_REFINE_PAD_FRAC", "0.08"))
 REFINE_MIN_AREA_FRAC = float(os.getenv("CONE_REFINE_MIN_AREA_FRAC", "0.02"))
 REFINE_IOU_MIN = float(os.getenv("CONE_REFINE_IOU_MIN", "0.25"))
+REFINE_MAX_OBJS = int(os.getenv("CONE_REFINE_MAX_OBJS", "32"))
 
 ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid", "dp_lincoln_auto_overtake")
 
@@ -65,10 +67,12 @@ ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid", "dp_lincoln_a
 # Distance is estimated from bbox height using a simple pinhole approximation.
 LC_ASSUMED_VEHICLE_HEIGHT_M = float(os.getenv("CONE_LC_ASSUMED_VEHICLE_HEIGHT_M", "1.5"))
 LC_ASSUMED_PERSON_HEIGHT_M = float(os.getenv("CONE_LC_ASSUMED_PERSON_HEIGHT_M", "1.7"))
+LC_ASSUMED_CONE_HEIGHT_M = float(os.getenv("CONE_LC_ASSUMED_CONE_HEIGHT_M", "0.7"))
+LC_CONE_SCORE_MIN = float(os.getenv("CONE_LC_CONE_SCORE_MIN", "0.25"))
 LC_LANE_Y_MIN_FRAC = float(os.getenv("CONE_LC_LANE_Y_MIN_FRAC", "0.20"))
 LC_LEFT_LANE_X_MIN_FRAC = float(os.getenv("CONE_LC_LEFT_LANE_X_MIN_FRAC", "0.05"))
-LC_LEFT_LANE_X_MAX_FRAC = float(os.getenv("CONE_LC_LEFT_LANE_X_MAX_FRAC", "0.35"))
-LC_RIGHT_LANE_X_MIN_FRAC = float(os.getenv("CONE_LC_RIGHT_LANE_X_MIN_FRAC", "0.65"))
+LC_LEFT_LANE_X_MAX_FRAC = float(os.getenv("CONE_LC_LEFT_LANE_X_MAX_FRAC", "0.40"))
+LC_RIGHT_LANE_X_MIN_FRAC = float(os.getenv("CONE_LC_RIGHT_LANE_X_MIN_FRAC", "0.60"))
 LC_RIGHT_LANE_X_MAX_FRAC = float(os.getenv("CONE_LC_RIGHT_LANE_X_MAX_FRAC", "0.95"))
 
 
@@ -473,8 +477,72 @@ class ConeDetector:
 
     return [
       ConeDet(float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(s))
-      for b, s in zip(boxes_xyxy, scores_sel)
+     for b, s in zip(boxes_xyxy, scores_sel)
     ]
+
+  def _detect_all_objects(self, *, boxes_xywh: np.ndarray, class_scores: np.ndarray,
+                          scale: float, pad_x: int, pad_y: int, img_w: int, img_h: int) -> list[ObjDet]:
+    # `class_scores` expected shape: (N, C), with C including `traffic cone (80)`.
+    if class_scores.ndim != 2 or class_scores.shape[0] != boxes_xywh.shape[0]:
+      return []
+
+    cls = np.argmax(class_scores, axis=1).astype(np.int32)
+    score = class_scores[np.arange(class_scores.shape[0]), cls].astype(np.float32)
+
+    # Per-class minimum score thresholds (vectorized for common driving classes).
+    score_min = np.full_like(score, float(OTHER_SCORE_MIN), dtype=np.float32)
+    score_min[cls == int(TRAFFIC_CONE_CLASS_IDX)] = float(CONE_SCORE_MIN)
+    score_min[cls == int(PERSON_CLASS_IDX)] = float(PERSON_SCORE_MIN)
+    if LC_VEHICLE_CLASS_IDS:
+      score_min[np.isin(cls, list(LC_VEHICLE_CLASS_IDS))] = float(VEHICLE_SCORE_MIN)
+
+    idxs = np.flatnonzero(score >= score_min)
+    if idxs.size == 0:
+      return []
+
+    boxes = boxes_xywh[idxs].astype(np.float32)
+    scores_sel = score[idxs].astype(np.float32)
+    cls_sel = cls[idxs].astype(np.int32)
+
+    # xywh (center) -> xyxy in MODEL_INPUT_SIZE coordinates
+    x = boxes[:, 0]
+    y = boxes[:, 1]
+    w = boxes[:, 2]
+    h = boxes[:, 3]
+    boxes_xyxy = np.stack((x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0), axis=1)
+    boxes_xyxy = np.clip(boxes_xyxy, 0.0, float(MODEL_INPUT_SIZE))
+
+    # Per-class NMS, then keep top-N across all classes.
+    keep_all: list[int] = []
+    for c in np.unique(cls_sel):
+      cls_mask = np.flatnonzero(cls_sel == c)
+      if cls_mask.size == 0:
+        continue
+      keep_local = _nms(boxes_xyxy[cls_mask], scores_sel[cls_mask], NMS_IOU_THRES, MAX_DET)
+      keep_all.extend(int(cls_mask[k]) for k in keep_local)
+
+    if not keep_all:
+      return []
+
+    keep_all.sort(key=lambda i: float(scores_sel[i]), reverse=True)
+    keep_all = keep_all[:MAX_DET]
+
+    boxes_xyxy = boxes_xyxy[keep_all]
+    scores_sel = scores_sel[keep_all]
+    cls_sel = cls_sel[keep_all]
+
+    # Undo letterbox
+    boxes_xyxy[:, [0, 2]] -= float(pad_x)
+    boxes_xyxy[:, [1, 3]] -= float(pad_y)
+    boxes_xyxy /= float(scale)
+
+    boxes_xyxy[:, [0, 2]] = np.clip(boxes_xyxy[:, [0, 2]], 0.0, float(img_w))
+    boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0.0, float(img_h))
+
+    out: list[ObjDet] = []
+    for b, s, c in zip(boxes_xyxy, scores_sel, cls_sel):
+      out.append(ObjDet(int(c), float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(s)))
+    return out
 
   def detect(self, img_rgb: np.ndarray) -> tuple[list[ConeDet], list[ObjDet]]:
     letterboxed, scale, (pad_x, pad_y) = _letterbox_rgb(img_rgb, MODEL_INPUT_SIZE)
@@ -483,6 +551,7 @@ class ConeDetector:
 
     out = self._model(images=Tensor(inp, device="NPY")).numpy()[0]  # (85, 2100)
     boxes_xywh = out[:4].T
+    all_scores = out[4:].T
     h0, w0 = img_rgb.shape[:2]
 
     cones = self._detect_class(
@@ -496,10 +565,9 @@ class ConeDetector:
       img_h=h0,
     )
 
-    persons = self._detect_class(
+    objs = self._detect_all_objects(
       boxes_xywh=boxes_xywh,
-      class_scores=out[4 + PERSON_CLASS_IDX],
-      score_min=PERSON_SCORE_MIN,
+      class_scores=all_scores,
       scale=scale,
       pad_x=pad_x,
       pad_y=pad_y,
@@ -507,70 +575,13 @@ class ConeDetector:
       img_h=h0,
     )
 
-    bicycles = self._detect_class(
-      boxes_xywh=boxes_xywh,
-      class_scores=out[4 + BICYCLE_CLASS_IDX],
-      score_min=VEHICLE_SCORE_MIN,
-      scale=scale,
-      pad_x=pad_x,
-      pad_y=pad_y,
-      img_w=w0,
-      img_h=h0,
-    )
-
-    cars = self._detect_class(
-      boxes_xywh=boxes_xywh,
-      class_scores=out[4 + CAR_CLASS_IDX],
-      score_min=VEHICLE_SCORE_MIN,
-      scale=scale,
-      pad_x=pad_x,
-      pad_y=pad_y,
-      img_w=w0,
-      img_h=h0,
-    )
-
-    motorcycles = self._detect_class(
-      boxes_xywh=boxes_xywh,
-      class_scores=out[4 + MOTORCYCLE_CLASS_IDX],
-      score_min=VEHICLE_SCORE_MIN,
-      scale=scale,
-      pad_x=pad_x,
-      pad_y=pad_y,
-      img_w=w0,
-      img_h=h0,
-    )
-
-    buses = self._detect_class(
-      boxes_xywh=boxes_xywh,
-      class_scores=out[4 + BUS_CLASS_IDX],
-      score_min=VEHICLE_SCORE_MIN,
-      scale=scale,
-      pad_x=pad_x,
-      pad_y=pad_y,
-      img_w=w0,
-      img_h=h0,
-    )
-
-    trucks = self._detect_class(
-      boxes_xywh=boxes_xywh,
-      class_scores=out[4 + TRUCK_CLASS_IDX],
-      score_min=VEHICLE_SCORE_MIN,
-      scale=scale,
-      pad_x=pad_x,
-      pad_y=pad_y,
-      img_w=w0,
-      img_h=h0,
-    )
-
-    objs = [
-      *[ObjDet(TRAFFIC_CONE_CLASS_IDX, c.x1, c.y1, c.x2, c.y2, c.score) for c in cones],
-      *[ObjDet(PERSON_CLASS_IDX, p.x1, p.y1, p.x2, p.y2, p.score) for p in persons],
-      *[ObjDet(BICYCLE_CLASS_IDX, b.x1, b.y1, b.x2, b.y2, b.score) for b in bicycles],
-      *[ObjDet(CAR_CLASS_IDX, c.x1, c.y1, c.x2, c.y2, c.score) for c in cars],
-      *[ObjDet(MOTORCYCLE_CLASS_IDX, m.x1, m.y1, m.x2, m.y2, m.score) for m in motorcycles],
-      *[ObjDet(BUS_CLASS_IDX, b.x1, b.y1, b.x2, b.y2, b.score) for b in buses],
-      *[ObjDet(TRUCK_CLASS_IDX, t.x1, t.y1, t.x2, t.y2, t.score) for t in trucks],
-    ]
+    # Ensure cone detections (low threshold) are visible in the HUD box stream too.
+    if cones:
+      existing_cones = [o for o in objs if int(o.cls) == TRAFFIC_CONE_CLASS_IDX]
+      for c in cones:
+        if any(_bbox_iou((o.x1, o.y1, o.x2, o.y2), (c.x1, c.y1, c.x2, c.y2)) >= 0.60 for o in existing_cones):
+          continue
+        objs.append(ObjDet(TRAFFIC_CONE_CLASS_IDX, c.x1, c.y1, c.x2, c.y2, c.score))
     return cones, objs
 
 
@@ -678,15 +689,20 @@ def main() -> None:
 
     objs_refined: list[ObjDet] = list(objs)
     if enabled and REFINE_EDGES and img_rgb is not None and objs:
-      objs_refined = []
       try:
-        for o in objs:
+        objs_refined = list(objs)
+        refine_idxs = list(range(len(objs)))
+        if REFINE_MAX_OBJS > 0 and len(refine_idxs) > REFINE_MAX_OBJS:
+          refine_idxs.sort(key=lambda i: float(objs[i].score), reverse=True)
+          refine_idxs = refine_idxs[:REFINE_MAX_OBJS]
+
+        for i in refine_idxs:
+          o = objs[i]
           refined = _refine_bbox_edges(img_rgb, o.x1, o.y1, o.x2, o.y2)
           if refined is None:
-            objs_refined.append(o)
-          else:
-            rx1, ry1, rx2, ry2 = refined
-            objs_refined.append(ObjDet(int(o.cls), float(rx1), float(ry1), float(rx2), float(ry2), float(o.score)))
+            continue
+          rx1, ry1, rx2, ry2 = refined
+          objs_refined[i] = ObjDet(int(o.cls), float(rx1), float(ry1), float(rx2), float(ry2), float(o.score))
       except Exception:
         # Best-effort only; fall back to raw boxes on any failure.
         objs_refined = list(objs)
@@ -737,10 +753,22 @@ def main() -> None:
         class_ids={PERSON_CLASS_IDX}, score_min=PERSON_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_PERSON_HEIGHT_M,
       )
+      left_cone_dist_m = _lane_min_distance_m(
+        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        x_min_frac=LC_LEFT_LANE_X_MIN_FRAC, x_max_frac=LC_LEFT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
+        class_ids={TRAFFIC_CONE_CLASS_IDX}, score_min=LC_CONE_SCORE_MIN,
+        focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_CONE_HEIGHT_M,
+      )
+      right_cone_dist_m = _lane_min_distance_m(
+        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        x_min_frac=LC_RIGHT_LANE_X_MIN_FRAC, x_max_frac=LC_RIGHT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
+        class_ids={TRAFFIC_CONE_CLASS_IDX}, score_min=LC_CONE_SCORE_MIN,
+        focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_CONE_HEIGHT_M,
+      )
 
       # Merge (min non-zero).
-      left_candidates = [d for d in (left_vehicle_dist_m, left_person_dist_m) if d > 0.0]
-      right_candidates = [d for d in (right_vehicle_dist_m, right_person_dist_m) if d > 0.0]
+      left_candidates = [d for d in (left_vehicle_dist_m, left_person_dist_m, left_cone_dist_m) if d > 0.0]
+      right_candidates = [d for d in (right_vehicle_dist_m, right_person_dist_m, right_cone_dist_m) if d > 0.0]
       left_lane_haz_dist_m = float(min(left_candidates)) if left_candidates else 0.0
       right_lane_haz_dist_m = float(min(right_candidates)) if right_candidates else 0.0
 

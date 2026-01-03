@@ -4,9 +4,9 @@ This ONNX model is consumed by `selfdrive/modeld/coned.py`.
 
 In this repo we currently use it for:
 - **auto-avoid trigger**: `traffic cone (80)` (`inPath`)
-- **HUD boxes / hazard chime**: a small subset of classes (see `selfdrive/modeld/coned.py`)
+- **HUD boxes**: COCO-80 + `traffic cone` (see `selfdrive/modeld/coned.py` + `selfdrive/ui/onroad/augmented_road_view.py`)
 
-Model output is YOLO-style `float32[1,85,2100]` (4 box coords + 1 objectness + 80 class scores).
+Model output is YOLO-style `float32[1,85,2100]` (4 box coords + **81 class scores**, no separate objectness).
 The embedded `names` metadata declares **81 labels (0..80)**: COCO-80 plus `traffic cone (80)`.
 
 ## Source / License

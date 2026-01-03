@@ -70,8 +70,118 @@ DET_STALE_TIMEOUT_S = 1.0
 DET_COLOR_CONE = rl.Color(255, 149, 0, 220)
 DET_COLOR_PERSON = rl.Color(0, 170, 255, 220)
 DET_COLOR_VEHICLE = rl.Color(255, 60, 60, 220)
+DET_COLOR_SIGN = rl.Color(255, 220, 0, 220)
+DET_COLOR_ANIMAL = rl.Color(180, 120, 255, 220)
+DET_COLOR_OTHER = rl.Color(220, 220, 220, 200)
 DET_LABEL_COLOR = rl.WHITE
 DET_LABEL_BG_ALPHA = 180
+
+# COCO-80 plus `traffic cone (80)` used by `Cone_YOLO11n`.
+YOLO_CLASS_NAMES = (
+  "person",
+  "bicycle",
+  "car",
+  "motorcycle",
+  "airplane",
+  "bus",
+  "train",
+  "truck",
+  "boat",
+  "traffic light",
+  "fire hydrant",
+  "stop sign",
+  "parking meter",
+  "bench",
+  "bird",
+  "cat",
+  "dog",
+  "horse",
+  "sheep",
+  "cow",
+  "elephant",
+  "bear",
+  "zebra",
+  "giraffe",
+  "backpack",
+  "umbrella",
+  "handbag",
+  "tie",
+  "suitcase",
+  "frisbee",
+  "skis",
+  "snowboard",
+  "sports ball",
+  "kite",
+  "baseball bat",
+  "baseball glove",
+  "skateboard",
+  "surfboard",
+  "tennis racket",
+  "bottle",
+  "wine glass",
+  "cup",
+  "fork",
+  "knife",
+  "spoon",
+  "bowl",
+  "banana",
+  "apple",
+  "sandwich",
+  "orange",
+  "broccoli",
+  "carrot",
+  "hot dog",
+  "pizza",
+  "donut",
+  "cake",
+  "chair",
+  "couch",
+  "potted plant",
+  "bed",
+  "dining table",
+  "toilet",
+  "tv",
+  "laptop",
+  "mouse",
+  "remote",
+  "keyboard",
+  "cell phone",
+  "microwave",
+  "oven",
+  "toaster",
+  "sink",
+  "refrigerator",
+  "book",
+  "clock",
+  "vase",
+  "scissors",
+  "teddy bear",
+  "hair drier",
+  "toothbrush",
+  "traffic cone",
+)
+
+
+def _det_label_and_color(cls: int, score: float) -> tuple[str, rl.Color]:
+  cls = int(cls)
+  name = f"id{cls}"
+  if 0 <= cls < len(YOLO_CLASS_NAMES):
+    name = YOLO_CLASS_NAMES[cls]
+
+  if cls == 0:
+    color = DET_COLOR_PERSON
+  elif cls == 80:
+    color = DET_COLOR_CONE
+  elif cls in (1, 2, 3, 4, 5, 6, 7, 8):
+    color = DET_COLOR_VEHICLE
+  elif cls in (9, 10, 11, 12):
+    color = DET_COLOR_SIGN
+  elif 14 <= cls <= 23:
+    color = DET_COLOR_ANIMAL
+  else:
+    color = DET_COLOR_OTHER
+
+  return f"{name} {score:.2f}", color
 
 
 @dataclass
@@ -299,17 +409,7 @@ class AugmentedRoadView(CameraView):
       if x2 <= x1 or y2 <= y1:
         continue
 
-      if cls == 0:
-        base_color = DET_COLOR_PERSON
-        label = f"P {score:.2f}"
-      elif cls == 80:
-        base_color = DET_COLOR_CONE
-        label = f"C {score:.2f}"
-      elif cls in (1, 2, 3, 5, 7):
-        base_color = DET_COLOR_VEHICLE
-        label = f"V {score:.2f}"
-      else:
-        continue
+      label, base_color = _det_label_and_color(cls, score)
 
       sx1 = cam_dst.x + (x1 / img_w) * cam_dst.width
       sy1 = cam_dst.y + (y1 / img_h) * cam_dst.height
@@ -332,12 +432,14 @@ class AugmentedRoadView(CameraView):
       box = rl.Rectangle(float(sx1), float(sy1), float(w), float(h))
       rl.draw_rectangle_lines_ex(box, thickness, color)
 
-      label_size = measure_text_cached(font, label, font_size, spacing)
-      pad = 4
-      bg = rl.Color(color.r, color.g, color.b, DET_LABEL_BG_ALPHA)
-      label_rect = rl.Rectangle(box.x, max(cam_dst.y, box.y - (label_size.y + pad * 2)), label_size.x + pad * 2, label_size.y + pad * 2)
-      rl.draw_rectangle_rec(label_rect, bg)
-      rl.draw_text_ex(font, label, rl.Vector2(label_rect.x + pad, label_rect.y + pad), font_size, spacing, DET_LABEL_COLOR)
+      # Labels get noisy on tiny boxes; keep HUD readable.
+      if min_dim >= 35.0:
+        label_size = measure_text_cached(font, label, font_size, spacing)
+        pad = 4
+        bg = rl.Color(color.r, color.g, color.b, DET_LABEL_BG_ALPHA)
+        label_rect = rl.Rectangle(box.x, max(cam_dst.y, box.y - (label_size.y + pad * 2)), label_size.x + pad * 2, label_size.y + pad * 2)
+        rl.draw_rectangle_rec(label_rect, bg)
+        rl.draw_text_ex(font, label, rl.Vector2(label_rect.x + pad, label_rect.y + pad), font_size, spacing, DET_LABEL_COLOR)
 
   def _handle_mouse_press(self, _):
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:
