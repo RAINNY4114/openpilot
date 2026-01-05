@@ -35,6 +35,7 @@ from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.models.commonmodel_pyx import DrivingModelFrame, CLContext
 from openpilot.selfdrive.modeld.runners.tinygrad_helpers import qcom_tensor_from_opencl_address
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
+from openpilot.selfdrive.modeld.lane_occupancy import compute_lane_occupancy
 from dragonpilot.selfdrive.controls.lib.road_edge_detector import RoadEdgeDetector
 
 
@@ -56,12 +57,30 @@ AUTO_LC_TARGET_LANE_TGAP_S = float(os.getenv("DP_LINCOLN_AUTO_LC_TGAP_S", "2.0")
 AUTO_LC_TARGET_LANE_MIN_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MIN_DIST_M", "25.0"))
 AUTO_LC_TARGET_LANE_MAX_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MAX_DIST_M", "90.0"))
 AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC = float(os.getenv("DP_LINCOLN_AUTO_LC_BLOCK_HOLD_SEC", "0.8"))
+AUTO_LC_SIDE_BLOCK_HOLD_SEC = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_BLOCK_HOLD_SEC", "1.2"))
+AUTO_LC_SIDE_Y2_MIN_FRAC = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_Y2_MIN_FRAC", "0.70"))
+AUTO_LC_SIDE_AREA_MIN_FRAC = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_AREA_MIN_FRAC", "0.02"))
+AUTO_LC_SIDE_X_GUARD_FRAC = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_X_GUARD_FRAC", "0.06"))
+AUTO_LC_POST_FINISH_COOLDOWN_SEC = float(os.getenv("DP_LINCOLN_AUTO_LC_POST_FINISH_COOLDOWN_SEC", "1.0"))
+AUTO_LC_LANE_LINE_PROB_MIN = float(os.getenv("DP_LINCOLN_AUTO_LC_LANE_LINE_PROB_MIN", "0.30"))
+AUTO_LC_LANE_MARGIN_M = float(os.getenv("DP_LINCOLN_AUTO_LC_LANE_MARGIN_M", "-0.20"))
+AUTO_LC_SIDE_CLOSE_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_CLOSE_DIST_M", "15.0"))
 
 # Auto-avoid trigger tightening: keep slowdown behavior, but avoid starting lane changes on weak/noisy detections.
 AVOID_CONE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_CONE_METRIC_MIN", "0.25"))
 AVOID_VEHICLE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN", "0.45"))
 AVOID_VEHICLE_METRIC_MIN_NO_LEAD = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN_NO_LEAD", "0.65"))
 AVOID_STOPPED_LEAD_SPEED_MS = float(os.getenv("DP_LINCOLN_AVOID_STOPPED_LEAD_SPEED_MS", "3.0"))
+
+
+def _min_nonzero(a: float, b: float) -> float:
+  a = float(a)
+  b = float(b)
+  if a <= 0.0:
+    return b
+  if b <= 0.0:
+    return a
+  return min(a, b)
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -318,17 +337,21 @@ def main(demo=False):
   RED = RoadEdgeDetector(params.get_bool("dp_lat_road_edge_detection"))
   AA = AutoAvoidanceHelper()
   AO = AutoOvertakeHelper()
+  det_payload: dict | None = None
   cone_in_path = False
   vehicle_in_path = False
   cone_metric = 0.0
   vehicle_metric = 0.0
   avoid_obstacle_x_offset = 0.0
   avoid_obstacle_x_valid = False
+  left_lane_side_close = False
+  right_lane_side_close = False
   left_lane_haz_dist_m = 0.0
   right_lane_haz_dist_m = 0.0
   left_lane_blocked_until = 0.0
   right_lane_blocked_until = 0.0
   cone_last_update_t = 0.0
+  auto_lc_post_finish_until = 0.0
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -370,6 +393,7 @@ def main(demo=False):
         raw = sm["customReservedRawData0"]
         payload = decode_cone_detections(raw) if raw else None
         if payload is not None:
+          det_payload = payload
           cone_in_path = bool(payload.get("inPath", False))
           vehicle_in_path = bool(payload.get("vehicleInPath", False))
           try:
@@ -391,11 +415,20 @@ def main(demo=False):
           # We intentionally keep this simple: pick the closest in-path cone/vehicle bbox and use its x offset.
           avoid_obstacle_x_valid = False
           avoid_obstacle_x_offset = 0.0
+          left_lane_side_close = False
+          right_lane_side_close = False
           try:
             img_w = int(payload.get("imgW", 0) or 0)
             img_h = int(payload.get("imgH", 0) or 0)
-            objs = payload.get("objsR", None) or payload.get("objs", None) or []
+            objs = payload.get("objs", None) or payload.get("objsR", None) or []
             if img_w > 0 and img_h > 0 and isinstance(objs, list):
+              img_area = float(img_w * img_h)
+              side_y2_min = float(img_h) * float(max(0.0, min(1.0, AUTO_LC_SIDE_Y2_MIN_FRAC)))
+              side_area_min = img_area * float(max(0.0, min(0.25, AUTO_LC_SIDE_AREA_MIN_FRAC)))
+              x_guard = float(img_w) * float(max(0.0, min(0.30, AUTO_LC_SIDE_X_GUARD_FRAC)))
+              left_side_max = float(img_w) * 0.5 - x_guard
+              right_side_min = float(img_w) * 0.5 + x_guard
+
               x_min = float(img_w) * 0.35
               x_max = float(img_w) * 0.65
               y_min = float(img_h) * 0.55
@@ -406,8 +439,6 @@ def main(demo=False):
                   continue
                 try:
                   cls = int(o.get("c", -1))
-                  if cls not in (0, 1, 2, 3, 5, 7, 80):
-                    continue
                   x1 = float(o.get("x1", 0.0))
                   y1 = float(o.get("y1", 0.0))
                   x2 = float(o.get("x2", 0.0))
@@ -417,6 +448,21 @@ def main(demo=False):
                 if not (np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2)):
                   continue
                 if x2 <= x1 or y2 <= y1:
+                  continue
+
+                # Side-by-side blocker: a big/close object on the left or right side of the image
+                # likely indicates a vehicle parallel in an adjacent lane. Blindspot doesn't cover
+                # vehicles ahead/alongside, so add a conservative vision guard here.
+                if cls in (0, 1, 2, 3, 5, 7):
+                  area = float((x2 - x1) * (y2 - y1))
+                  if y2 >= side_y2_min and area >= side_area_min:
+                    cx = 0.5 * (x1 + x2)
+                    if cx <= left_side_max:
+                      left_lane_side_close = True
+                    elif cx >= right_side_min:
+                      right_lane_side_close = True
+
+                if cls not in (0, 1, 2, 3, 5, 7, 80):
                   continue
                 cx = 0.5 * (x1 + x2)
                 if not (x_min <= cx <= x_max and y2 >= y_min):
@@ -431,6 +477,8 @@ def main(demo=False):
           except Exception:
             avoid_obstacle_x_valid = False
             avoid_obstacle_x_offset = 0.0
+            left_lane_side_close = False
+            right_lane_side_close = False
           cone_last_update_t = time.monotonic()
       except Exception:
         cloudlog.exception("failed to parse cone detections")
@@ -442,10 +490,13 @@ def main(demo=False):
       vehicle_metric = 0.0
       avoid_obstacle_x_offset = 0.0
       avoid_obstacle_x_valid = False
+      left_lane_side_close = False
+      right_lane_side_close = False
       left_lane_haz_dist_m = 0.0
       right_lane_haz_dist_m = 0.0
       left_lane_blocked_until = 0.0
       right_lane_blocked_until = 0.0
+      det_payload = None
 
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
@@ -511,6 +562,39 @@ def main(demo=False):
       model_ext_send.modelExt.leftEdgeDetected = RED.left_edge_detected
       model_ext_send.modelExt.rightEdgeDetected = RED.right_edge_detected
 
+      # Lane-line-based adjacent-lane occupancy (more precise than fixed image ROIs).
+      # Uses coned's YOLO bboxes + a pinhole approximation to estimate (x,y) in car space, then classifies objects
+      # into left/right adjacent lanes based on model lane lines 1/2 (current lane boundaries).
+      try:
+        if det_payload is not None and (time.monotonic() - cone_last_update_t) <= 1.0:
+          img_w = int(det_payload.get("imgW", 0) or 0)
+          img_h = int(det_payload.get("imgH", 0) or 0)
+          focal_length_px = float(det_payload.get("focalLengthPx", 0.0) or 0.0)
+          objs = det_payload.get("objs", None) or []
+          if img_w > 0 and img_h > 0 and focal_length_px > 1.0 and isinstance(objs, list):
+            lane_lines = modelv2_send.modelV2.laneLines
+            lane_probs = modelv2_send.modelV2.laneLineProbs
+            if len(lane_lines) >= 3 and len(lane_probs) >= 3:
+              if float(lane_probs[1]) >= AUTO_LC_LANE_LINE_PROB_MIN and float(lane_probs[2]) >= AUTO_LC_LANE_LINE_PROB_MIN:
+                occ = compute_lane_occupancy(
+                  objs=objs,
+                  img_w=img_w,
+                  img_h=img_h,
+                  focal_length_px=focal_length_px,
+                  lane_left_x=lane_lines[1].x,
+                  lane_left_y=lane_lines[1].y,
+                  lane_right_x=lane_lines[2].x,
+                  lane_right_y=lane_lines[2].y,
+                  lane_margin_m=AUTO_LC_LANE_MARGIN_M,
+                  side_close_dist_m=AUTO_LC_SIDE_CLOSE_DIST_M,
+                )
+                left_lane_haz_dist_m = _min_nonzero(left_lane_haz_dist_m, occ.left_min_dist_m)
+                right_lane_haz_dist_m = _min_nonzero(right_lane_haz_dist_m, occ.right_min_dist_m)
+                left_lane_side_close = bool(left_lane_side_close or occ.left_side_close)
+                right_lane_side_close = bool(right_lane_side_close or occ.right_side_close)
+      except Exception:
+        pass
+
       cs = sm["carState"]
       lat_active = bool(sm["carControl"].latActive)
       one_blinker = cs.leftBlinker != cs.rightBlinker
@@ -527,6 +611,12 @@ def main(demo=False):
           left_lane_blocked_until = max(float(left_lane_blocked_until), now_mono + AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC)
         if right_lane_haz_dist_m > 0.1 and right_lane_haz_dist_m < target_lane_block_dist_m:
           right_lane_blocked_until = max(float(right_lane_blocked_until), now_mono + AUTO_LC_TARGET_LANE_BLOCK_HOLD_SEC)
+
+      if AUTO_LC_SIDE_BLOCK_HOLD_SEC > 0.0:
+        if left_lane_side_close:
+          left_lane_blocked_until = max(float(left_lane_blocked_until), now_mono + AUTO_LC_SIDE_BLOCK_HOLD_SEC)
+        if right_lane_side_close:
+          right_lane_blocked_until = max(float(right_lane_blocked_until), now_mono + AUTO_LC_SIDE_BLOCK_HOLD_SEC)
 
       if left_lane_haz_dist_m > 0.1 and left_lane_haz_dist_m < target_lane_block_dist_m:
         left_ok = False
@@ -636,9 +726,19 @@ def main(demo=False):
         overtake_dir = log.LaneChangeDirection.none
         avoid_dir = log.LaneChangeDirection.none
 
+      # Prevent back-to-back auto lane changes right after a lane change completes (helps avoid re-lane-changing
+      # while still parallel with an adjacent vehicle when perception/BSM is imperfect).
+      if AUTO_LC_POST_FINISH_COOLDOWN_SEC > 0.0 and DH.lane_change_state == log.LaneChangeState.off and now_mono < auto_lc_post_finish_until:
+        overtake_dir = log.LaneChangeDirection.none
+        avoid_dir = log.LaneChangeDirection.none
+
       auto_dir = avoid_dir if avoid_dir != log.LaneChangeDirection.none else overtake_dir
+      lc_state_before_update = DH.lane_change_state
       DH.update(cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,
                 auto_lane_change_direction=auto_dir)
+      if AUTO_LC_POST_FINISH_COOLDOWN_SEC > 0.0:
+        if lc_state_before_update == log.LaneChangeState.laneChangeFinishing and DH.lane_change_state == log.LaneChangeState.off:
+          auto_lc_post_finish_until = max(float(auto_lc_post_finish_until), now_mono + AUTO_LC_POST_FINISH_COOLDOWN_SEC)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state

@@ -75,6 +75,8 @@ DET_COLOR_ANIMAL = rl.Color(180, 120, 255, 220)
 DET_COLOR_OTHER = rl.Color(220, 220, 220, 200)
 DET_LABEL_COLOR = rl.WHITE
 DET_LABEL_BG_ALPHA = 180
+DET_SHOW_TRACK_ID = bool(int(os.getenv("DP_DET_SHOW_TRACK_ID", "0")))
+DET_SHOW_DISTANCE = bool(int(os.getenv("DP_DET_SHOW_DISTANCE", "0")))
 
 # COCO-80 plus `traffic cone (80)` used by `Cone_YOLO11n`.
 YOLO_CLASS_NAMES = (
@@ -308,7 +310,7 @@ class AugmentedRoadView(CameraView):
     msg.uiDebug.drawTimeMillis = (time.monotonic() - start_draw) * 1000
     self._pm.send('uiDebug', msg)
 
-  def _get_camera_dst_rect(self, rect: rl.Rectangle) -> "rl.Rectangle | None":
+  def _get_camera_dst_rect(self, rect: rl.Rectangle) -> rl.Rectangle | None:
     if self.frame is None:
       return None
 
@@ -379,6 +381,13 @@ class AugmentedRoadView(CameraView):
     if img_w <= 0 or img_h <= 0:
       return
 
+    focal_length_px = 0.0
+    if DET_SHOW_DISTANCE:
+      try:
+        focal_length_px = float(self._det_payload.get("focalLengthPx", 0.0) or 0.0)
+      except Exception:
+        focal_length_px = 0.0
+
     # Align tracking to the currently displayed camera frame timestamp, otherwise boxes will lag by
     # the detector pipeline latency (coned runs asynchronously at low Hz).
     draw_t_s = draw_now
@@ -410,6 +419,26 @@ class AugmentedRoadView(CameraView):
         continue
 
       label, base_color = _det_label_and_color(cls, score)
+      if DET_SHOW_TRACK_ID:
+        label = f"{label} #{int(o.track_id)}"
+      if DET_SHOW_DISTANCE and focal_length_px > 1.0:
+        try:
+          h_px = float(max(1.0, y2 - y1))
+          if cls == 0:  # person
+            obj_h_m = 1.7
+          elif cls == 80:  # cone
+            obj_h_m = 0.7
+          elif cls in (1, 2, 3, 4, 5, 6, 7, 8):  # vehicle-ish
+            obj_h_m = 1.5
+          else:
+            obj_h_m = 0.0
+          if obj_h_m > 0.1:
+            dist_m = (float(focal_length_px) * float(obj_h_m)) / h_px
+            if np.isfinite(dist_m):
+              dist_m = float(max(0.0, min(250.0, dist_m)))
+              label = f"{label} {dist_m:.0f}m"
+        except Exception:
+          pass
 
       sx1 = cam_dst.x + (x1 / img_w) * cam_dst.width
       sy1 = cam_dst.y + (y1 / img_h) * cam_dst.height
@@ -918,10 +947,12 @@ class AugmentedRoadView(CameraView):
       width_without_road = total_text_width - measurements[road_item_idx].x
       if road_item_font is not None:
         label_width = self._measure_text_ex_no_fallback(road_item_font, road_label, PERF_FONT_SIZE).x
-        measure_value_width = lambda t: self._measure_text_ex_no_fallback(road_item_font, t, PERF_FONT_SIZE).x
+        def measure_value_width(t: str, font: rl.Font = road_item_font) -> float:
+          return self._measure_text_ex_no_fallback(font, t, PERF_FONT_SIZE).x
       else:
         label_width = measure_text_cached(self._perf_font, road_label, PERF_FONT_SIZE).x
-        measure_value_width = lambda t: measure_text_cached(self._perf_font, t, PERF_FONT_SIZE).x
+        def measure_value_width(t: str) -> float:
+          return measure_text_cached(self._perf_font, t, PERF_FONT_SIZE).x
 
       available_for_road_item = max_width - 2 * PERF_PADDING - gap * gap_count - width_without_road
       available_for_value = available_for_road_item - label_width
@@ -946,7 +977,7 @@ class AugmentedRoadView(CameraView):
 
     cursor_x = bar_x + PERF_PADDING
     text_y = bar_y + PERF_PADDING
-    for idx, (text, measurement) in enumerate(zip(items, measurements)):
+    for idx, (text, measurement) in enumerate(zip(items, measurements, strict=True)):
       if idx == road_item_idx and road_item_font is not None:
         self._draw_text_ex_no_fallback(road_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       else:
@@ -1011,7 +1042,7 @@ class AugmentedRoadView(CameraView):
       return False
     return False
 
-  def _get_dynamic_unifont_font(self, text: str) -> "rl.Font | None":
+  def _get_dynamic_unifont_font(self, text: str) -> rl.Font | None:
     codepoints = tuple(sorted({ord(c) for c in text}))
     if not codepoints:
       return None

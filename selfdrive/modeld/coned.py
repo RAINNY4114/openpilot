@@ -477,7 +477,7 @@ class ConeDetector:
 
     return [
       ConeDet(float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(s))
-     for b, s in zip(boxes_xyxy, scores_sel)
+     for b, s in zip(boxes_xyxy, scores_sel, strict=True)
     ]
 
   def _detect_all_objects(self, *, boxes_xywh: np.ndarray, class_scores: np.ndarray,
@@ -540,7 +540,7 @@ class ConeDetector:
     boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0.0, float(img_h))
 
     out: list[ObjDet] = []
-    for b, s, c in zip(boxes_xyxy, scores_sel, cls_sel):
+    for b, s, c in zip(boxes_xyxy, scores_sel, cls_sel, strict=True):
       out.append(ObjDet(int(c), float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(s)))
     return out
 
@@ -727,40 +727,43 @@ def main() -> None:
 
     left_lane_haz_dist_m = 0.0
     right_lane_haz_dist_m = 0.0
-    if enabled and objs_refined:
+    # NOTE: Use the *raw* YOLO boxes for distance estimation. The optional edge-refined boxes are
+    # optimized for visualization and can shrink the bbox height, which would bias the pinhole
+    # distance estimate to be farther (less conservative) for lane-change safety.
+    if enabled and objs:
       # Compute min estimated distance for any hazard in the adjacent lanes.
       left_vehicle_dist_m = _lane_min_distance_m(
-        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        objs, img_rgb.shape[1], img_rgb.shape[0],
         x_min_frac=LC_LEFT_LANE_X_MIN_FRAC, x_max_frac=LC_LEFT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
         class_ids=LC_VEHICLE_CLASS_IDS, score_min=VEHICLE_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_VEHICLE_HEIGHT_M,
       )
       right_vehicle_dist_m = _lane_min_distance_m(
-        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        objs, img_rgb.shape[1], img_rgb.shape[0],
         x_min_frac=LC_RIGHT_LANE_X_MIN_FRAC, x_max_frac=LC_RIGHT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
         class_ids=LC_VEHICLE_CLASS_IDS, score_min=VEHICLE_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_VEHICLE_HEIGHT_M,
       )
       left_person_dist_m = _lane_min_distance_m(
-        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        objs, img_rgb.shape[1], img_rgb.shape[0],
         x_min_frac=LC_LEFT_LANE_X_MIN_FRAC, x_max_frac=LC_LEFT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
         class_ids={PERSON_CLASS_IDX}, score_min=PERSON_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_PERSON_HEIGHT_M,
       )
       right_person_dist_m = _lane_min_distance_m(
-        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        objs, img_rgb.shape[1], img_rgb.shape[0],
         x_min_frac=LC_RIGHT_LANE_X_MIN_FRAC, x_max_frac=LC_RIGHT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
         class_ids={PERSON_CLASS_IDX}, score_min=PERSON_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_PERSON_HEIGHT_M,
       )
       left_cone_dist_m = _lane_min_distance_m(
-        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        objs, img_rgb.shape[1], img_rgb.shape[0],
         x_min_frac=LC_LEFT_LANE_X_MIN_FRAC, x_max_frac=LC_LEFT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
         class_ids={TRAFFIC_CONE_CLASS_IDX}, score_min=LC_CONE_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_CONE_HEIGHT_M,
       )
       right_cone_dist_m = _lane_min_distance_m(
-        objs_refined, img_rgb.shape[1], img_rgb.shape[0],
+        objs, img_rgb.shape[1], img_rgb.shape[0],
         x_min_frac=LC_RIGHT_LANE_X_MIN_FRAC, x_max_frac=LC_RIGHT_LANE_X_MAX_FRAC, y_min_frac=LC_LANE_Y_MIN_FRAC,
         class_ids={TRAFFIC_CONE_CLASS_IDX}, score_min=LC_CONE_SCORE_MIN,
         focal_length_px=focal_length_px, obj_height_m=LC_ASSUMED_CONE_HEIGHT_M,
@@ -777,6 +780,7 @@ def main() -> None:
       timestamp_sof=int(vipc.timestamp_sof),
       img_width=int(buf.width),
       img_height=int(buf.height),
+      focal_length_px=float(focal_length_px),
       cones=cones,
       in_path=cone_in_path,
       objects=objs,

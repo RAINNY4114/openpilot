@@ -12,6 +12,7 @@ LaneChangeDirection = log.LaneChangeDirection
 AUTO_AVOID_MIN_SPEED = 30 * CV.KPH_TO_MS
 SLOWDOWN_BEFORE_LC_SEC = 1.0
 OBSTACLE_CLEAR_DELAY_SEC = 2.0
+RETURN_MIN_TIME_AFTER_OUT_SEC = 3.0
 AVOID_COOLDOWN_SEC = 8.0
 CLEAR_LANE_STABLE_SEC = 0.6
 
@@ -24,6 +25,7 @@ class AutoAvoidanceHelper:
     self._cooldown_until = 0.0
     self._clear_since: float | None = None
     self._slow_since: float | None = None
+    self._out_finished_t: float | None = None
     self._last_lc_state = LaneChangeState.off
     self._left_ok_since: float | None = None
     self._right_ok_since: float | None = None
@@ -58,6 +60,7 @@ class AutoAvoidanceHelper:
     self._cooldown_until = 0.0
     self._clear_since = None
     self._slow_since = None
+    self._out_finished_t = None
     self._last_lc_state = LaneChangeState.off
     self._left_ok_since = None
     self._right_ok_since = None
@@ -103,6 +106,7 @@ class AutoAvoidanceHelper:
       self._return_dir = LaneChangeDirection.none
       self._clear_since = None
       self._slow_since = None
+      self._out_finished_t = None
       if obstacle_in_path and now >= self._cooldown_until:
         self._mode = "slowing"
         self._slow_since = now
@@ -111,6 +115,7 @@ class AutoAvoidanceHelper:
       if not obstacle_in_path:
         self.reset()
       else:
+        self._out_finished_t = None
         if self._out_dir == LaneChangeDirection.none:
           self._out_dir = self._pick_out_direction(left_stable, right_stable, is_rhd, prefer_dir=prefer_dir)
         else:
@@ -141,6 +146,7 @@ class AutoAvoidanceHelper:
       if lc_finished:
         self._mode = "waiting_return"
         self._clear_since = None
+        self._out_finished_t = now
 
     elif self._mode == "waiting_return":
       # Wait until the obstacle is clear for a while, then return to the original lane
@@ -149,7 +155,8 @@ class AutoAvoidanceHelper:
       else:
         if self._clear_since is None:
           self._clear_since = now
-        if (now - self._clear_since) >= OBSTACLE_CLEAR_DELAY_SEC:
+        out_ok = self._out_finished_t is None or (now - self._out_finished_t) >= RETURN_MIN_TIME_AFTER_OUT_SEC
+        if out_ok and (now - self._clear_since) >= OBSTACLE_CLEAR_DELAY_SEC:
           self._return_dir = self._opposite(self._out_dir)
           return_ok = (self._return_dir == LaneChangeDirection.left and left_stable) or (self._return_dir == LaneChangeDirection.right and right_stable)
           if self._return_dir != LaneChangeDirection.none and return_ok:

@@ -136,7 +136,7 @@
 
 ### 2.5 弯道限速提示（1:1 复刻 FrogPilot 的曲线提示控件）
 
-> 说明：这是“弯道限速（`dp_lincoln_curve_speed`）”的 HUD 可视化提示，**不依赖** `dp_lincoln_hud_enhanced` 开关（即：就算不启用 HUD 显示增强，只要弯道限速在工作，这个提示也会出现）。
+> 说明：这是“弯道限速（`dp_lincoln_curve_speed`）/地图实时巡航（`dp_lincoln_osm_realtime_cruise`）”的 HUD 可视化提示，**不依赖** `dp_lincoln_hud_enhanced` 开关（即：就算不启用 HUD 显示增强，只要弯道限速/地图限速在工作，这个提示也会出现）。
 
 **显示内容**
 - 弯道图标（根据弯道方向选择左/右图标）
@@ -146,13 +146,14 @@
 **显示条件（与 FrogPilot 一致：只在“预测会限速”时出现）**
 - `carParams.brand == "ford"`
 - 已设定巡航速度（左上角 `MAX` 有效数值）
-- `dp_lincoln_curve_speed == 1`
+- `dp_lincoln_curve_speed == 1` **或** `dp_lincoln_osm_realtime_cruise == 1`
 - 预测弯道目标速度 `< 当前设定巡航速度`
 
 **数据来源 / 计算**
 - 使用 `modelV2.position.x / modelV2.velocity.x / modelV2.orientationRate.z` 计算前方窗口内曲率峰值并平滑
 - 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.0 m/s²）
 - 弯道距离：取前方窗口内**首次**曲率达到 `k_enter` 的 `position.x`（兜底：最大曲率点距离）
+- 地图融合直出（新增）：当 `longitudinalPlan.curveSpeedSource==2` 且 `min(longitudinalPlan.speeds) < 设定巡航速度` 时，直接用该最小速度作为“目标速度”，并在发布的 horizon 内估算“距离到最小速度点”（用于解决“地图正在限速但视觉曲率很轻微导致图标不出现”的问题）
 - 来源标记：来自 `longitudinalPlan.curveSpeedSource`
   - `1=视觉`：视觉弯道限速正在收紧 `vCruise`
   - `2=地图融合`：地图弯道限速正在收紧 `vCruise`（此时视觉提示仍在工作，但地图更保守，最终以地图为准）

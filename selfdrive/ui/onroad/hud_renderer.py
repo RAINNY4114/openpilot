@@ -4,6 +4,7 @@ import pyray as rl
 import time
 from dataclasses import dataclass
 from openpilot.common.constants import CV
+from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.onroad.lane_pref_button import LanePrefButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
@@ -15,7 +16,7 @@ from dragonpilot.selfdrive.ui.onroad.torque_bar import TorqueBar
 
 # Constants
 SET_SPEED_NA = 255
-KM_TO_MILE = 0.621371
+KM_TO_MILE = 0.621371  # km to mile
 CRUISE_DISABLED_CHAR = '–'
 
 
@@ -293,7 +294,9 @@ class HudRenderer(Widget):
       return
 
     try:
-      if not ui_state.params.get_bool("dp_lincoln_curve_speed"):
+      curve_speed_enabled = ui_state.params.get_bool("dp_lincoln_curve_speed")
+      map_realtime_enabled = ui_state.params.get_bool("dp_lincoln_osm_realtime_cruise")
+      if not curve_speed_enabled and not map_realtime_enabled:
         self._curve_active = False
         self._curve_exit_timer = 0.0
         return
@@ -311,6 +314,7 @@ class HudRenderer(Widget):
       return
 
     model = sm["modelV2"]
+    long_plan = sm["longitudinalPlan"]
     car_state = sm["carState"]
     v_ego = float(getattr(car_state, "vEgo", 0.0))
     if not math.isfinite(v_ego) or v_ego < 1.0:
@@ -326,6 +330,93 @@ class HudRenderer(Widget):
       self._curve_exit_timer = 0.0
       return
 
+    # If map curve speed is actively limiting cruise, show the curve widget even when the vision curvature
+    # is too mild/too far to trigger the vision-only heuristic.
+    src_val = 0
+    try:
+      src = getattr(long_plan, "curveSpeedSource", None)
+      raw = getattr(src, "raw", None)
+      if raw is not None:
+        src_val = int(raw)
+      else:
+        src_val = int(src)
+    except Exception:
+      src_val = 0
+
+    try:
+      speeds = list(getattr(long_plan, "speeds", []) or [])
+    except Exception:
+      speeds = []
+
+    speed_conversion = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
+    speed_unit = tr("km/h") if ui_state.is_metric else tr("mph")
+
+    if src_val == 2 and speeds:
+      try:
+        v_min = float(min(float(v) for v in speeds if math.isfinite(float(v)) and float(v) > 0.0))
+      except Exception:
+        v_min = 0.0
+
+      v_min_disp = v_min * speed_conversion
+      if math.isfinite(v_min_disp) and v_min_disp > 0.0 and v_min_disp < self.set_speed:
+        # Estimate distance-to-min within the published horizon.
+        t = list(ModelConstants.T_IDXS[:len(speeds)])
+        dist_to_min = 0.0
+        try:
+          idx_min = int(min(range(len(speeds)), key=lambda i: float(speeds[i])))
+        except Exception:
+          idx_min = 0
+        for i in range(1, min(len(speeds), len(t))):
+          dt_i = float(t[i] - t[i - 1])
+          if dt_i <= 0.0:
+            continue
+          v0 = float(speeds[i - 1])
+          v1 = float(speeds[i])
+          dist_to_min += 0.5 * (v0 + v1) * dt_i
+          if i >= idx_min:
+            break
+
+        # Use vision sign to pick L/R icon if available.
+        k_signed_at_max = 0.0
+        try:
+          k_max = 0.0
+          for v_pred, turn_rate in zip(v_preds, turn_rates, strict=True):
+            v_pred_f = float(v_pred)
+            turn_rate_f = float(turn_rate)
+            if not math.isfinite(v_pred_f) or not math.isfinite(turn_rate_f):
+              continue
+            v_pred_f = max(max(1.0, v_ego * 0.7), min(100.0, v_pred_f))
+            k_signed = turn_rate_f / v_pred_f
+            k = abs(k_signed)
+            if k > k_max:
+              k_max = k
+              k_signed_at_max = k_signed
+        except Exception:
+          k_signed_at_max = 0.0
+
+        self._curve_speed_str = f"目标 {round(v_min_disp)} {speed_unit}"
+        self._curve_speed_flip = k_signed_at_max >= 0.0
+        base = f"前方弯道 {max(0, int(round(dist_to_min)))} m"
+        self._curve_state_str = "地图融合"
+        self._curve_dist_str = f"{base} · {self._curve_state_str}"
+
+        try:
+          base_font = font_fallback(self._font_medium)
+          if self._font_has_missing_glyphs(base_font, self._curve_dist_str):
+            self._curve_dist_font = self._get_dynamic_unifont_font(self._curve_dist_str)
+        except Exception:
+          self._curve_dist_font = None
+
+        try:
+          base_font = font_fallback(self._font_bold)
+          if self._font_has_missing_glyphs(base_font, self._curve_speed_str):
+            self._curve_speed_font = self._get_dynamic_unifont_font(self._curve_speed_str)
+        except Exception:
+          self._curve_speed_font = None
+
+        self._curve_show = True
+        return
+
     window_m = max(30, min(190, self._safe_int_param("dp_lincoln_curve_window_m", 130)))
     k_enter_milli = max(2, min(20, self._safe_int_param("dp_lincoln_curve_k_enter", 4)))
     k_enter = (k_enter_milli / 1000.0)
@@ -335,7 +426,7 @@ class HudRenderer(Widget):
     k_signed_at_max = 0.0
     dist_at_max = 0.0
     dist_at_enter = None
-    for pos, v_pred, turn_rate in zip(positions, v_preds, turn_rates):
+    for pos, v_pred, turn_rate in zip(positions, v_preds, turn_rates, strict=True):
       try:
         pos_f = float(pos)
         if not math.isfinite(pos_f) or pos_f > window_m:

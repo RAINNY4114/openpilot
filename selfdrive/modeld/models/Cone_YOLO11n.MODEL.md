@@ -34,7 +34,7 @@ Relevant driving-related labels (from ONNX metadata `names`):
 - `11 stop sign`
 - `80 traffic cone`
 
-Note: `coned.py` currently only parses/uses the subset above (plus `traffic cone`); other labels exist but are ignored.
+Note: `coned.py` parses **all 0..80 labels** for HUD visualization (`payload.objs/objsR`), while the control heuristics currently focus on a smaller driving-relevant subset (person/vehicles/cone).
 
 ## Regenerating `Cone_YOLO11n.onnx` (developer machine)
 
