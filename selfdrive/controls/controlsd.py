@@ -2,6 +2,8 @@
 import math
 from numbers import Number
 
+import numpy as np
+
 from cereal import car, log
 import cereal.messaging as messaging
 from openpilot.common.constants import CV
@@ -26,6 +28,40 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
+
+
+def _lane_center_curvature_correction_ford(model_v2: log.ModelDataV2, v_ego: float) -> float:
+  # Use lane lines to gently re-center in curves (Ford/Lincoln tends to apex/cut inside in some turns).
+  if len(model_v2.laneLines) < 3 or len(model_v2.laneLineProbs) < 3:
+    return 0.0
+
+  left_prob = float(model_v2.laneLineProbs[1])
+  right_prob = float(model_v2.laneLineProbs[2])
+  prob = min(left_prob, right_prob)
+  if prob < 0.65:
+    return 0.0
+
+  left = model_v2.laneLines[1]
+  right = model_v2.laneLines[2]
+  if len(left.x) < 2 or len(right.x) < 2:
+    return 0.0
+
+  lookahead_m = float(np.clip(v_ego * 0.7 + 8.0, 8.0, 20.0))
+  y_left = float(np.interp(lookahead_m, left.x, left.y))
+  y_right = float(np.interp(lookahead_m, right.x, right.y))
+
+  lane_width = y_left - y_right
+  if not (2.6 < lane_width < 4.4):
+    return 0.0
+
+  y_center = 0.5 * (y_left + y_right)
+  y_center = float(np.clip(y_center, -0.6, 0.6))
+
+  # Pure-pursuit-ish curvature to drive lateral error to zero over lookahead distance.
+  correction = -2.0 * y_center / (lookahead_m ** 2)
+  scale = float(np.clip((prob - 0.65) / 0.35, 0.0, 1.0))
+  correction *= scale
+  return float(np.clip(correction, -0.002, 0.002))
 
 
 class Controls:
@@ -63,6 +99,8 @@ class Controls:
     self.alka_active = False
     self.htd = HumanTurnDetection()
     self.htd_state = HTDState.INACTIVE
+
+    self._lane_center_curv_correction = 0.0
 
   def update(self):
     self.sm.update(15)
@@ -127,6 +165,18 @@ class Controls:
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+
+    # Ford/Lincoln: gently blend in a lane-center correction (only in turns, only when lane lines are confident).
+    if (not CC.latActive) or self.CP.brand != "ford" or CS.leftBlinker or CS.rightBlinker:
+      self._lane_center_curv_correction = 0.0
+    else:
+      raw_corr = 0.0
+      if CS.vEgo > 5.0 and abs(float(new_desired_curvature)) > 5e-4:
+        raw_corr = _lane_center_curvature_correction_ford(model_v2, CS.vEgo)
+      alpha = 0.05  # ~0.2s time constant at 100Hz
+      self._lane_center_curv_correction = (1.0 - alpha) * self._lane_center_curv_correction + alpha * raw_corr
+      new_desired_curvature = float(new_desired_curvature) + float(self._lane_center_curv_correction)
+
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 

@@ -13,7 +13,6 @@ import numpy as np
 import cereal.messaging as messaging
 from cereal.messaging import PubMaster
 from msgq.visionipc import VisionIpcClient, VisionStreamType, VisionBuf
-from openpilot.common.params import Params
 from openpilot.common.realtime import config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
@@ -42,7 +41,8 @@ LC_VEHICLE_CLASS_IDS = {BICYCLE_CLASS_IDX, MOTORCYCLE_CLASS_IDX, CAR_CLASS_IDX, 
 # Runtime tuning via env (keeps defaults safe-ish, but still experimental)
 CONE_SCORE_MIN = float(os.getenv("CONE_SCORE_MIN", "0.10"))
 PERSON_SCORE_MIN = float(os.getenv("PERSON_SCORE_MIN", "0.25"))
-VEHICLE_SCORE_MIN = float(os.getenv("VEHICLE_SCORE_MIN", "0.30"))
+# Slightly lower default to improve recall (safer for auto lane-change gating; may increase false positives).
+VEHICLE_SCORE_MIN = float(os.getenv("VEHICLE_SCORE_MIN", "0.25"))
 OTHER_SCORE_MIN = float(os.getenv("CONE_OTHER_SCORE_MIN", "0.25"))
 PERSON_AREA_MIN_FRAC = float(os.getenv("CONE_PERSON_AREA_MIN_FRAC", "0.004"))
 VEHICLE_AREA_MIN_FRAC = float(os.getenv("CONE_VEHICLE_AREA_MIN_FRAC", "0.010"))
@@ -60,8 +60,6 @@ REFINE_PAD_FRAC = float(os.getenv("CONE_REFINE_PAD_FRAC", "0.08"))
 REFINE_MIN_AREA_FRAC = float(os.getenv("CONE_REFINE_MIN_AREA_FRAC", "0.02"))
 REFINE_IOU_MIN = float(os.getenv("CONE_REFINE_IOU_MIN", "0.25"))
 REFINE_MAX_OBJS = int(os.getenv("CONE_REFINE_MAX_OBJS", "32"))
-
-ENABLE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid", "dp_lincoln_auto_overtake")
 
 # Target-lane forward occupancy (for auto lane-change safety).
 # Distance is estimated from bbox height using a simple pinhole approximation.
@@ -588,7 +586,6 @@ class ConeDetector:
 def main() -> None:
   config_realtime_process(7, 5)
 
-  params = Params()
   pm = PubMaster(["customReservedRawData0"])
 
   # camera stream
@@ -630,7 +627,6 @@ def main() -> None:
       continue
     next_pub_t = now + pub_dt
 
-    enabled = any(params.get_bool(p) for p in ENABLE_PARAMS)
     img_rgb: np.ndarray | None = None
     cones: list[ConeDet] = []
     objs: list[ObjDet] = []
@@ -647,48 +643,40 @@ def main() -> None:
     vehicle_metric = 0.0
     obstacle_metric = 0.0
     hazard_metric = 0.0
-    if enabled:
-      try:
-        img_rgb = _nv12_to_rgb(buf)
-        cones, objs = detector.detect(img_rgb)
-        cone_in_path_raw = _cones_in_path(cones, img_rgb.shape[1], img_rgb.shape[0])
-        # "Hazard" is a conservative heuristic for driver alerting (not used for auto lane changes).
-        persons = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls == PERSON_CLASS_IDX]
-        two_wheel = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (BICYCLE_CLASS_IDX, MOTORCYCLE_CLASS_IDX)]
-        four_wheel = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (CAR_CLASS_IDX, BUS_CLASS_IDX, TRUCK_CLASS_IDX)]
+    try:
+      img_rgb = _nv12_to_rgb(buf)
+      cones, objs = detector.detect(img_rgb)
+      cone_in_path_raw = _cones_in_path(cones, img_rgb.shape[1], img_rgb.shape[0])
+      # "Hazard" is a conservative heuristic for driver alerting (not used for auto lane changes).
+      persons = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls == PERSON_CLASS_IDX]
+      two_wheel = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (BICYCLE_CLASS_IDX, MOTORCYCLE_CLASS_IDX)]
+      four_wheel = [ConeDet(o.x1, o.y1, o.x2, o.y2, o.score) for o in objs if o.cls in (CAR_CLASS_IDX, BUS_CLASS_IDX, TRUCK_CLASS_IDX)]
 
-        person_in_path_raw = _dets_in_path(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=PERSON_AREA_MIN_FRAC)
-        two_wheel_in_path_raw = _dets_in_path(two_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=TWOWHEEL_AREA_MIN_FRAC)
-        four_wheel_in_path_raw = _dets_in_path(four_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=VEHICLE_AREA_MIN_FRAC)
-        vehicle_in_path_raw = two_wheel_in_path_raw or four_wheel_in_path_raw
-        hazard_in_path_raw = person_in_path_raw or vehicle_in_path_raw
+      person_in_path_raw = _dets_in_path(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=PERSON_AREA_MIN_FRAC)
+      two_wheel_in_path_raw = _dets_in_path(two_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=TWOWHEEL_AREA_MIN_FRAC)
+      four_wheel_in_path_raw = _dets_in_path(four_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=VEHICLE_AREA_MIN_FRAC)
+      vehicle_in_path_raw = two_wheel_in_path_raw or four_wheel_in_path_raw
+      hazard_in_path_raw = person_in_path_raw or vehicle_in_path_raw
 
-        cone_metric = _dets_metric(cones, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.0)
-        person_metric = _dets_metric(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=PERSON_AREA_MIN_FRAC)
-        two_wheel_metric = _dets_metric(two_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=TWOWHEEL_AREA_MIN_FRAC)
-        four_wheel_metric = _dets_metric(four_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=VEHICLE_AREA_MIN_FRAC)
-        vehicle_metric = max(two_wheel_metric, four_wheel_metric)
-      except Exception:
-        cloudlog.exception("cone detection failed")
-        cones = []
-        objs = []
-        cone_in_path_raw = False
-        person_in_path_raw = False
-        vehicle_in_path_raw = False
-        hazard_in_path_raw = False
-        cone_metric = 0.0
-        person_metric = 0.0
-        vehicle_metric = 0.0
-    else:
-      cone_deb.reset()
-      person_deb.reset()
-      vehicle_deb.reset()
-      cone_metric_hold = 0.0
-      person_metric_hold = 0.0
-      vehicle_metric_hold = 0.0
+      cone_metric = _dets_metric(cones, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=0.0)
+      person_metric = _dets_metric(persons, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=PERSON_AREA_MIN_FRAC)
+      two_wheel_metric = _dets_metric(two_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=TWOWHEEL_AREA_MIN_FRAC)
+      four_wheel_metric = _dets_metric(four_wheel, img_rgb.shape[1], img_rgb.shape[0], area_min_frac=VEHICLE_AREA_MIN_FRAC)
+      vehicle_metric = max(two_wheel_metric, four_wheel_metric)
+    except Exception:
+      cloudlog.exception("cone detection failed")
+      cones = []
+      objs = []
+      cone_in_path_raw = False
+      person_in_path_raw = False
+      vehicle_in_path_raw = False
+      hazard_in_path_raw = False
+      cone_metric = 0.0
+      person_metric = 0.0
+      vehicle_metric = 0.0
 
     objs_refined: list[ObjDet] = list(objs)
-    if enabled and REFINE_EDGES and img_rgb is not None and objs:
+    if REFINE_EDGES and img_rgb is not None and objs:
       try:
         objs_refined = list(objs)
         refine_idxs = list(range(len(objs)))
@@ -730,7 +718,7 @@ def main() -> None:
     # NOTE: Use the *raw* YOLO boxes for distance estimation. The optional edge-refined boxes are
     # optimized for visualization and can shrink the bbox height, which would bias the pinhole
     # distance estimate to be farther (less conservative) for lane-change safety.
-    if enabled and objs:
+    if img_rgb is not None and objs:
       # Compute min estimated distance for any hazard in the adjacent lanes.
       left_vehicle_dist_m = _lane_min_distance_m(
         objs, img_rgb.shape[1], img_rgb.shape[0],

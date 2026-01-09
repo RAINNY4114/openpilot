@@ -38,6 +38,12 @@ class CarInterface(CarInterfaceBase):
     ret.longitudinalTuning.kiBP = [0.]
     ret.longitudinalTuning.kiV = [0.5]
 
+    # Faster stop-and-go starts: use the dedicated starting state to avoid sluggish PID ramp-up at standstill.
+    # This is especially noticeable on Ford/Lincoln platforms where the ACC system can be slow to react.
+    ret.startingState = True
+    ret.startAccel = 1.0
+    ret.vEgoStarting = 0.25
+
     if not ret.radarUnavailable and DBC[candidate][Bus.radar] == RADAR.DELPHI_MRR:
       # average of 33.3 Hz radar timestep / 4 scan modes = 60 ms
       # MRR_Header_Timestamps->CAN_DET_TIME_SINCE_MEAS reports 61.3 ms

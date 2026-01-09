@@ -226,7 +226,9 @@
 
 1) `coned`（目标检测进程）
 - 进程配置：`system/manager/process_config.py`
-- 启动条件：上路且（`dp_lat_cone_detection` 或 `dp_lincoln_auto_avoid`）为 true
+- 启动条件：上路且车型为 Ford/Lincoln（`carParams.brand == "ford"`），并且开启以下任一功能：
+  - `dp_lincoln_auto_avoid`
+  - `dp_lincoln_auto_overtake`
 - 模型文件：`selfdrive/modeld/models/Cone_YOLO11n.onnx`（构建产物：`Cone_YOLO11n_tinygrad.pkl`）
 - 输出：向 `customReservedRawData0` 发布 JSON（含 `inPath`、`personInPath`、`vehicleInPath`、`hazInPath`、`cones`、`objs/objsR`，以及用于稳定性/平顺性的 `*Metric` 与 `*Raw` 字段；其中 `inPath/personInPath/vehicleInPath` 为去抖后的稳定信号）。
   - `objs/objsR`：当前会输出 **COCO-80 + traffic cone(80) 的全类别检测框**（用于 HUD 可视化/调试）。

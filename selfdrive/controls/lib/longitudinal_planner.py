@@ -25,6 +25,7 @@ from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
+A_CRUISE_MAX_VALS_FORD = [1.2, 1.0, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
@@ -67,6 +68,11 @@ class DPFlags:
 def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
+def get_max_accel_for_car(v_ego, CP):
+  if getattr(CP, "brand", "") == "ford":
+    return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS_FORD)
+  return get_max_accel(v_ego)
+
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
@@ -88,7 +94,7 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
 class LongitudinalPlanner:
   def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
-    self.mpc = LongitudinalMpc(dt=dt)
+    self.mpc = LongitudinalMpc(dt=dt, CP=CP)
     # TODO remove mpc modes when TR released
     self.mpc.mode = 'acc'
     self.fcw = False
@@ -266,22 +272,14 @@ class LongitudinalPlanner:
         v_hold = float(tv_here)
 
     # 2) Preview cap:
-    #    - Only engage once the next limiting segment is within a short "base" horizon (avoid slowing too early).
-    #    - When engaged, use a longer "extended" horizon to capture the minimum speed across the upcoming curve/S-curve
-    #      (reduces step-downs mid-curve as more points become visible).
-    # High-speed tuning: reduce early, step-like slowdowns from map preview caps on gentle highway curves,
-    # while keeping the existing behavior for lower speeds (e.g. 国道/省道).
-    high_speed_preview = bool(v_ego >= (110.0 * CV.KPH_TO_MS))
-    preview_base_time_s = float(_MAP_PREVIEW_BASE_TIME_S)
-    preview_ext_time_s = float(_MAP_PREVIEW_EXT_TIME_S)
-    if high_speed_preview:
-      preview_base_time_s = min(preview_base_time_s, 6.0)
-      preview_ext_time_s = min(preview_ext_time_s, 12.0)
-
-    preview_base_horizon = max(_MAP_PREVIEW_BASE_MIN_HORIZON_M, min(_MAP_PREVIEW_BASE_MAX_HORIZON_M, v_ego * preview_base_time_s))
-    preview_ext_horizon = max(_MAP_PREVIEW_EXT_MIN_HORIZON_M, min(_MAP_PREVIEW_EXT_MAX_HORIZON_M, v_ego * preview_ext_time_s))
-    v_preview_base = 0.0
+    #    "preview cap" is a *soft* speed cap used when we don't need to brake yet, but want to avoid
+    #    step-downs as more map points become visible (e.g. long curves / S-curves).
+    #
+    #    IMPORTANT: We don't clamp to the map's minimum speed immediately. Instead we compute a distance-based
+    #    cap (v_cap) that only starts tightening when it's actually time to start slowing down comfortably.
+    preview_ext_horizon = max(_MAP_PREVIEW_EXT_MIN_HORIZON_M, min(_MAP_PREVIEW_EXT_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_EXT_TIME_S))
     v_preview_ext = 0.0
+    d_preview_ext = 0.0
 
     # 3) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
     valid_velocities: list[tuple[float, float, float, float]] = []  # (target_v, dist_m, lat, lon)
@@ -295,11 +293,10 @@ class LongitudinalPlanner:
       if not math.isfinite(tv) or tv <= 0.0:
         continue
       d = float(forward_distances[i])
-      if tv < (v_cruise - 1e-3):
-        if d < preview_base_horizon:
-          v_preview_base = float(tv) if v_preview_base <= 0.1 else float(min(v_preview_base, tv))
-        if d < preview_ext_horizon:
-          v_preview_ext = float(tv) if v_preview_ext <= 0.1 else float(min(v_preview_ext, tv))
+      if tv < (v_cruise - 1e-3) and d < preview_ext_horizon:
+        if v_preview_ext <= 0.1 or tv < v_preview_ext:
+          v_preview_ext = float(tv)
+          d_preview_ext = float(d)
 
       if tv >= v_ego - 1e-3:
         continue
@@ -372,8 +369,7 @@ class LongitudinalPlanner:
       self._map_lock_lat = 0.0
       self._map_lock_lon = 0.0
 
-    # Enable the preview cap only when a limiting segment is within the base horizon.
-    v_preview = float(v_preview_ext) if v_preview_base > 0.1 and v_preview_ext > 0.1 else 0.0
+    v_preview = float(v_preview_ext) if v_preview_ext > 0.1 else 0.0
 
     # If no decel target is active, fall back to "in-curve hold" cap.
     if v_target <= 0.1 and v_hold > 0.1:
@@ -384,28 +380,29 @@ class LongitudinalPlanner:
       # - Tighten immediately (safety).
       # - Relax slowly (comfort + avoid accelerate/decelerate oscillations).
       try:
-        vp = float(v_preview)
+        v_min = float(v_preview)
       except Exception:
-        vp = 0.0
+        v_min = 0.0
+
+      # Distance-based preview cap: "what max speed can we hold *now* and still comfortably reach v_min by d_min".
+      d_min = float(d_preview_ext) if math.isfinite(float(d_preview_ext)) else 0.0
+      d_use = max(d_min - v_ego * _MAP_TARGET_OFFSET_S, 1.0)
+      a_preview = max(0.1, abs(float(_MAP_TARGET_ACCEL)))
+      v_cap = 0.0
+      if v_min > 0.1 and math.isfinite(v_min):
+        v_cap = math.sqrt(max(0.0, v_min * v_min + 2.0 * a_preview * d_use))
+        if v_cruise > 0.1 and math.isfinite(v_cruise):
+          v_cap = min(float(v_cruise), float(v_cap))
+
       if self._map_preview_v <= 0.1 or not math.isfinite(self._map_preview_v):
-        if high_speed_preview and v_cruise > 0.1 and v_ego > 0.1:
-          # Seed from current speed to avoid an instant large clamp on first engagement.
-          self._map_preview_v = float(min(v_cruise, max(vp, v_ego)))
-        else:
-          self._map_preview_v = vp
-      elif math.isfinite(vp) and vp > 0.1:
-        if vp < self._map_preview_v:
-          if high_speed_preview and self.dt > 0.0:
-            # Rate-limit tightening at highway speeds to prevent "hard" step-downs from noisy map segments.
-            tighten_rate_mps = 1.0  # m/s per second
-            down_step = float(tighten_rate_mps * self.dt)
-            self._map_preview_v = float(max(vp, self._map_preview_v - down_step))
-          else:
-            self._map_preview_v = vp
+        self._map_preview_v = float(v_cap)
+      elif math.isfinite(v_cap) and v_cap > 0.1:
+        if v_cap < self._map_preview_v:
+          self._map_preview_v = float(v_cap)
         else:
           tau_s = 2.0
           alpha = float(self.dt / (tau_s + self.dt)) if self.dt > 0.0 else 0.0
-          self._map_preview_v = float(self._map_preview_v + (vp - self._map_preview_v) * alpha)
+          self._map_preview_v = float(self._map_preview_v + (v_cap - self._map_preview_v) * alpha)
       return float(self._map_preview_v), 0.0
 
     self._map_preview_v = 0.0
@@ -927,7 +924,7 @@ class LongitudinalPlanner:
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     if mode == 'acc':
-      accel_clip = [ACCEL_MIN, get_max_accel(v_ego)]
+      accel_clip = [ACCEL_MIN, get_max_accel_for_car(v_ego, self.CP)]
       steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
       accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
     else:
@@ -1097,7 +1094,17 @@ class LongitudinalPlanner:
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
-    self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
+    output_a_target_clipped = float(np.clip(output_a_target, accel_clip[0], accel_clip[1]))
+
+    # Ford/Lincoln comfort: limit positive jerk to reduce abrupt tip-in (high RPM / delayed upshifts),
+    # while keeping decel response unmodified for safety.
+    if getattr(self.CP, "brand", "") == "ford" and (not reset_state) and (not long_control_off):
+      if math.isfinite(self.output_a_target) and output_a_target_clipped > self.output_a_target:
+        max_jerk_up = float(np.interp(v_ego, [0.0, 5.0, 15.0, 30.0], [2.0, 1.5, 1.0, 0.8]))
+        max_step = max_jerk_up * float(self.dt)
+        output_a_target_clipped = float(min(output_a_target_clipped, self.output_a_target + max_step))
+
+    self.output_a_target = output_a_target_clipped
     self.prev_accel_clip = accel_clip
 
   def publish(self, sm, pm):

@@ -69,9 +69,16 @@ def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not params.get_bool("dp_dev_disable_connect")
 
 def coned(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and (params.get_bool("dp_lat_cone_detection") or
-                      params.get_bool("dp_lincoln_auto_avoid") or
-                      params.get_bool("dp_lincoln_auto_overtake"))
+  # Run onroad for Ford/Lincoln *when the user enables auto lane change features*.
+  # This keeps behavior tied to the feature toggles (no extra "detection" toggle),
+  # while avoiding unnecessary compute when auto lane changes are disabled.
+  try:
+    return started and getattr(CP, "brand", "") == "ford" and (
+      params.get_bool("dp_lincoln_auto_avoid") or
+      params.get_bool("dp_lincoln_auto_overtake")
+    )
+  except Exception:
+    return False
 
 def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Run mapd when:

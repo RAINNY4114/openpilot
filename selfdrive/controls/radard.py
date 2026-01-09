@@ -157,9 +157,11 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
 
 
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
-             model_v_ego: float, low_speed_override: bool = True) -> dict[str, Any]:
+             model_v_ego: float, low_speed_override: bool = True,
+             match_prob_min: float = 0.5, vision_prob_min: float = 0.5,
+             allow_radar_only: bool = False) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
-  if len(tracks) > 0 and ready and lead_msg.prob > .5:
+  if len(tracks) > 0 and ready and lead_msg.prob > match_prob_min:
     track = match_vision_to_track(v_ego, lead_msg, tracks)
   else:
     track = None
@@ -167,7 +169,7 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
   lead_dict = {'status': False}
   if track is not None:
     lead_dict = track.get_RadarState(lead_msg.prob)
-  elif (track is None) and ready and (lead_msg.prob > .5):
+  elif (track is None) and ready and (lead_msg.prob > vision_prob_min):
     lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego)
 
   if low_speed_override:
@@ -179,12 +181,22 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
       if (not lead_dict['status']) or (closest_track.dRel < lead_dict['dRel']):
         lead_dict = closest_track.get_RadarState()
 
+  # Optional radar-only fallback for long-range moving leads, to reduce reliance on the vision lead range/thresholds.
+  # Intentionally excludes stationary objects to avoid phantom braking.
+  if allow_radar_only and ready and (not lead_dict['status']) and len(tracks) > 0:
+    radar_only_candidates = [t for t in tracks.values()
+                             if t.cnt >= 3 and abs(t.yRel) < 1.0 and (v_ego + t.vRel) >= 2.0 and t.dRel > 8.0]
+    if len(radar_only_candidates) > 0:
+      closest = min(radar_only_candidates, key=lambda t: t.dRel)
+      lead_dict = closest.get_RadarState(model_prob=0.0)
+
   return lead_dict
 
 
 class RadarD:
-  def __init__(self, delay: float = 0.0):
+  def __init__(self, delay: float = 0.0, CP: Any = None):
     self.current_time = 0.0
+    self.CP = CP
 
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
@@ -239,8 +251,19 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, low_speed_override=False)
+      # Ford/Lincoln: allow radar matching sooner (lower vision prob threshold) to improve long-range lead acquisition
+      # and cut-in responsiveness, while keeping the vision-only fallback conservative.
+      match_prob_min = 0.5
+      vision_prob_min = 0.5
+      if self.CP is not None and getattr(self.CP, "brand", "") == "ford" and not getattr(self.CP, "radarUnavailable", True):
+        match_prob_min = 0.35
+
+      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
+                                          low_speed_override=True, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
+                                          allow_radar_only=(match_prob_min < 0.5))
+      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
+                                          low_speed_override=False, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
+                                          allow_radar_only=False)
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
@@ -264,7 +287,7 @@ def main() -> None:
   sm = messaging.SubMaster(['modelV2', 'carState', 'liveTracks'], poll='modelV2')
   pm = messaging.PubMaster(['radarState'])
 
-  RD = RadarD(CP.radarDelay)
+  RD = RadarD(CP.radarDelay, CP)
 
   while 1:
     sm.update()

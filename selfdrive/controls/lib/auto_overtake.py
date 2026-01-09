@@ -12,8 +12,11 @@ LaneChangeDirection = log.LaneChangeDirection
 # This only injects a lane-change desire; longitudinal control remains unchanged (ACC/openpilot).
 OVERTAKE_MIN_SPEED = 80 * CV.KPH_TO_MS
 OVERTAKE_MIN_CRUISE_SPEED = 90 * CV.KPH_TO_MS
-OVERTAKE_SPEED_DELTA = 15 * CV.KPH_TO_MS
-OVERTAKE_HEADWAY_MAX_S = 2.8  # only consider overtake when we're close to being speed-limited
+# Make auto-overtake less "rare" while keeping the *lane-clear* gating strict:
+# - Allow smaller speed deltas (common highway scenario: lead is ~10 km/h slower than set speed).
+# - Allow slightly larger headways (drivers often use longer ACC gaps).
+OVERTAKE_SPEED_DELTA = 10 * CV.KPH_TO_MS
+OVERTAKE_HEADWAY_MAX_S = 3.5  # only consider overtake when we're close to being speed-limited
 OVERTAKE_LEAD_STABLE_SEC = 1.0
 
 PREPARE_BEFORE_LC_SEC = 0.6

@@ -565,6 +565,7 @@ def main(demo=False):
       # Lane-line-based adjacent-lane occupancy (more precise than fixed image ROIs).
       # Uses coned's YOLO bboxes + a pinhole approximation to estimate (x,y) in car space, then classifies objects
       # into left/right adjacent lanes based on model lane lines 1/2 (current lane boundaries).
+      lane_lines_ok_for_auto_lc = False
       try:
         if det_payload is not None and (time.monotonic() - cone_last_update_t) <= 1.0:
           img_w = int(det_payload.get("imgW", 0) or 0)
@@ -576,6 +577,7 @@ def main(demo=False):
             lane_probs = modelv2_send.modelV2.laneLineProbs
             if len(lane_lines) >= 3 and len(lane_probs) >= 3:
               if float(lane_probs[1]) >= AUTO_LC_LANE_LINE_PROB_MIN and float(lane_probs[2]) >= AUTO_LC_LANE_LINE_PROB_MIN:
+                lane_lines_ok_for_auto_lc = True
                 occ = compute_lane_occupancy(
                   objs=objs,
                   img_w=img_w,
@@ -725,6 +727,15 @@ def main(demo=False):
       if curve_block and not one_blinker and DH.lane_change_state == log.LaneChangeState.off:
         overtake_dir = log.LaneChangeDirection.none
         avoid_dir = log.LaneChangeDirection.none
+
+      # Safety: require fresh detector data + good lane lines before starting *automatic* lane changes.
+      # This does not affect manual lane changes, and does not cancel an in-progress lane change.
+      auto_lc_feature_enabled = params.get_bool("dp_lincoln_auto_avoid") or params.get_bool("dp_lincoln_auto_overtake")
+      det_ok_for_auto_lc = det_payload is not None and (now_mono - cone_last_update_t) <= 1.0
+      if auto_lc_feature_enabled and DH.lane_change_state == log.LaneChangeState.off:
+        if (not det_ok_for_auto_lc) or (not lane_lines_ok_for_auto_lc):
+          overtake_dir = log.LaneChangeDirection.none
+          avoid_dir = log.LaneChangeDirection.none
 
       # Prevent back-to-back auto lane changes right after a lane change completes (helps avoid re-lane-changing
       # while still parallel with an adjacent vehicle when perception/BSM is imperfect).
