@@ -119,9 +119,28 @@ def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks
   offset_vision_dist = lead.x[0] - RADAR_TO_CAMERA
 
   def prob(c):
-    prob_d = laplacian_pdf(c.dRel, offset_vision_dist, lead.xStd[0])
-    prob_y = laplacian_pdf(c.yRel, -lead.y[0], lead.yStd[0])
-    prob_v = laplacian_pdf(c.vRel + v_ego, lead.v[0], lead.vStd[0])
+    # The lead stds can get very large when the vision lead is uncertain, which makes matching too permissive.
+    # Clamp to keep the matching discriminative and reduce track swaps (especially important for long-range/cut-in).
+    try:
+      x_std = float(lead.xStd[0])
+    except Exception:
+      x_std = 6.0
+    try:
+      y_std = float(lead.yStd[0])
+    except Exception:
+      y_std = 1.0
+    try:
+      v_std = float(lead.vStd[0])
+    except Exception:
+      v_std = 6.0
+
+    x_std = float(np.clip(x_std, 0.5, 6.0))
+    y_std = float(np.clip(y_std, 0.2, 1.2))
+    v_std = float(np.clip(v_std, 0.5, 6.0))
+
+    prob_d = laplacian_pdf(c.dRel, offset_vision_dist, x_std)
+    prob_y = laplacian_pdf(c.yRel, -lead.y[0], y_std)
+    prob_v = laplacian_pdf(c.vRel + v_ego, lead.v[0], v_std)
 
     # This isn't exactly right, but it's a good heuristic
     return prob_d * prob_y * prob_v
@@ -185,7 +204,7 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
   # Intentionally excludes stationary objects to avoid phantom braking.
   if allow_radar_only and ready and (not lead_dict['status']) and len(tracks) > 0:
     radar_only_candidates = [t for t in tracks.values()
-                             if t.cnt >= 3 and abs(t.yRel) < 1.0 and (v_ego + t.vRel) >= 2.0 and t.dRel > 8.0]
+                             if t.measured and t.cnt >= 2 and abs(t.yRel) < 1.1 and (v_ego + t.vRel) >= 2.0 and 6.0 < t.dRel < 130.0]
     if len(radar_only_candidates) > 0:
       closest = min(radar_only_candidates, key=lambda t: t.dRel)
       lead_dict = closest.get_RadarState(model_prob=0.0)
@@ -256,7 +275,8 @@ class RadarD:
       match_prob_min = 0.5
       vision_prob_min = 0.5
       if self.CP is not None and getattr(self.CP, "brand", "") == "ford" and not getattr(self.CP, "radarUnavailable", True):
-        match_prob_min = 0.35
+        # Lower threshold improves cut-in/long-range lead responsiveness on Ford radar platforms.
+        match_prob_min = 0.25
 
       self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
                                           low_speed_override=True, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,

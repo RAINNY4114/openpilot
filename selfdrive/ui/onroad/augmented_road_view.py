@@ -27,6 +27,7 @@ from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
+from openpilot.selfdrive.modeld.lane_occupancy import compute_lane_occupancy
 from openpilot.selfdrive.ui.onroad.object_tracker import ObjectTracker
 
 OpState = log.SelfdriveState.OpenpilotState
@@ -77,6 +78,19 @@ DET_LABEL_COLOR = rl.WHITE
 DET_LABEL_BG_ALPHA = 180
 DET_SHOW_TRACK_ID = bool(int(os.getenv("DP_DET_SHOW_TRACK_ID", "0")))
 DET_SHOW_DISTANCE = bool(int(os.getenv("DP_DET_SHOW_DISTANCE", "0")))
+DET_DRAW_ALL = bool(int(os.getenv("DP_DET_DRAW_ALL", "0")))
+DET_VEHICLE_CLASS_IDS = {1, 2, 3, 5, 7}  # bicycle/car/moto/bus/truck
+DET_DRAW_CLASSES = {0, 80} | DET_VEHICLE_CLASS_IDS
+
+# Adjacent-lane occupancy visualization (uses coned bboxes + model lane lines).
+# This is a conservative "block" cue for the driver, not a guarantee that a lane is clear.
+AUTO_LC_UI_TARGET_LANE_TGAP_S = float(os.getenv("DP_LINCOLN_AUTO_LC_TGAP_S", "2.0"))
+AUTO_LC_UI_TARGET_LANE_MIN_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MIN_DIST_M", "25.0"))
+AUTO_LC_UI_TARGET_LANE_MAX_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_MAX_DIST_M", "90.0"))
+AUTO_LC_UI_LANE_LINE_PROB_MIN = float(os.getenv("DP_LINCOLN_AUTO_LC_LANE_LINE_PROB_MIN", "0.30"))
+AUTO_LC_UI_LANE_MARGIN_M = float(os.getenv("DP_LINCOLN_AUTO_LC_LANE_MARGIN_M", "-0.20"))
+AUTO_LC_UI_SIDE_CLOSE_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_CLOSE_DIST_M", "15.0"))
+DET_COLOR_LANE_BLOCK = rl.Color(255, 149, 0, 255)  # orange
 
 # COCO-80 plus `traffic cone (80)` used by `Cone_YOLO11n`.
 YOLO_CLASS_NAMES = (
@@ -166,9 +180,13 @@ YOLO_CLASS_NAMES = (
 
 def _det_label_and_color(cls: int, score: float) -> tuple[str, rl.Color]:
   cls = int(cls)
-  name = f"id{cls}"
-  if 0 <= cls < len(YOLO_CLASS_NAMES):
-    name = YOLO_CLASS_NAMES[cls]
+  name = f"ID{cls}"
+  if cls == 0:
+    name = "PED"
+  elif cls == 80:
+    name = "CONE"
+  elif 0 <= cls < len(YOLO_CLASS_NAMES):
+    name = YOLO_CLASS_NAMES[cls].upper()
 
   if cls == 0:
     color = DET_COLOR_PERSON
@@ -183,7 +201,28 @@ def _det_label_and_color(cls: int, score: float) -> tuple[str, rl.Color]:
   else:
     color = DET_COLOR_OTHER
 
-  return f"{name} {score:.2f}", color
+  return name, color
+
+
+def _det_obj_height_m(cls: int) -> float:
+  cls = int(cls)
+  if cls == 0:
+    return 1.7
+  if cls == 80:
+    return 0.7
+  if cls in DET_VEHICLE_CLASS_IDS:
+    return 1.5
+  return 0.0
+
+
+def _lane_y_at_x(lane_x: np.ndarray, lane_y: np.ndarray, x_m: float) -> float | None:
+  if lane_x.size < 2 or lane_y.size < 2 or lane_x.size != lane_y.size:
+    return None
+  x0 = float(lane_x[0])
+  x1 = float(lane_x[-1])
+  if not (x0 <= float(x_m) <= x1):
+    return None
+  return float(np.interp(float(x_m), lane_x, lane_y))
 
 
 @dataclass
@@ -350,6 +389,11 @@ class AugmentedRoadView(CameraView):
           objs = self._det_payload.get("objsR", [])
           if not objs:
             objs = self._det_payload.get("objs", [])
+          if not DET_DRAW_ALL:
+            try:
+              objs = [o for o in objs if isinstance(o, dict) and int(o.get("c", -1)) in DET_DRAW_CLASSES]
+            except Exception:
+              objs = []
           self._det_tracker_uses_sof_time = det_t_s is not None
           self._det_tracker.update(objs=objs, now=det_t_s if det_t_s is not None else self._det_last_update_t)
       except Exception:
@@ -381,12 +425,87 @@ class AugmentedRoadView(CameraView):
     if img_w <= 0 or img_h <= 0:
       return
 
-    focal_length_px = 0.0
-    if DET_SHOW_DISTANCE:
-      try:
-        focal_length_px = float(self._det_payload.get("focalLengthPx", 0.0) or 0.0)
-      except Exception:
-        focal_length_px = 0.0
+    focal_length_px_det = 0.0
+    try:
+      focal_length_px_det = float(self._det_payload.get("focalLengthPx", 0.0) or 0.0)
+    except Exception:
+      focal_length_px_det = 0.0
+    focal_length_px = float(focal_length_px_det) if DET_SHOW_DISTANCE else 0.0
+
+    cs = sm["carState"] if sm.alive.get("carState", False) else None
+
+    lane_left_x = np.empty((0,), dtype=np.float32)
+    lane_left_y = np.empty((0,), dtype=np.float32)
+    lane_right_x = np.empty((0,), dtype=np.float32)
+    lane_right_y = np.empty((0,), dtype=np.float32)
+    lane_lines_ok = False
+    try:
+      if sm.valid.get("modelV2", False):
+        model = sm["modelV2"]
+        lane_lines = getattr(model, "laneLines", [])
+        lane_probs = getattr(model, "laneLineProbs", [])
+        if len(lane_lines) >= 3 and len(lane_probs) >= 3:
+          if float(lane_probs[1]) >= AUTO_LC_UI_LANE_LINE_PROB_MIN and float(lane_probs[2]) >= AUTO_LC_UI_LANE_LINE_PROB_MIN:
+            lane_left_x = np.asarray(lane_lines[1].x, dtype=np.float32)
+            lane_left_y = np.asarray(lane_lines[1].y, dtype=np.float32)
+            lane_right_x = np.asarray(lane_lines[2].x, dtype=np.float32)
+            lane_right_y = np.asarray(lane_lines[2].y, dtype=np.float32)
+
+            if lane_left_x.size >= 2 and float(lane_left_x[0]) > float(lane_left_x[-1]):
+              lane_left_x = lane_left_x[::-1]
+              lane_left_y = lane_left_y[::-1]
+            if lane_right_x.size >= 2 and float(lane_right_x[0]) > float(lane_right_x[-1]):
+              lane_right_x = lane_right_x[::-1]
+              lane_right_y = lane_right_y[::-1]
+
+            lane_lines_ok = bool(lane_left_x.size >= 2 and lane_right_x.size >= 2 and lane_left_x.size == lane_left_y.size and lane_right_x.size == lane_right_y.size)
+    except Exception:
+      lane_lines_ok = False
+
+    # Adjacent-lane hazard marking (vision-only).
+    # Draw an orange FrogPilot-style wall in the adjacent lane polygon when coned+lane-lines estimate
+    # an occupied target lane close enough to block a lane change.
+    try:
+      if cs is not None and lane_lines_ok and focal_length_px_det > 1.0:
+        objs_raw = self._det_payload.get("objs", []) or []
+        if isinstance(objs_raw, list):
+          occ = compute_lane_occupancy(
+            objs=objs_raw,
+            img_w=img_w,
+            img_h=img_h,
+            focal_length_px=focal_length_px_det,
+            lane_left_x=lane_left_x,
+            lane_left_y=lane_left_y,
+            lane_right_x=lane_right_x,
+            lane_right_y=lane_right_y,
+            lane_margin_m=AUTO_LC_UI_LANE_MARGIN_M,
+            side_close_dist_m=AUTO_LC_UI_SIDE_CLOSE_DIST_M,
+            score_min_vehicle=0.25,
+          )
+
+          v_ego = float(getattr(cs, "vEgo", 0.0))
+          target_lane_block_dist_m = max(
+            AUTO_LC_UI_TARGET_LANE_MIN_DIST_M,
+            min(AUTO_LC_UI_TARGET_LANE_MAX_DIST_M, v_ego * AUTO_LC_UI_TARGET_LANE_TGAP_S),
+          )
+
+          left_block = (occ.left_min_dist_m > 0.1 and occ.left_min_dist_m < target_lane_block_dist_m) or bool(occ.left_side_close)
+          right_block = (occ.right_min_dist_m > 0.1 and occ.right_min_dist_m < target_lane_block_dist_m) or bool(occ.right_side_close)
+
+          # Avoid drawing over the true BSM wall.
+          left_bsm = bool(getattr(cs, "leftBlindspot", False))
+          right_bsm = bool(getattr(cs, "rightBlindspot", False))
+
+          if left_block and not left_bsm:
+            d = occ.left_min_dist_m if occ.left_min_dist_m > 0.1 else target_lane_block_dist_m
+            intensity = float(np.clip((target_lane_block_dist_m - d) / max(target_lane_block_dist_m, 1.0), 0.25, 1.0))
+            self._draw_hud_fp_lane_block_wall(rect=self._content_rect, is_left=True, intensity=intensity)
+          if right_block and not right_bsm:
+            d = occ.right_min_dist_m if occ.right_min_dist_m > 0.1 else target_lane_block_dist_m
+            intensity = float(np.clip((target_lane_block_dist_m - d) / max(target_lane_block_dist_m, 1.0), 0.25, 1.0))
+            self._draw_hud_fp_lane_block_wall(rect=self._content_rect, is_left=False, intensity=intensity)
+    except Exception:
+      pass
 
     # Align tracking to the currently displayed camera frame timestamp, otherwise boxes will lag by
     # the detector pipeline latency (coned runs asynchronously at low Hz).
@@ -418,27 +537,37 @@ class AugmentedRoadView(CameraView):
       if x2 <= x1 or y2 <= y1:
         continue
 
+      dist_m: float | None = None
+      lane_dir: int | None = None  # left=1, ego=0, right=-1
+      obj_h_m = _det_obj_height_m(cls)
+      if focal_length_px_det > 1.0 and obj_h_m > 0.1:
+        h_px = float(max(1.0, y2 - y1))
+        d = (float(focal_length_px_det) * float(obj_h_m)) / h_px
+        if np.isfinite(d):
+          dist_m = float(max(0.0, min(250.0, d)))
+
+        if dist_m is not None and lane_lines_ok:
+          cx = 0.5 * (x1 + x2)
+          y_m = -((float(cx) - float(img_w) * 0.5) * float(dist_m) / max(float(focal_length_px_det), 1.0))
+          if np.isfinite(y_m):
+            y_left = _lane_y_at_x(lane_left_x, lane_left_y, dist_m)
+            y_right = _lane_y_at_x(lane_right_x, lane_right_y, dist_m)
+            if y_left is not None and y_right is not None:
+              left_boundary = max(float(y_left), float(y_right))
+              right_boundary = min(float(y_left), float(y_right))
+              margin = float(AUTO_LC_UI_LANE_MARGIN_M)
+              if y_m > (left_boundary + margin):
+                lane_dir = 1
+              elif y_m < (right_boundary - margin):
+                lane_dir = -1
+              else:
+                lane_dir = 0
+
       label, base_color = _det_label_and_color(cls, score)
       if DET_SHOW_TRACK_ID:
         label = f"{label} #{int(o.track_id)}"
-      if DET_SHOW_DISTANCE and focal_length_px > 1.0:
-        try:
-          h_px = float(max(1.0, y2 - y1))
-          if cls == 0:  # person
-            obj_h_m = 1.7
-          elif cls == 80:  # cone
-            obj_h_m = 0.7
-          elif cls in (1, 2, 3, 4, 5, 6, 7, 8):  # vehicle-ish
-            obj_h_m = 1.5
-          else:
-            obj_h_m = 0.0
-          if obj_h_m > 0.1:
-            dist_m = (float(focal_length_px) * float(obj_h_m)) / h_px
-            if np.isfinite(dist_m):
-              dist_m = float(max(0.0, min(250.0, dist_m)))
-              label = f"{label} {dist_m:.0f}m"
-        except Exception:
-          pass
+      if DET_SHOW_DISTANCE and dist_m is not None and focal_length_px > 1.0:
+        label = f"{label} {dist_m:.0f}m"
 
       sx1 = cam_dst.x + (x1 / img_w) * cam_dst.width
       sy1 = cam_dst.y + (y1 / img_h) * cam_dst.height
@@ -455,20 +584,158 @@ class AugmentedRoadView(CameraView):
       thickness = int(max(1.0, min(4.0, min_dim / 90.0)))
       font_size = int(max(14.0, min(22.0, min_dim / 8.0)))
 
-      fade = float(max(0.35, 1.0 - 0.14 * missed))
+      missed_fade = float(max(0.35, 1.0 - 0.14 * missed))
+      score_fade = 0.70
+      try:
+        if np.isfinite(score):
+          score_fade = float(np.interp(score, [0.10, 0.60], [0.55, 1.0]))
+      except Exception:
+        score_fade = 0.70
+
+      lane_fade = 0.85
+      if lane_dir == 0:
+        lane_fade = 1.0
+      elif lane_dir in (-1, 1):
+        lane_fade = 0.92
+
+      fade = float(max(0.25, min(1.0, missed_fade * score_fade * lane_fade)))
       color = rl.Color(base_color.r, base_color.g, base_color.b, int(base_color.a * fade))
 
       box = rl.Rectangle(float(sx1), float(sy1), float(w), float(h))
-      rl.draw_rectangle_lines_ex(box, thickness, color)
+      if cls in DET_VEHICLE_CLASS_IDS:
+        self._draw_det_corner_box(box=box, thickness=float(thickness), color=color)
+        if lane_dir in (-1, 1):
+          self._draw_det_lane_arrow(box=box, lane_dir=int(lane_dir), color=color)
+      elif cls == 0:
+        self._draw_det_person_icon(box=box, thickness=float(thickness), color=color)
+      elif cls == 80:
+        self._draw_det_cone_icon(box=box, thickness=float(thickness), color=color)
+      else:
+        rl.draw_rectangle_lines_ex(box, thickness, color)
 
       # Labels get noisy on tiny boxes; keep HUD readable.
-      if min_dim >= 35.0:
+      show_label = (cls in DET_VEHICLE_CLASS_IDS) or DET_SHOW_TRACK_ID or (DET_SHOW_DISTANCE and dist_m is not None)
+      if show_label and min_dim >= 35.0:
         label_size = measure_text_cached(font, label, font_size, spacing)
         pad = 4
         bg = rl.Color(color.r, color.g, color.b, DET_LABEL_BG_ALPHA)
         label_rect = rl.Rectangle(box.x, max(cam_dst.y, box.y - (label_size.y + pad * 2)), label_size.x + pad * 2, label_size.y + pad * 2)
         rl.draw_rectangle_rec(label_rect, bg)
         rl.draw_text_ex(font, label, rl.Vector2(label_rect.x + pad, label_rect.y + pad), font_size, spacing, DET_LABEL_COLOR)
+
+  @staticmethod
+  def _draw_det_corner_box(*, box: rl.Rectangle, thickness: float, color: rl.Color) -> None:
+    w = float(box.width)
+    h = float(box.height)
+    if w <= 2.0 or h <= 2.0:
+      return
+
+    x1 = float(box.x)
+    y1 = float(box.y)
+    x2 = x1 + w
+    y2 = y1 + h
+
+    min_dim = float(min(w, h))
+    corner = float(np.clip(min_dim * 0.30, 8.0, 28.0))
+    corner = float(min(corner, w * 0.45, h * 0.45))
+    t = float(max(1.0, thickness))
+
+    # top-left
+    rl.draw_line_ex(rl.Vector2(x1, y1), rl.Vector2(x1 + corner, y1), t, color)
+    rl.draw_line_ex(rl.Vector2(x1, y1), rl.Vector2(x1, y1 + corner), t, color)
+    # top-right
+    rl.draw_line_ex(rl.Vector2(x2 - corner, y1), rl.Vector2(x2, y1), t, color)
+    rl.draw_line_ex(rl.Vector2(x2, y1), rl.Vector2(x2, y1 + corner), t, color)
+    # bottom-left
+    rl.draw_line_ex(rl.Vector2(x1, y2 - corner), rl.Vector2(x1, y2), t, color)
+    rl.draw_line_ex(rl.Vector2(x1, y2), rl.Vector2(x1 + corner, y2), t, color)
+    # bottom-right
+    rl.draw_line_ex(rl.Vector2(x2, y2 - corner), rl.Vector2(x2, y2), t, color)
+    rl.draw_line_ex(rl.Vector2(x2 - corner, y2), rl.Vector2(x2, y2), t, color)
+
+  @staticmethod
+  def _draw_det_lane_arrow(*, box: rl.Rectangle, lane_dir: int, color: rl.Color) -> None:
+    if int(lane_dir) not in (-1, 1):
+      return
+
+    w = float(box.width)
+    h = float(box.height)
+    if w <= 4.0 or h <= 4.0:
+      return
+
+    min_dim = float(min(w, h))
+    size = float(np.clip(min_dim * 0.22, 8.0, 20.0))
+    cx = float(box.x + w * 0.5)
+    y = float(box.y + size * 0.10)
+
+    if int(lane_dir) == 1:  # left
+      tip = rl.Vector2(cx - size * 0.65, y + size * 0.50)
+      b1 = rl.Vector2(cx + size * 0.65, y + size * 0.10)
+      b2 = rl.Vector2(cx + size * 0.65, y + size * 0.90)
+    else:  # right
+      tip = rl.Vector2(cx + size * 0.65, y + size * 0.50)
+      b1 = rl.Vector2(cx - size * 0.65, y + size * 0.10)
+      b2 = rl.Vector2(cx - size * 0.65, y + size * 0.90)
+
+    a = int(np.clip(max(100, int(color.a)), 0, 255))
+    fill = rl.Color(color.r, color.g, color.b, a)
+    rl.draw_triangle(tip, b1, b2, fill)
+
+  @staticmethod
+  def _draw_det_cone_icon(*, box: rl.Rectangle, thickness: float, color: rl.Color) -> None:
+    w = float(box.width)
+    h = float(box.height)
+    if w <= 2.0 or h <= 2.0:
+      return
+
+    min_dim = float(min(w, h))
+    size = float(np.clip(min_dim * 0.55, 10.0, 26.0))
+    cx = float(box.x + w * 0.5)
+    cy = float(box.y + h)
+    t = float(max(1.0, thickness))
+
+    p1 = rl.Vector2(cx, cy - size)
+    p2 = rl.Vector2(cx - size * 0.60, cy)
+    p3 = rl.Vector2(cx + size * 0.60, cy)
+
+    fill = rl.Color(color.r, color.g, color.b, int(color.a * 0.45))
+    rl.draw_triangle(p1, p2, p3, fill)
+    rl.draw_line_ex(p1, p2, t, color)
+    rl.draw_line_ex(p2, p3, t, color)
+    rl.draw_line_ex(p3, p1, t, color)
+    rl.draw_line_ex(rl.Vector2(cx - size * 0.75, cy), rl.Vector2(cx + size * 0.75, cy), t, color)
+
+  @staticmethod
+  def _draw_det_person_icon(*, box: rl.Rectangle, thickness: float, color: rl.Color) -> None:
+    w = float(box.width)
+    h = float(box.height)
+    if w <= 2.0 or h <= 2.0:
+      return
+
+    min_dim = float(min(w, h))
+    size = float(np.clip(min_dim * 0.70, 14.0, 34.0))
+    cx = float(box.x + w * 0.5)
+    cy = float(box.y + h)
+    t = float(max(1.0, thickness))
+
+    head_r = float(size * 0.16)
+    head_cy = float(cy - size * 0.78)
+    head_fill = rl.Color(color.r, color.g, color.b, int(color.a * 0.25))
+    rl.draw_circle(int(cx), int(head_cy), head_r, head_fill)
+    rl.draw_circle_lines(int(cx), int(head_cy), head_r, color)
+
+    body_top = rl.Vector2(cx, float(cy - size * 0.62))
+    body_mid = rl.Vector2(cx, float(cy - size * 0.28))
+    rl.draw_line_ex(body_top, body_mid, t, color)
+
+    rl.draw_line_ex(
+      rl.Vector2(float(cx - size * 0.22), float(cy - size * 0.50)),
+      rl.Vector2(float(cx + size * 0.22), float(cy - size * 0.50)),
+      t,
+      color,
+    )
+    rl.draw_line_ex(body_mid, rl.Vector2(float(cx - size * 0.18), cy), t, color)
+    rl.draw_line_ex(body_mid, rl.Vector2(float(cx + size * 0.18), cy), t, color)
 
   def _handle_mouse_press(self, _):
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:
@@ -822,6 +1089,30 @@ class AugmentedRoadView(CameraView):
         rl.Color(r, g, b, int(0.20 * 255)),
         rl.Color(r, g, b, int(0.40 * 255)),
         rl.Color(r, g, b, int(0.60 * 255)),
+      ],
+      stops=[0.0, 0.5, 1.0],
+    )
+    draw_polygon(rect, poly, gradient=gradient)
+
+  def _draw_hud_fp_lane_block_wall(self, rect: rl.Rectangle, is_left: bool, *, intensity: float) -> None:
+    poly = self._fp_get_adjacent_lane_polygon(rect, is_left=is_left)
+    if poly.size == 0:
+      return
+
+    intensity = float(np.clip(float(intensity), 0.0, 1.0))
+    r, g, b = int(DET_COLOR_LANE_BLOCK.r), int(DET_COLOR_LANE_BLOCK.g), int(DET_COLOR_LANE_BLOCK.b)
+
+    # Bottom-heavy orange gradient, scaled by intensity.
+    a_top = int(np.clip((0.10 + 0.12 * intensity) * 255.0, 0.0, 255.0))
+    a_mid = int(np.clip((0.20 + 0.22 * intensity) * 255.0, 0.0, 255.0))
+    a_bot = int(np.clip((0.32 + 0.36 * intensity) * 255.0, 0.0, 255.0))
+    gradient = Gradient(
+      start=(0.0, 1.0),
+      end=(0.0, 0.0),
+      colors=[
+        rl.Color(r, g, b, a_top),
+        rl.Color(r, g, b, a_mid),
+        rl.Color(r, g, b, a_bot),
       ],
       stops=[0.0, 0.5, 1.0],
     )

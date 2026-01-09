@@ -343,14 +343,16 @@ class LongitudinalMpc:
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
 
     # Ford/Lincoln: reduce the final stop gap slightly to avoid stopping overly far back (cut-ins at lights).
-    # Only apply when the lead is (near) stopped and ego speed is low to avoid affecting high-speed following.
+    # IMPORTANT: In this MPC formulation, increasing the obstacle position makes the ego travel further while
+    # keeping the same "desired distance", which reduces the real-world stop gap. Only apply at very low speed.
     if self.CP is not None and getattr(self.CP, "brand", "") == "ford" and radarstate.leadOne.status:
       try:
         lead_v = float(radarstate.leadOne.vLead)
-        if lead_v < 1.0 and v_ego < 12.0:
-          stop_offset = float(np.interp(v_ego, [0.0, 2.0, 12.0], [1.2, 1.2, 0.0]))
-          if stop_offset > 0.0 and bool(np.isfinite(stop_offset)):
-            lead_0_obstacle = np.maximum(lead_0_obstacle - stop_offset, CRASH_DISTANCE + 0.5)
+        lead_d = float(radarstate.leadOne.dRel)
+        if lead_v < 0.5 and v_ego < 5.0 and lead_d < 12.0:
+          stop_gap_reduction = float(np.interp(v_ego, [0.0, 2.0, 5.0], [2.5, 2.5, 0.0]))
+          if stop_gap_reduction > 0.0 and bool(np.isfinite(stop_gap_reduction)):
+            lead_0_obstacle = lead_0_obstacle + stop_gap_reduction
       except Exception:
         pass
 

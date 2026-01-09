@@ -130,6 +130,7 @@ class LongitudinalPlanner:
     self._map_target_velocities = []
     self._map_v_target = 0.0
     self._map_a_target = 0.0
+    self._map_a_target_filtered = 0.0
     self._map_turn_limit_active = False
     self._map_data_available = False
     self._map_points = 0
@@ -425,7 +426,21 @@ class LongitudinalPlanner:
     min_decel = -0.30 * min(1.0, dv / 2.0)  # 0..-0.30 for dv in [0..2] m/s
     map_a_target = max(float(decel_cap), min(float(min_decel), required_decel))
 
-    return float(v_target), float(map_a_target)
+    # Smooth map decel engagement to avoid a sudden "stab" on first activation.
+    # Tighten (more negative) with a jerk limit, relax slowly to reduce oscillations.
+    prev_a = float(self._map_a_target_filtered) if math.isfinite(float(self._map_a_target_filtered)) else 0.0
+    raw_a = float(map_a_target)
+    if raw_a < prev_a:
+      max_jerk_down = 2.0  # m/s^3
+      step = float(max_jerk_down) * float(self.dt)
+      filt_a = max(raw_a, prev_a - step)
+    else:
+      tau_s = 0.8
+      alpha = float(self.dt / (tau_s + self.dt)) if self.dt > 0.0 else 1.0
+      filt_a = prev_a + (raw_a - prev_a) * alpha
+
+    self._map_a_target_filtered = float(filt_a)
+    return float(v_target), float(self._map_a_target_filtered)
 
   @staticmethod
   def parse_model(model_msg):
@@ -924,7 +939,22 @@ class LongitudinalPlanner:
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     if mode == 'acc':
-      accel_clip = [ACCEL_MIN, get_max_accel_for_car(v_ego, self.CP)]
+      max_accel = float(get_max_accel_for_car(v_ego, self.CP))
+
+      # Ford/Lincoln comfort: when following a lead at shorter headways, cap max accel to avoid abrupt tip-in
+      # (often felt as high RPM / delayed upshifts after a lead slows down).
+      try:
+        lead_one = sm['radarState'].leadOne
+        if getattr(self.CP, "brand", "") == "ford" and bool(lead_one.status) and v_ego > 3.0:
+          d_rel = float(lead_one.dRel)
+          if math.isfinite(d_rel) and d_rel > 0.0:
+            headway_s = d_rel / max(v_ego, 0.1)
+            follow_cap = float(np.interp(headway_s, [0.8, 1.2, 1.8, 2.6], [0.30, 0.45, 0.65, max_accel]))
+            max_accel = float(min(max_accel, follow_cap))
+      except Exception:
+        pass
+
+      accel_clip = [ACCEL_MIN, max_accel]
       steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
       accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
     else:
