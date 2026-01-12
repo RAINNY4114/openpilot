@@ -594,15 +594,21 @@ class LongitudinalPlanner:
       trigger_distance = float(pos_window[idx_bend])
       trigger_curv = float(k_window[idx_bend])
       trigger_type = "bend"
-    # 预留最小减速距离：车速 * 1s
-    d_use = max(trigger_distance, v_ego * 1.5, 1.0)
+    # 预留距离（包含系统延迟补偿）：
+    # - 过去用 `max(trigger_distance, v_ego*1.5)` 会在“弯道很近”时把距离人为放大，导致减速过晚/不够。
+    # - 这里用一个小的时间偏移把有效距离收紧，优先保证安全（避免高速入弯冲出车道）。
+    d_use = max(trigger_distance - v_ego * 0.7, 1.0)
 
     # 等效减速度：a = (v_f^2 - v_i^2) / (2*d_use)
     required_decel = 0.0
     decel_cap = cfg["decel_max"]
     if v_ego > v_limit + 1e-3:
       required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
-      required_decel = max(required_decel, decel_cap)
+      # 保底减速：即使距离很远，也要开始“轻微收油/缓刹”，否则容易出现前段太软、后段突然急刹的体感。
+      dv = max(0.0, float(v_ego - v_limit))
+      min_decel = -0.30 * min(1.0, dv / 2.0)  # 0..-0.30 for dv in [0..2] m/s
+      required_decel = min(float(required_decel), float(min_decel))
+      required_decel = max(float(required_decel), float(decel_cap))
       self.curve_a_target = float(required_decel)
 
       # 让 v_cruise 上限按 required_decel 逐步下降，图标出现即开始“慢慢减速”

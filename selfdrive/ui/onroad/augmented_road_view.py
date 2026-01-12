@@ -67,7 +67,7 @@ PERF_PADDING = 12
 PERF_MARGIN_BOTTOM = UI_BORDER_SIZE // 2
 PERF_ITEM_GAP = 140
 PERF_BG_COLOR = rl.Color(0, 0, 0, 120)
-DET_STALE_TIMEOUT_S = 1.0
+DET_STALE_TIMEOUT_S = 2.0
 DET_COLOR_CONE = rl.Color(255, 149, 0, 220)
 DET_COLOR_PERSON = rl.Color(0, 170, 255, 220)
 DET_COLOR_VEHICLE = rl.Color(255, 60, 60, 220)
@@ -386,9 +386,29 @@ class AugmentedRoadView(CameraView):
             self._det_img_h = img_h
             self._det_tracker.reset()
 
-          objs = self._det_payload.get("objsR", [])
+          objs = self._det_payload.get("objsR", []) or []
           if not objs:
-            objs = self._det_payload.get("objs", [])
+            objs = self._det_payload.get("objs", []) or []
+
+          # Backward/robustness: if the refined/raw streams are empty but `cones` is present,
+          # surface cones in the HUD by promoting them into the object stream.
+          try:
+            have_cone = any(isinstance(o, dict) and int(o.get("c", -1)) == 80 for o in objs)
+            cones = self._det_payload.get("cones", []) or []
+            if (not have_cone) and isinstance(cones, list):
+              for c in cones:
+                if not isinstance(c, dict):
+                  continue
+                objs.append({
+                  "c": 80,
+                  "x1": float(c.get("x1", 0.0)),
+                  "y1": float(c.get("y1", 0.0)),
+                  "x2": float(c.get("x2", 0.0)),
+                  "y2": float(c.get("y2", 0.0)),
+                  "s": float(c.get("s", 0.0)),
+                })
+          except Exception:
+            pass
           if not DET_DRAW_ALL:
             try:
               objs = [o for o in objs if isinstance(o, dict) and int(o.get("c", -1)) in DET_DRAW_CLASSES]
@@ -467,7 +487,7 @@ class AugmentedRoadView(CameraView):
     # an occupied target lane close enough to block a lane change.
     try:
       if cs is not None and lane_lines_ok and focal_length_px_det > 1.0:
-        objs_raw = self._det_payload.get("objs", []) or []
+        objs_raw = (self._det_payload.get("objsR", None) or self._det_payload.get("objs", [])) or []
         if isinstance(objs_raw, list):
           occ = compute_lane_occupancy(
             objs=objs_raw,

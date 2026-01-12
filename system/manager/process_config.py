@@ -69,14 +69,11 @@ def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not params.get_bool("dp_dev_disable_connect")
 
 def coned(started: bool, params: Params, CP: car.CarParams) -> bool:
-  # Run onroad for Ford/Lincoln *when the user enables auto lane change features*.
-  # This keeps behavior tied to the feature toggles (no extra "detection" toggle),
-  # while avoiding unnecessary compute when auto lane changes are disabled.
+  # Run onroad for Ford/Lincoln.
+  # NOTE: HUD object markers and lane-occupancy cues depend on coned publishing `customReservedRawData0`.
+  # If coned is gated behind optional features, the UI will show only the default single lead box.
   try:
-    return started and getattr(CP, "brand", "") == "ford" and (
-      params.get_bool("dp_lincoln_auto_avoid") or
-      params.get_bool("dp_lincoln_auto_overtake")
-    )
+    return started and getattr(CP, "brand", "") == "ford"
   except Exception:
     return False
 
