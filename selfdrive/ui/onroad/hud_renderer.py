@@ -105,6 +105,8 @@ class HudRenderer(Widget):
     self._curve_active: bool = False
     self._curve_exit_timer: float = 0.0
     self._curve_last_update_t: float = time.monotonic()
+    self._curve_flip_candidate: bool | None = None
+    self._curve_flip_candidate_t: float = 0.0
     self._curve_font_cache: dict[tuple[int, ...], _DynamicFontCacheEntry] = {}
 
   def _update_state(self) -> None:
@@ -271,17 +273,61 @@ class HudRenderer(Widget):
     except Exception:
       return default
 
+  def _update_curve_icon_direction(self, k_signed_at_max: float, k_max: float, now: float, *, force: bool = False) -> None:
+    # Avoid rapid L/R flipping when curvature sign is noisy near zero.
+    k_dir_deadband = 2e-4
+    hold_s = 0.25
+
+    try:
+      k_signed = float(k_signed_at_max)
+      k_abs = float(k_max)
+    except Exception:
+      self._curve_flip_candidate = None
+      self._curve_flip_candidate_t = 0.0
+      return
+
+    if (not math.isfinite(k_signed)) or (not math.isfinite(k_abs)) or k_abs < k_dir_deadband:
+      self._curve_flip_candidate = None
+      self._curve_flip_candidate_t = 0.0
+      return
+
+    new_flip = bool(k_signed >= 0.0)
+    if force:
+      self._curve_speed_flip = new_flip
+      self._curve_flip_candidate = None
+      self._curve_flip_candidate_t = 0.0
+      return
+
+    if new_flip == self._curve_speed_flip:
+      self._curve_flip_candidate = None
+      self._curve_flip_candidate_t = 0.0
+      return
+
+    if self._curve_flip_candidate != new_flip:
+      self._curve_flip_candidate = new_flip
+      self._curve_flip_candidate_t = float(now)
+      return
+
+    if (now - float(self._curve_flip_candidate_t)) >= hold_s:
+      self._curve_speed_flip = new_flip
+      self._curve_flip_candidate = None
+      self._curve_flip_candidate_t = 0.0
+
   def _update_curve_speed_widget(self) -> None:
     now = time.monotonic()
     dt = max(0.0, min(0.2, now - self._curve_last_update_t))
     self._curve_last_update_t = now
 
+    prev_show = bool(self._curve_show)
     self._curve_show = False
     self._curve_speed_str = ""
     self._curve_dist_str = ""
     self._curve_state_str = ""
     self._curve_speed_font = None
     self._curve_dist_font = None
+    if not prev_show:
+      self._curve_flip_candidate = None
+      self._curve_flip_candidate_t = 0.0
 
     sm = ui_state.sm
     try:
@@ -378,8 +424,8 @@ class HudRenderer(Widget):
 
         # Use vision sign to pick L/R icon if available.
         k_signed_at_max = 0.0
+        k_max = 0.0
         try:
-          k_max = 0.0
           for v_pred, turn_rate in zip(v_preds, turn_rates, strict=True):
             v_pred_f = float(v_pred)
             turn_rate_f = float(turn_rate)
@@ -393,9 +439,10 @@ class HudRenderer(Widget):
               k_signed_at_max = k_signed
         except Exception:
           k_signed_at_max = 0.0
+          k_max = 0.0
 
         self._curve_speed_str = f"目标 {round(v_min_disp)} {speed_unit}"
-        self._curve_speed_flip = k_signed_at_max >= 0.0
+        self._update_curve_icon_direction(k_signed_at_max, k_max, now, force=not prev_show)
         base = f"前方弯道 {max(0, int(round(dist_to_min)))} m"
         self._curve_state_str = "地图融合"
         self._curve_dist_str = f"{base} · {self._curve_state_str}"
@@ -489,7 +536,7 @@ class HudRenderer(Widget):
     display_speed = v_limit_disp
     speed_unit = tr("km/h") if ui_state.is_metric else tr("mph")
     self._curve_speed_str = f"目标 {round(display_speed)} {speed_unit}"
-    self._curve_speed_flip = k_signed_at_max >= 0.0
+    self._update_curve_icon_direction(k_signed_at_max, k_max, now, force=not prev_show)
 
     dist_m = float(dist_at_enter if dist_at_enter is not None else dist_at_max)
     dist = dist_m

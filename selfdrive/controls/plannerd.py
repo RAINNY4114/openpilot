@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+
 from cereal import car
 from openpilot.common.params import Params
 from openpilot.common.realtime import Priority, config_realtime_process
@@ -42,7 +44,15 @@ def main():
   def lincoln_curve_log_enabled() -> bool:
     return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_log")
   def lincoln_osm_realtime_enabled() -> bool:
-    return CP.brand == "ford" and params.get_bool("dp_lincoln_osm_realtime_cruise")
+    # Keep the explicit toggle, but also enable when curve speed is enabled so map-based curve previews
+    # don't require an extra "one-time" setting gate.
+    if CP.brand != "ford":
+      return False
+    if params.get_bool("dp_lincoln_osm_realtime_cruise"):
+      return True
+    if not params.get_bool("dp_lincoln_curve_speed"):
+      return False
+    return os.path.isdir("/data/media/0/osm/offline")
 
   while True:
     sm.update()

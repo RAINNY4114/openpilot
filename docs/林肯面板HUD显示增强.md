@@ -139,7 +139,7 @@
 > 说明：这是“弯道限速（`dp_lincoln_curve_speed`）/地图实时巡航（`dp_lincoln_osm_realtime_cruise`）”的 HUD 可视化提示，**不依赖** `dp_lincoln_hud_enhanced` 开关（即：就算不启用 HUD 显示增强，只要弯道限速/地图限速在工作，这个提示也会出现）。
 
 **显示内容**
-- 弯道图标（根据弯道方向选择左/右图标）
+- 弯道图标（根据弯道方向选择左/右图标；加入方向去抖/滞回，避免轻微弯道/噪声导致左右来回抖动）
 - 上行：`前方弯道 xx m · 视觉/地图融合`（来源标记：当前“实际收紧巡航目标”的限速器）
 - 下行：`目标 xx km/h/mph`
 
@@ -151,7 +151,7 @@
 
 **数据来源 / 计算**
 - 使用 `modelV2.position.x / modelV2.velocity.x / modelV2.orientationRate.z` 计算前方窗口内曲率峰值并平滑
-- 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.0 m/s²）
+- 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.8 m/s²）
 - 弯道距离：取前方窗口内**首次**曲率达到 `k_enter` 的 `position.x`（兜底：最大曲率点距离）
 - 地图融合直出（新增）：当 `longitudinalPlan.curveSpeedSource==2` 且 `min(longitudinalPlan.speeds) < 设定巡航速度` 时，直接用该最小速度作为“目标速度”，并在发布的 horizon 内估算“距离到最小速度点”（用于解决“地图正在限速但视觉曲率很轻微导致图标不出现”的问题）
 - 来源标记：来自 `longitudinalPlan.curveSpeedSource`
@@ -198,7 +198,7 @@
 - 绘制：`selfdrive/ui/onroad/augmented_road_view.py` → `_draw_performance_info()` / `_get_road_location_text()`
 - 进程启动条件：`system/manager/process_config.py` → `mapd(...)`
   - 下载离线地图进行中：始终运行
-  - 上路：开启 `dp_lincoln_osm_realtime_cruise` 或开启性能条（`dp_lincoln_perf_info_enabled`）时运行
+  - 上路：开启 `dp_lincoln_osm_realtime_cruise` 或开启性能条（`dp_lincoln_perf_info_enabled`），或开启弯道限速（`dp_lincoln_curve_speed` 且离线地图存在）时运行
 
 ## 3. 重要说明
 
@@ -226,9 +226,8 @@
 
 1) `coned`（目标检测进程）
 - 进程配置：`system/manager/process_config.py`
-- 启动条件：上路且车型为 Ford/Lincoln（`carParams.brand == "ford"`），并且开启以下任一功能：
-  - `dp_lincoln_auto_avoid`
-  - `dp_lincoln_auto_overtake`
+- 启动条件：上路且车型为 Ford/Lincoln（`carParams.brand == "ford"`）。
+- 说明：自动避让/自动超车本身仍由 `dp_lincoln_auto_avoid/dp_lincoln_auto_overtake` 门控；但目标检测进程常驻运行，避免 UI/安全门控依赖额外一次开关导致“无目标框/无左右车道占用”的问题。
 - 模型文件：`selfdrive/modeld/models/Cone_YOLO11n.onnx`（构建产物：`Cone_YOLO11n_tinygrad.pkl`）
 - 输出：向 `customReservedRawData0` 发布 JSON（含 `inPath`、`personInPath`、`vehicleInPath`、`hazInPath`、`cones`、`objs/objsR`，以及用于稳定性/平顺性的 `*Metric` 与 `*Raw` 字段；其中 `inPath/personInPath/vehicleInPath` 为去抖后的稳定信号）。
   - `objs/objsR`：当前会输出 **COCO-80 + traffic cone(80) 的全类别检测框**（用于 HUD 可视化/调试）。

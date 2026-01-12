@@ -2,8 +2,6 @@
 import math
 from numbers import Number
 
-import numpy as np
-
 from cereal import car, log
 import cereal.messaging as messaging
 from openpilot.common.constants import CV
@@ -30,38 +28,109 @@ LaneChangeDirection = log.LaneChangeDirection
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 
 
-def _lane_center_curvature_correction_ford(model_v2: log.ModelDataV2, v_ego: float) -> float:
-  # Use lane lines to gently re-center in curves (Ford/Lincoln tends to apex/cut inside in some turns).
-  if len(model_v2.laneLines) < 3 or len(model_v2.laneLineProbs) < 3:
+def _clamp(v: float, lo: float, hi: float) -> float:
+  return max(float(lo), min(float(hi), float(v)))
+
+
+def _interp(x: float, xp: list[float], fp: list[float]) -> float:
+  if not xp or not fp or len(xp) != len(fp):
     return 0.0
 
-  left_prob = float(model_v2.laneLineProbs[1])
-  right_prob = float(model_v2.laneLineProbs[2])
-  prob = min(left_prob, right_prob)
-  if prob < 0.65:
+  x_f = float(x)
+  if x_f <= float(xp[0]):
+    return float(fp[0])
+
+  for i in range(1, len(xp)):
+    x0 = float(xp[i - 1])
+    x1 = float(xp[i])
+    if x_f <= x1:
+      y0 = float(fp[i - 1])
+      y1 = float(fp[i])
+      if x1 == x0:
+        return y1
+      return y0 + (y1 - y0) * (x_f - x0) / (x1 - x0)
+
+  return float(fp[-1])
+
+
+def _road_edge_detected(model_v2: log.ModelDataV2) -> tuple[bool, bool]:
+  # Similar to dragonpilot RoadEdgeDetector, but used locally for lateral biasing.
+  try:
+    stds = list(getattr(model_v2, "roadEdgeStds", []) or [])
+    probs = list(getattr(model_v2, "laneLineProbs", []) or [])
+    if len(stds) < 2 or len(probs) < 4:
+      return False, False
+
+    left_road_edge_prob = _clamp(1.0 - float(stds[0]), 0.0, 1.0)
+    right_road_edge_prob = _clamp(1.0 - float(stds[1]), 0.0, 1.0)
+    left_lane_nearside_prob = float(probs[0])
+    right_lane_nearside_prob = float(probs[3])
+
+    nearside_prob_th = 0.2
+    edge_prob_th = 0.35
+    left_edge = bool(
+      left_road_edge_prob > edge_prob_th and
+      left_lane_nearside_prob < nearside_prob_th and
+      right_lane_nearside_prob >= left_lane_nearside_prob
+    )
+    right_edge = bool(
+      right_road_edge_prob > edge_prob_th and
+      right_lane_nearside_prob < nearside_prob_th and
+      left_lane_nearside_prob >= right_lane_nearside_prob
+    )
+    return left_edge, right_edge
+  except Exception:
+    return False, False
+
+
+def _road_edge_lane_offset_curvature(model_v2: log.ModelDataV2, v_ego: float, left_edge: bool, right_edge: bool) -> float:
+  if not (left_edge or right_edge):
     return 0.0
 
-  left = model_v2.laneLines[1]
-  right = model_v2.laneLines[2]
-  if len(left.x) < 2 or len(right.x) < 2:
+  try:
+    lane_lines = list(getattr(model_v2, "laneLines", []) or [])
+    lane_probs = list(getattr(model_v2, "laneLineProbs", []) or [])
+    if len(lane_lines) < 3 or len(lane_probs) < 3:
+      return 0.0
+
+    left_prob = float(lane_probs[1])
+    right_prob = float(lane_probs[2])
+    prob = min(left_prob, right_prob)
+    if prob < 0.55:
+      return 0.0
+
+    left = lane_lines[1]
+    right = lane_lines[2]
+    left_x = list(getattr(left, "x", []) or [])
+    left_y = list(getattr(left, "y", []) or [])
+    right_x = list(getattr(right, "x", []) or [])
+    right_y = list(getattr(right, "y", []) or [])
+    if len(left_x) < 2 or len(right_x) < 2:
+      return 0.0
+
+    lookahead_m = _clamp(float(v_ego) * 0.7 + 10.0, 10.0, 25.0)
+    y_left = _interp(lookahead_m, left_x, left_y)
+    y_right = _interp(lookahead_m, right_x, right_y)
+
+    lane_width = float(y_left - y_right)
+    if not (2.6 < lane_width < 4.6):
+      return 0.0
+
+    y_center = 0.5 * (float(y_left) + float(y_right))
+
+    # Bias away from the road edge (guardrail) while staying safely within the lane.
+    base_offset_m = 0.18
+    y_target = base_offset_m if left_edge else (-base_offset_m if right_edge else 0.0)
+    max_off = max(0.0, 0.5 * lane_width - 0.25)
+    y_target = _clamp(float(y_target), -max_off, max_off)
+
+    y_err = float(y_center - y_target)
+    correction = -2.0 * y_err / (lookahead_m ** 2)
+    scale = _clamp((prob - 0.55) / 0.45, 0.0, 1.0)
+    correction *= scale
+    return _clamp(correction, -0.002, 0.002)
+  except Exception:
     return 0.0
-
-  lookahead_m = float(np.clip(v_ego * 0.7 + 8.0, 8.0, 20.0))
-  y_left = float(np.interp(lookahead_m, left.x, left.y))
-  y_right = float(np.interp(lookahead_m, right.x, right.y))
-
-  lane_width = y_left - y_right
-  if not (2.6 < lane_width < 4.4):
-    return 0.0
-
-  y_center = 0.5 * (y_left + y_right)
-  y_center = float(np.clip(y_center, -0.6, 0.6))
-
-  # Pure-pursuit-ish curvature to drive lateral error to zero over lookahead distance.
-  correction = -2.0 * y_center / (lookahead_m ** 2)
-  scale = float(np.clip((prob - 0.65) / 0.35, 0.0, 1.0))
-  correction *= scale
-  return float(np.clip(correction, -0.002, 0.002))
 
 
 class Controls:
@@ -100,7 +169,7 @@ class Controls:
     self.htd = HumanTurnDetection()
     self.htd_state = HTDState.INACTIVE
 
-    self._lane_center_curv_correction = 0.0
+    self._road_edge_curv_correction = 0.0
 
   def update(self):
     self.sm.update(15)
@@ -166,16 +235,19 @@ class Controls:
     # Reset desired curvature to current to avoid violating the limits on engage
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
 
-    # Ford/Lincoln: gently blend in a lane-center correction (only in turns, only when lane lines are confident).
-    if (not CC.latActive) or self.CP.brand != "ford" or CS.leftBlinker or CS.rightBlinker:
-      self._lane_center_curv_correction = 0.0
+    # Ford/Lincoln: when driving in the outermost lane (road edge/guardrail), bias away slightly to avoid
+    # hugging the edge. This is gated on road-edge detection and confident inner lane lines.
+    if (not CC.latActive) or getattr(self.CP, "brand", "") != "ford" or CS.leftBlinker or CS.rightBlinker:
+      self._road_edge_curv_correction = 0.0
     else:
       raw_corr = 0.0
-      if CS.vEgo > 5.0 and abs(float(new_desired_curvature)) > 5e-4:
-        raw_corr = _lane_center_curvature_correction_ford(model_v2, CS.vEgo)
-      alpha = 0.05  # ~0.2s time constant at 100Hz
-      self._lane_center_curv_correction = (1.0 - alpha) * self._lane_center_curv_correction + alpha * raw_corr
-      new_desired_curvature = float(new_desired_curvature) + float(self._lane_center_curv_correction)
+      if CS.vEgo > 8.0:
+        left_edge, right_edge = _road_edge_detected(model_v2)
+        raw_corr = _road_edge_lane_offset_curvature(model_v2, CS.vEgo, left_edge, right_edge)
+
+      alpha = 0.03  # ~0.3s time constant @100Hz
+      self._road_edge_curv_correction = (1.0 - alpha) * float(self._road_edge_curv_correction) + alpha * float(raw_corr)
+      new_desired_curvature = float(new_desired_curvature) + float(self._road_edge_curv_correction)
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
