@@ -139,6 +139,12 @@ class LongitudinalPlanner:
     self._map_lock_lon = 0.0
     self._map_lock_v = 0.0
     self._map_preview_v = 0.0
+    self._map_prev_lat = float("nan")
+    self._map_prev_lon = float("nan")
+    self._map_heading_x = 0.0  # unit vector in local meters (east)
+    self._map_heading_y = 0.0  # unit vector in local meters (north)
+    self._map_heading_valid = False
+    self._map_v_cap = float("nan")  # rate-limited cruise cap used for stock ACC comfort
     self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
     self._obstacle_last_det_t = 0.0
     self._obstacle_cone_in_path = False
@@ -191,6 +197,16 @@ class LongitudinalPlanner:
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
     return _MAP_EARTH_RADIUS_M * c
 
+  @staticmethod
+  def _map_local_xy(lat0: float, lon0: float, lat1: float, lon1: float) -> tuple[float, float]:
+    # Local tangent-plane approximation (good enough for small map windows).
+    lat0_r = float(lat0) * _MAP_TO_RADIANS
+    dlat = (float(lat1) - float(lat0)) * _MAP_TO_RADIANS
+    dlon = (float(lon1) - float(lon0)) * _MAP_TO_RADIANS
+    x = dlon * math.cos(lat0_r) * _MAP_EARTH_RADIUS_M
+    y = dlat * _MAP_EARTH_RADIUS_M
+    return float(x), float(y)
+
   def _map_target_velocities_list(self) -> list:
     raw = None
     try:
@@ -239,6 +255,7 @@ class LongitudinalPlanner:
     min_dist = 1e9
     min_idx = 0
     distances: list[float] = []
+    ahead_flags: list[bool] = []
 
     for i, target_velocity in enumerate(target_velocities):
       try:
@@ -246,10 +263,25 @@ class LongitudinalPlanner:
         tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
       except Exception:
         distances.append(1e9)
+        ahead_flags.append(False)
+        continue
+
+      ahead = True
+      if self._map_heading_valid:
+        try:
+          dx, dy = self._map_local_xy(lat, lon, tlat, tlon)
+          ahead = (dx * float(self._map_heading_x) + dy * float(self._map_heading_y)) >= 0.0
+        except Exception:
+          ahead = True
+
+      if not ahead:
+        distances.append(1e9)
+        ahead_flags.append(False)
         continue
 
       d = self._map_distance_to_point(lat, lon, tlat, tlon)
       distances.append(d)
+      ahead_flags.append(True)
       if d < min_dist:
         min_dist = d
         min_idx = i
@@ -258,11 +290,12 @@ class LongitudinalPlanner:
 
     forward_points = target_velocities[min_idx:]
     forward_distances = distances[min_idx:]
+    forward_ahead = ahead_flags[min_idx:]
 
     # 1) In-curve hold: use the current segment's map speed cap so we don't accelerate inside long curves/S-curves
     #    even when v_ego is already below the cap.
     v_hold = 0.0
-    if min_dist < 30.0 and forward_points:
+    if min_dist < 30.0 and forward_points and (not self._map_heading_valid or bool(forward_ahead[0])):
       try:
         tv_here = float(forward_points[0].get("velocity", forward_points[0].get("speed", 0.0)))
       except Exception:
@@ -285,6 +318,8 @@ class LongitudinalPlanner:
     # 3) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
     valid_velocities: list[tuple[float, float, float, float]] = []  # (target_v, dist_m, lat, lon)
     for i, target_velocity in enumerate(forward_points):
+      if self._map_heading_valid and (not bool(forward_ahead[i])):
+        continue
       try:
         tv = float(target_velocity.get("velocity", target_velocity.get("speed", 0.0)))
       except Exception:
@@ -339,6 +374,8 @@ class LongitudinalPlanner:
     lock_d = None
     if self._map_lock_v > 0.1 and forward_points:
       for i, target_velocity in enumerate(forward_points):
+        if self._map_heading_valid and (not bool(forward_ahead[i])):
+          continue
         try:
           tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
           tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
@@ -413,6 +450,11 @@ class LongitudinalPlanner:
     # Only request decel when we're above the target speed; otherwise it's a pure speed cap.
     if v_target >= v_ego - 1e-3:
       return float(v_target), 0.0
+
+    # At highway speeds, ignore extremely close targets to avoid hard braking on stale/behind points.
+    # Vision curve speed remains a parallel safety net for last-second slowdowns.
+    if (float(v_ego) > 15.0) and (float(d_target) < 10.0):
+      return 0.0, 0.0
 
     d_use = max(d_target - v_ego * _MAP_TARGET_OFFSET_S, 1.0)
     required_decel = (v_target ** 2 - v_ego ** 2) / (2.0 * d_use)
@@ -901,6 +943,7 @@ class LongitudinalPlanner:
     map_data_available = False
     if lincoln_osm_realtime_cruise and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
       lat_lon: tuple[float, float] | None = None
+      gps_for_heading = None
       for service in ("gpsLocationExternal", "gpsLocation"):
         if service not in sm.data:
           continue
@@ -915,9 +958,62 @@ class LongitudinalPlanner:
         if not (math.isfinite(lat) and math.isfinite(lon)):
           continue
         lat_lon = (lat, lon)
+        gps_for_heading = gps
         break
 
       if lat_lon is not None:
+        # Heading estimate for filtering "behind" / mismatched map points (prevents phantom braking on highways).
+        # Prefer GPS bearing, then velocity direction, finally delta-position.
+        try:
+          lat = float(lat_lon[0])
+          lon = float(lat_lon[1])
+          heading_updated = False
+          heading_x = float(self._map_heading_x)
+          heading_y = float(self._map_heading_y)
+
+          bearing = None
+          if gps_for_heading is not None and float(v_ego) > 1.0:
+            try:
+              b = float(getattr(gps_for_heading, "bearingDeg", float("nan")))
+              if math.isfinite(b):
+                bearing = b
+            except Exception:
+              pass
+
+            if bearing is None:
+              try:
+                v_n = float(getattr(gps_for_heading, "vN", float("nan")))
+                v_e = float(getattr(gps_for_heading, "vE", float("nan")))
+                if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
+                  bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+              except Exception:
+                pass
+
+          if bearing is not None:
+            br = float(bearing) * _MAP_TO_RADIANS
+            hx = math.sin(br)
+            hy = math.cos(br)
+            if math.isfinite(hx) and math.isfinite(hy):
+              heading_x, heading_y = float(hx), float(hy)
+              heading_updated = True
+
+          if not heading_updated and math.isfinite(float(self._map_prev_lat)) and math.isfinite(float(self._map_prev_lon)):
+            dx, dy = self._map_local_xy(float(self._map_prev_lat), float(self._map_prev_lon), lat, lon)
+            norm = math.hypot(dx, dy)
+            if math.isfinite(norm) and norm > 2.0:  # >2m
+              heading_x, heading_y = float(dx / norm), float(dy / norm)
+              heading_updated = True
+
+          if heading_updated:
+            self._map_heading_x = float(heading_x)
+            self._map_heading_y = float(heading_y)
+            self._map_heading_valid = True
+
+          self._map_prev_lat = float(lat)
+          self._map_prev_lon = float(lon)
+        except Exception:
+          pass
+
         try:
           v_map_target, map_a_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1], v_cruise)
           map_data_available = len(self._map_target_velocities) > 0
@@ -1016,15 +1112,46 @@ class LongitudinalPlanner:
       clipped_accel_coast_interp = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [accel_clip[1], clipped_accel_coast])
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
 
-    # "active" means map is actually tightening the cruise target (vs only having data).
-    map_turn_limit_active = v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3)
-    self._map_turn_limit_active = bool(map_turn_limit_active)
+    # Map turn limit (raw): map is requesting a lower cruise cap than the current cruise target.
+    # NOTE: We later extend this with the rate-limited cap state so "release" is also smooth.
+    map_turn_limit_active_raw = v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3)
+    map_turn_limit_active = bool(map_turn_limit_active_raw)
 
     if force_slow_decel:
       v_cruise = 0.0
 
-    if lincoln_osm_realtime_cruise and map_turn_limit_active and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
-      v_cruise = min(v_cruise, v_map_target)
+    # Smooth map speed caps to reduce "step-down" braking and RPM spikes on stock ACC.
+    # Tighten quickly, release slowly, and reset when disengaged.
+    if reset_state or (not lincoln_osm_realtime_cruise) or (not getattr(sm['selfdriveState'], "enabled", False)):
+      self._map_v_cap = float("nan")
+      map_turn_limit_active = False
+      self._map_turn_limit_active = False
+    else:
+      if not math.isfinite(float(self._map_v_cap)):
+        self._map_v_cap = float(v_cruise)
+
+      v_cap_target = float(v_cruise)
+      if map_turn_limit_active_raw and float(v_map_target) > 0.1:
+        v_cap_target = float(min(v_cruise, float(v_map_target)))
+
+      # Use a conservative rate limit; map_a_target is filtered already and can be 0.0 during preview caps.
+      down_rate = float(np.interp(abs(float(map_a_target)), [0.0, 0.3, 1.5, 3.0], [0.8, 1.2, 2.0, 2.5]))  # m/s per second
+      up_rate = 0.6  # m/s per second
+      down_step = down_rate * float(self.dt)
+      up_step = up_rate * float(self.dt)
+
+      if v_cap_target < float(self._map_v_cap):
+        self._map_v_cap = max(v_cap_target, float(self._map_v_cap) - down_step)
+      else:
+        self._map_v_cap = min(v_cap_target, float(self._map_v_cap) + up_step)
+
+      # Apply cap for both engagement and release to avoid step changes.
+      if v_cruise > 0.1:
+        v_cruise = min(v_cruise, float(self._map_v_cap))
+
+      # "active" means map cap is currently tightening v_cruise (either engaging or releasing).
+      map_turn_limit_active = bool(float(self._map_v_cap) > 0.1 and float(self._map_v_cap) < (float(v_cap_target) - 1e-3))
+      self._map_turn_limit_active = bool(map_turn_limit_active)
 
     dp_auto_avoid = self._params.get_bool("dp_lincoln_auto_avoid")
 
