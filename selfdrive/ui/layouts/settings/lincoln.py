@@ -129,6 +129,17 @@ class LincolnLayout(Widget):
         decimals=2,
         suffix=tr(" m/s^2"),
       ),
+      simple_item(title=lambda: tr("### Following & Stopping ###")),
+      spin_button_item(
+        title=lambda: tr("Stop distance (standstill)"),
+        description=lambda: tr("Target gap to the lead vehicle when coming to a stop (stop-and-go / red lights). Lower = closer; higher = more buffer."),
+        initial_value=self._get_param_int("dp_lincoln_stop_distance_m", 4),
+        callback=lambda val: self._params.put("dp_lincoln_stop_distance_m", int(val)),
+        min_val=3,
+        max_val=8,
+        step=1,
+        suffix=tr(" m"),
+      ),
       simple_item(title=lambda: tr("### Obstacle Avoidance (Experimental) ###")),
       toggle_item(
         title=lambda: tr("Auto avoidance"),

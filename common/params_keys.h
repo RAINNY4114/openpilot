@@ -10,7 +10,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AdbEnabled", {PERSISTENT, BOOL}},
     {"AlwaysOnDM", {PERSISTENT, BOOL}},
     {"ApiCache_Device", {PERSISTENT, STRING}},
-    {"ApiCache_FirehoseStats", {PERSISTENT, JSON}},
     {"AssistNowToken", {PERSISTENT, STRING}},
     {"AthenadPid", {PERSISTENT, INT}},
     {"AthenadUploadQueue", {PERSISTENT, JSON}},
@@ -49,6 +48,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"GithubSshKeys", {PERSISTENT, STRING}},
     {"GithubUsername", {PERSISTENT, STRING}},
     {"GitRemote", {PERSISTENT, STRING}},
+    {"GPSQualityOK", {CLEAR_ON_MANAGER_START, BOOL, "0"}},
     {"GsmApn", {PERSISTENT, STRING}},
     {"GsmMetered", {PERSISTENT, BOOL, "1"}},
     {"GsmRoaming", {PERSISTENT, BOOL}},
@@ -178,6 +178,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lincoln_auto_avoid", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_auto_overtake", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_lane_preference", {PERSISTENT, INT, "0"}},
+    {"dp_lincoln_stop_distance_m", {PERSISTENT, INT, "4"}},     // 最终刹停/红灯跟停的期望静止车距（米）
     {"dp_lincoln_hazard_alert", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_hud_enhanced", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_perf_info_enabled", {PERSISTENT, BOOL, "0"}},

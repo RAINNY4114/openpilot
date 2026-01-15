@@ -25,6 +25,10 @@ UBLOX_SOS_NACK = b"\xb5\x62\x09\x14\x08\x00\x02\x00\x00\x00\x00\x00\x00\x00"
 UBLOX_BACKUP_RESTORE_MSG = b"\xb5\x62\x09\x14\x08\x00\x03"
 UBLOX_ASSIST_ACK = b"\xb5\x62\x13\x60\x08\x00"
 
+# AssistNow Online GNSS request order.
+# Try adding BeiDou first for better performance in China; fall back to the previous GPS+GLONASS request.
+_ASSISTNOW_GNSS_CANDIDATES = ("gps,glo,bds", "gps,glo")
+
 def set_power(enabled: bool) -> None:
   gpio_init(GPIO.UBLOX_SAFEBOOT_N, True)
   gpio_init(GPIO.GNSS_PWR_EN, True)
@@ -41,25 +45,40 @@ def add_ubx_checksum(msg: bytes) -> bytes:
     B = (B + A) % 256
   return msg + bytes([A, B])
 
-def get_assistnow_messages(token: str) -> list[bytes]:
-  # make request
-  # TODO: implement adding the last known location
-  r = requests.get("https://online-live2.services.u-blox.com/GetOnlineData.ashx", params=urllib.parse.urlencode({
-    'token': token,
-    'gnss': 'gps,glo',
-    'datatype': 'eph,alm,aux',
-  }, safe=':,'), timeout=5)
-  assert r.status_code == 200, "Got invalid status code"
-  dat = r.content
-
-  # split up messages
-  msgs = []
+def _split_assistnow_payload(payload: bytes) -> list[bytes]:
+  msgs: list[bytes] = []
+  dat = payload
   while len(dat) > 0:
-    assert dat[:2] == b"\xB5\x62"
+    if dat[:2] != b"\xB5\x62":
+      raise ValueError("invalid AssistNow payload")
     msg_len = 6 + (dat[5] << 8 | dat[4]) + 2
+    if msg_len <= 0 or msg_len > len(dat):
+      raise ValueError("truncated AssistNow payload")
     msgs.append(dat[:msg_len])
     dat = dat[msg_len:]
   return msgs
+
+
+def get_assistnow_messages(token: str) -> list[bytes]:
+  # make request
+  # TODO: implement adding the last known location
+  last_exc: Exception | None = None
+  for gnss in _ASSISTNOW_GNSS_CANDIDATES:
+    try:
+      r = requests.get("https://online-live2.services.u-blox.com/GetOnlineData.ashx", params=urllib.parse.urlencode({
+        'token': token,
+        'gnss': gnss,
+        'datatype': 'eph,alm,aux',
+      }, safe=':,'), timeout=5)
+      if r.status_code != 200:
+        raise RuntimeError(f"AssistNow request failed (HTTP {r.status_code})")
+      return _split_assistnow_payload(r.content)
+    except Exception as e:
+      last_exc = e
+      continue
+
+  assert last_exc is not None
+  raise last_exc
 
 
 class TTYPigeon:

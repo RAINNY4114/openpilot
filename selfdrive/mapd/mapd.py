@@ -29,6 +29,18 @@ MAPD_PATH = "/data/media/0/osm/mapd"
 MAPD_VERSION_PATH = "/data/media/0/osm/mapd_version"
 PARAMS_MEMORY_PATH = "/dev/shm/params"
 
+# GPS quality gating (helps avoid wrong-road matches in dense/parallel-road environments).
+# Keep conservative defaults and avoid new user-facing toggles.
+_GPS_HACC_BAD_M = 50.0
+_GPS_HACC_SOFT_M = 20.0
+_GPS_HOLD_LAST_GOOD_S = 3.0
+_GPS_HOLD_MAX_DIST_M = 15.0  # cap hold window by distance (≈0.5s @ 110km/h)
+_GPS_JUMP_SPEED_FACTOR = 2.0
+_GPS_JUMP_SPEED_BONUS_MPS = 5.0
+
+_EARTH_RADIUS_M = 6373000.0
+_TO_RADIANS = math.pi / 180.0
+
 DOWNLOAD_URLS = [
   # Primary (openpilot-focused builds)
   "https://github.com/pfeiferj/openpilot-mapd/releases/download/{version}/mapd",
@@ -168,7 +180,87 @@ def _ensure_mapd_binary(desired_version: str | None) -> bool:
   return False
 
 
-def _extract_gps_payload(sm: messaging.SubMaster) -> dict[str, float] | None:
+def _safe_float(val) -> float | None:
+  try:
+    f = float(val)
+  except Exception:
+    return None
+  return f if math.isfinite(f) else None
+
+
+def _bearing_from_vned(gps) -> float | None:
+  try:
+    vned = getattr(gps, "vNED", None)
+    if vned is not None and len(vned) >= 2:
+      v_n = _safe_float(vned[0])
+      v_e = _safe_float(vned[1])
+      if v_n is not None and v_e is not None and (abs(v_n) + abs(v_e) > 0.2):
+        return (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+  except Exception:
+    pass
+
+  # Legacy fields (some forks/devices expose vN/vE directly)
+  try:
+    v_n = _safe_float(getattr(gps, "vN", None))
+    v_e = _safe_float(getattr(gps, "vE", None))
+    if v_n is not None and v_e is not None and (abs(v_n) + abs(v_e) > 0.2):
+      return (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+  except Exception:
+    pass
+
+  return None
+
+
+def _distance_m(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+  ax = float(lat_a) * _TO_RADIANS
+  ay = float(lon_a) * _TO_RADIANS
+  bx = float(lat_b) * _TO_RADIANS
+  by = float(lon_b) * _TO_RADIANS
+  a = math.sin((bx - ax) / 2) ** 2 + math.cos(ax) * math.cos(bx) * math.sin((by - ay) / 2) ** 2
+  c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
+  return _EARTH_RADIUS_M * c
+
+
+def _gps_quality_ok(speed_mps: float, h_acc_m: float | None) -> bool:
+  # If we have a horizontal accuracy estimate, use it. Many devices don't provide one.
+  if h_acc_m is None:
+    return True
+
+  # Reject clearly bad positional accuracy (often wrong-road matches).
+  if h_acc_m > _GPS_HACC_BAD_M:
+    return False
+
+  # At higher speeds require better quality; at low speed accuracy is naturally noisier.
+  if speed_mps > 8.0 and h_acc_m > _GPS_HACC_SOFT_M:
+    return False
+
+  return True
+
+
+def _gps_jump_suspected(last_payload: dict[str, float] | None, last_t: float, payload: dict[str, float],
+                        now: float, speed_mps: float) -> bool:
+  if last_payload is None or last_t <= 0.0:
+    return False
+
+  dt = float(now - last_t)
+  if not math.isfinite(dt) or dt < 0.05:
+    return False
+
+  try:
+    dist = _distance_m(float(last_payload["latitude"]), float(last_payload["longitude"]),
+                       float(payload["latitude"]), float(payload["longitude"]))
+  except Exception:
+    return False
+
+  if not math.isfinite(dist) or dist < 0.0:
+    return False
+
+  implied_speed = dist / dt
+  allowed_speed = max(20.0, float(speed_mps) * _GPS_JUMP_SPEED_FACTOR + _GPS_JUMP_SPEED_BONUS_MPS)
+  return bool(implied_speed > allowed_speed)
+
+
+def _extract_gps_payload(sm: messaging.SubMaster) -> tuple[dict[str, float], float, float | None] | None:
   for service in ("gpsLocationExternal", "gpsLocation"):
     try:
       if not getattr(sm, "alive", {}).get(service, False):
@@ -177,42 +269,43 @@ def _extract_gps_payload(sm: messaging.SubMaster) -> dict[str, float] | None:
       if getattr(gps, "hasFix", True) is False:
         continue
 
-      lat_v = getattr(gps, "latitude", None)
-      lon_v = getattr(gps, "longitude", None)
-      if lat_v is None or lon_v is None:
+      lat = _safe_float(getattr(gps, "latitude", None))
+      lon = _safe_float(getattr(gps, "longitude", None))
+      if lat is None or lon is None:
         continue
 
-      lat = float(lat_v)
-      lon = float(lon_v)
-      if not (math.isfinite(lat) and math.isfinite(lon)):
-        continue
-
-      bearing = None
-      try:
-        b = float(getattr(gps, "bearingDeg", float("nan")))
-        if math.isfinite(b):
-          bearing = b
-      except Exception:
-        pass
-
-      # If bearingDeg is unavailable/unstable, fall back to velocity direction.
-      if bearing is None:
+      speed_mps = _safe_float(getattr(gps, "speed", None))
+      if speed_mps is None:
         try:
-          v_n = float(getattr(gps, "vN", float("nan")))
-          v_e = float(getattr(gps, "vE", float("nan")))
-          if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
-            bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+          vned = getattr(gps, "vNED", None)
+          if vned is not None and len(vned) >= 2:
+            v_n = _safe_float(vned[0])
+            v_e = _safe_float(vned[1])
+            if v_n is not None and v_e is not None:
+              speed_mps = float(math.hypot(v_n, v_e))
         except Exception:
-          pass
+          speed_mps = None
+      if speed_mps is None:
+        speed_mps = 0.0
 
-      if bearing is None:
+      bearing_vned = _bearing_from_vned(gps)
+      bearing_gps = _safe_float(getattr(gps, "bearingDeg", None))
+      bearing = None
+      if bearing_vned is not None and float(speed_mps) > 2.0:
+        bearing = float(bearing_vned)
+      elif bearing_gps is not None:
+        bearing = float(bearing_gps)
+      elif bearing_vned is not None:
+        bearing = float(bearing_vned)
+      else:
         bearing = 0.0
 
-      return {
+      h_acc_m = _safe_float(getattr(gps, "horizontalAccuracy", None))
+      return ({
         "latitude": lat,
         "longitude": lon,
         "bearing": bearing,
-      }
+      }, float(speed_mps), h_acc_m)
     except Exception:
       continue
   return None
@@ -221,14 +314,58 @@ def _extract_gps_payload(sm: messaging.SubMaster) -> dict[str, float] | None:
 def _gps_position_writer_thread(exit_event: threading.Event) -> None:
   params_memory = Params(PARAMS_MEMORY_PATH)
   sm = messaging.SubMaster(["gpsLocationExternal", "gpsLocation"])
+  last_good_payload: dict[str, float] | None = None
+  last_good_t = 0.0
+  last_written_payload: dict[str, float] | None = None
+  last_written_t = 0.0
+  last_speed_mps = 0.0
 
   rk = Ratekeeper(2.0, print_delay_threshold=None)  # 2 Hz is enough for mapd
   while not exit_event.is_set():
     try:
       sm.update(0)
-      payload = _extract_gps_payload(sm)
-      if payload is not None:
-        params_memory.put("LastGPSPosition", json.dumps(payload, separators=(",", ":")))
+      res = _extract_gps_payload(sm)
+      now = time.monotonic()
+      chosen = None
+      gps_ok_out = False
+
+      speed_mps = float(last_speed_mps)
+      if res is not None:
+        payload, speed_mps, h_acc_m = res
+        last_speed_mps = float(speed_mps)
+
+        base_ok = _gps_quality_ok(float(speed_mps), h_acc_m)
+        if base_ok and _gps_jump_suspected(last_written_payload, float(last_written_t), payload, float(now), float(speed_mps)):
+          base_ok = False
+
+        chosen = payload
+        if base_ok:
+          last_good_payload = dict(payload)
+          last_good_t = float(now)
+          gps_ok_out = True
+        else:
+          clamped_speed = max(0.1, min(50.0, float(speed_mps)))
+          hold_s = min(_GPS_HOLD_LAST_GOOD_S, max(0.5, _GPS_HOLD_MAX_DIST_M / clamped_speed))
+          if last_good_payload is not None and (float(now) - float(last_good_t)) < hold_s:
+            chosen = last_good_payload
+            gps_ok_out = True
+          else:
+            gps_ok_out = False
+      else:
+        # No new GPS fix; keep output stable briefly based on last known speed.
+        if last_good_payload is not None:
+          clamped_speed = max(0.1, min(50.0, float(speed_mps)))
+          hold_s = min(_GPS_HOLD_LAST_GOOD_S, max(0.5, _GPS_HOLD_MAX_DIST_M / clamped_speed))
+          chosen = last_good_payload
+          gps_ok_out = bool((float(now) - float(last_good_t)) < hold_s)
+
+      if chosen is not None:
+        params_memory.put("LastGPSPosition", json.dumps(chosen, separators=(",", ":")))
+        params_memory.put_bool("GPSQualityOK", bool(gps_ok_out))
+        last_written_payload = dict(chosen)
+        last_written_t = float(now)
+      else:
+        params_memory.put_bool("GPSQualityOK", False)
     except Exception:
       cloudlog.exception("mapd: failed updating LastGPSPosition")
 

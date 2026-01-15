@@ -183,7 +183,7 @@
 **显示内容（从左到右）**
 - `Curvature`：曲率/方向盘角/方向盘扭矩
 - `Direction`：方向（N/NE/E/…）
-- `Road`：优先显示 `RoadName`（mapd 离线 OSM 匹配/逆地理结果），否则回退显示 `lat,lon`（保留 5 位小数）；完全无效则显示 `--`（为避免跳变：行驶保留 10s、低速保留 60s、停车保留 1h）
+- `Road`：优先显示 `RoadName`（mapd 离线 OSM 匹配/逆地理结果），否则回退显示 `lat,lon`（保留 5 位小数）；当 `GPSQualityOK=0` 时会保持最近一次稳定的 `RoadName`，并对 `RoadName` 变更做约 1s 去抖；若 GPS 短暂无 fix 会短时间保留最近一次经纬度，避免直接变为 `--`（为避免跳变：行驶保留 30s、低速保留 60s、停车保留 1h）
 - `Control`：自动/人工接管
 - `Memory`、`CPU Temp`
 

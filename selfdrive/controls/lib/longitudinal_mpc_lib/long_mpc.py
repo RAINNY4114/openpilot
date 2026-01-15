@@ -4,6 +4,7 @@ import time
 import numpy as np
 from cereal import log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
@@ -229,6 +230,29 @@ class LongitudinalMpc:
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = SOURCES[2]
+    self._params = Params() if self._is_ford_platform() else None
+    self._lincoln_stop_distance_m = 4.0
+    self._lincoln_param_update_t = 0.0
+    self._update_lincoln_params(force=True)
+
+  def _is_ford_platform(self) -> bool:
+    return self.CP is not None and getattr(self.CP, "brand", "") == "ford"
+
+  def _update_lincoln_params(self, *, force: bool = False) -> None:
+    if self._params is None:
+      return
+
+    now = time.monotonic()
+    if not force and (now - self._lincoln_param_update_t) < 1.0:
+      return
+    self._lincoln_param_update_t = now
+
+    try:
+      stop_distance_m = self._params.get("dp_lincoln_stop_distance_m")
+      if stop_distance_m is not None:
+        self._lincoln_stop_distance_m = float(stop_distance_m)
+    except Exception:
+      pass
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -345,14 +369,18 @@ class LongitudinalMpc:
     # Ford/Lincoln: reduce the final stop gap slightly to avoid stopping overly far back (cut-ins at lights).
     # IMPORTANT: In this MPC formulation, increasing the obstacle position makes the ego travel further while
     # keeping the same "desired distance", which reduces the real-world stop gap. Only apply at very low speed.
-    if self.CP is not None and getattr(self.CP, "brand", "") == "ford" and radarstate.leadOne.status:
+    if self._is_ford_platform() and radarstate.leadOne.status:
       try:
+        self._update_lincoln_params()
+        stop_distance_m = float(np.clip(self._lincoln_stop_distance_m, 3.0, 8.0))
+        stop_gap_shift = float(STOP_DISTANCE - stop_distance_m)
+
         lead_v = float(radarstate.leadOne.vLead)
         lead_d = float(radarstate.leadOne.dRel)
         if lead_v < 0.5 and v_ego < 5.0 and lead_d < 12.0:
-          stop_gap_reduction = float(np.interp(v_ego, [0.0, 2.0, 5.0], [2.5, 2.5, 0.0]))
-          if stop_gap_reduction > 0.0 and bool(np.isfinite(stop_gap_reduction)):
-            lead_0_obstacle = lead_0_obstacle + stop_gap_reduction
+          stop_gap_shift = float(np.interp(v_ego, [0.0, 2.0, 5.0], [stop_gap_shift, stop_gap_shift, 0.0]))
+          if abs(stop_gap_shift) > 1e-6 and bool(np.isfinite(stop_gap_shift)):
+            lead_0_obstacle = lead_0_obstacle + stop_gap_shift
       except Exception:
         pass
 

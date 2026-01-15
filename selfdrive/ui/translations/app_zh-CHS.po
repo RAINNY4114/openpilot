@@ -924,10 +924,8 @@ msgid "MQB A0 SnG Mod"
 msgstr "MQB A0 SnG 模块"
 
 #: selfdrive/ui/widgets/setup.py:75
-#, python-format
-msgid ""
-"Maximize your training data uploads to improve openpilot's driving models."
-msgstr "最大化上传训练数据，以改进 openpilot 的驾驶模型。"
+msgid "Open settings to configure features and view system status."
+msgstr "打开设置以配置功能并查看系统状态。"
 
 #: selfdrive/ui/layouts/settings/device.py:71
 #: selfdrive/ui/layouts/settings/device.py:72
@@ -2062,9 +2060,8 @@ msgid "✓ SUBSCRIBED"
 msgstr "✓ 已订阅"
 
 #: selfdrive/ui/widgets/setup.py:22
-#, python-format
-msgid "🔥 Firehose Mode 🔥"
-msgstr "🔥 Firehose 模式 🔥"
+msgid "Setup complete"
+msgstr "设置完成"
 
 #, python-format
 #~ msgid "Forget Wi-Fi Network \"{}\""
@@ -2300,6 +2297,18 @@ msgstr "删除"
 #: selfdrive/ui/layouts/settings/osm_maps.py
 msgid "Unknown error"
 msgstr "未知错误"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "### Following & Stopping ###"
+msgstr "### 跟车与停车 ###"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Stop distance (standstill)"
+msgstr "停车静止车距"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Target gap to the lead vehicle when coming to a stop (stop-and-go / red lights). Lower = closer; higher = more buffer."
+msgstr "停车（拥堵跟车/红灯）时与前车的目标距离。越低越近；越高越保守。"
 
 #: selfdrive/ui/layouts/settings/lincoln.py
 msgid "### Obstacle Avoidance (Experimental) ###"

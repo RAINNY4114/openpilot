@@ -942,86 +942,106 @@ class LongitudinalPlanner:
     map_turn_limit_active = False
     map_data_available = False
     if lincoln_osm_realtime_cruise and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
+      # GPS quality gating: when GNSS is unstable (multipath / wrong-road), ignore map speed targets to prevent
+      # phantom braking. mapd publishes a filtered "GPSQualityOK" into /dev/shm/params.
+      gps_quality_ok = True
+      try:
+        gps_quality_ok = bool(self._params_memory.get_bool("GPSQualityOK"))
+      except Exception:
+        gps_quality_ok = True
+
       lat_lon: tuple[float, float] | None = None
       gps_for_heading = None
-      for service in ("gpsLocationExternal", "gpsLocation"):
-        if service not in sm.data:
-          continue
-        gps = sm[service]
-        if not getattr(gps, "hasFix", False):
-          continue
-        try:
-          lat = float(gps.latitude)
-          lon = float(gps.longitude)
-        except Exception:
-          continue
-        if not (math.isfinite(lat) and math.isfinite(lon)):
-          continue
-        lat_lon = (lat, lon)
-        gps_for_heading = gps
-        break
+      if gps_quality_ok:
+        for service in ("gpsLocationExternal", "gpsLocation"):
+          if service not in sm.data:
+            continue
+          gps = sm[service]
+          if not getattr(gps, "hasFix", False):
+            continue
+          try:
+            lat = float(gps.latitude)
+            lon = float(gps.longitude)
+          except Exception:
+            continue
+          if not (math.isfinite(lat) and math.isfinite(lon)):
+            continue
+          lat_lon = (lat, lon)
+          gps_for_heading = gps
+          break
 
-      if lat_lon is not None:
-        # Heading estimate for filtering "behind" / mismatched map points (prevents phantom braking on highways).
-        # Prefer GPS bearing, then velocity direction, finally delta-position.
-        try:
-          lat = float(lat_lon[0])
-          lon = float(lat_lon[1])
-          heading_updated = False
-          heading_x = float(self._map_heading_x)
-          heading_y = float(self._map_heading_y)
+        if lat_lon is not None:
+          # Heading estimate for filtering "behind" / mismatched map points (prevents phantom braking on highways).
+          # Prefer GPS bearing, then velocity direction, finally delta-position.
+          try:
+            lat = float(lat_lon[0])
+            lon = float(lat_lon[1])
+            heading_updated = False
+            heading_x = float(self._map_heading_x)
+            heading_y = float(self._map_heading_y)
 
-          bearing = None
-          if gps_for_heading is not None and float(v_ego) > 1.0:
-            try:
-              b = float(getattr(gps_for_heading, "bearingDeg", float("nan")))
-              if math.isfinite(b):
-                bearing = b
-            except Exception:
-              pass
-
-            if bearing is None:
+            bearing = None
+            if gps_for_heading is not None and float(v_ego) > 1.0:
               try:
-                v_n = float(getattr(gps_for_heading, "vN", float("nan")))
-                v_e = float(getattr(gps_for_heading, "vE", float("nan")))
-                if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
-                  bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+                b = float(getattr(gps_for_heading, "bearingDeg", float("nan")))
+                if math.isfinite(b):
+                  bearing = b
               except Exception:
                 pass
 
-          if bearing is not None:
-            br = float(bearing) * _MAP_TO_RADIANS
-            hx = math.sin(br)
-            hy = math.cos(br)
-            if math.isfinite(hx) and math.isfinite(hy):
-              heading_x, heading_y = float(hx), float(hy)
-              heading_updated = True
+              if bearing is None:
+                try:
+                  vned = getattr(gps_for_heading, "vNED", None)
+                  if vned is not None and len(vned) >= 2:
+                    v_n = float(vned[0])
+                    v_e = float(vned[1])
+                    if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
+                      bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+                except Exception:
+                  pass
 
-          if not heading_updated and math.isfinite(float(self._map_prev_lat)) and math.isfinite(float(self._map_prev_lon)):
-            dx, dy = self._map_local_xy(float(self._map_prev_lat), float(self._map_prev_lon), lat, lon)
-            norm = math.hypot(dx, dy)
-            if math.isfinite(norm) and norm > 2.0:  # >2m
-              heading_x, heading_y = float(dx / norm), float(dy / norm)
-              heading_updated = True
+              if bearing is None:
+                try:
+                  v_n = float(getattr(gps_for_heading, "vN", float("nan")))
+                  v_e = float(getattr(gps_for_heading, "vE", float("nan")))
+                  if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
+                    bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+                except Exception:
+                  pass
 
-          if heading_updated:
-            self._map_heading_x = float(heading_x)
-            self._map_heading_y = float(heading_y)
-            self._map_heading_valid = True
+            if bearing is not None:
+              br = float(bearing) * _MAP_TO_RADIANS
+              hx = math.sin(br)
+              hy = math.cos(br)
+              if math.isfinite(hx) and math.isfinite(hy):
+                heading_x, heading_y = float(hx), float(hy)
+                heading_updated = True
 
-          self._map_prev_lat = float(lat)
-          self._map_prev_lon = float(lon)
-        except Exception:
-          pass
+            if not heading_updated and math.isfinite(float(self._map_prev_lat)) and math.isfinite(float(self._map_prev_lon)):
+              dx, dy = self._map_local_xy(float(self._map_prev_lat), float(self._map_prev_lon), lat, lon)
+              norm = math.hypot(dx, dy)
+              if math.isfinite(norm) and norm > 2.0:  # >2m
+                heading_x, heading_y = float(dx / norm), float(dy / norm)
+                heading_updated = True
 
-        try:
-          v_map_target, map_a_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1], v_cruise)
-          map_data_available = len(self._map_target_velocities) > 0
-        except Exception:
-          v_map_target = 0.0
-          map_a_target = 0.0
-          map_turn_limit_active = False
-          map_data_available = False
+            if heading_updated:
+              self._map_heading_x = float(heading_x)
+              self._map_heading_y = float(heading_y)
+              self._map_heading_valid = True
+
+            self._map_prev_lat = float(lat)
+            self._map_prev_lon = float(lon)
+          except Exception:
+            pass
+
+          try:
+            v_map_target, map_a_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1], v_cruise)
+            map_data_available = len(self._map_target_velocities) > 0
+          except Exception:
+            v_map_target = 0.0
+            map_a_target = 0.0
+            map_turn_limit_active = False
+            map_data_available = False
 
     self._map_v_target = float(v_map_target)
     self._map_a_target = float(map_a_target)
@@ -1130,9 +1150,10 @@ class LongitudinalPlanner:
       if not math.isfinite(float(self._map_v_cap)):
         self._map_v_cap = float(v_cruise)
 
-      v_cap_target = float(v_cruise)
+      v_cruise_pre_cap = float(v_cruise)
+      v_cap_target = float(v_cruise_pre_cap)
       if map_turn_limit_active_raw and float(v_map_target) > 0.1:
-        v_cap_target = float(min(v_cruise, float(v_map_target)))
+        v_cap_target = float(min(v_cruise_pre_cap, float(v_map_target)))
 
       # Use a conservative rate limit; map_a_target is filtered already and can be 0.0 during preview caps.
       down_rate = float(np.interp(abs(float(map_a_target)), [0.0, 0.3, 1.5, 3.0], [0.8, 1.2, 2.0, 2.5]))  # m/s per second
@@ -1146,11 +1167,11 @@ class LongitudinalPlanner:
         self._map_v_cap = min(v_cap_target, float(self._map_v_cap) + up_step)
 
       # Apply cap for both engagement and release to avoid step changes.
-      if v_cruise > 0.1:
-        v_cruise = min(v_cruise, float(self._map_v_cap))
+      if v_cruise_pre_cap > 0.1:
+        v_cruise = min(v_cruise_pre_cap, float(self._map_v_cap))
 
-      # "active" means map cap is currently tightening v_cruise (either engaging or releasing).
-      map_turn_limit_active = bool(float(self._map_v_cap) > 0.1 and float(self._map_v_cap) < (float(v_cap_target) - 1e-3))
+      # "active" means the rate-limited map cap is currently limiting v_cruise (engaging, holding, or releasing).
+      map_turn_limit_active = bool(v_cruise_pre_cap > 0.1 and v_cruise > 0.1 and v_cruise < (v_cruise_pre_cap - 1e-3))
       self._map_turn_limit_active = bool(map_turn_limit_active)
 
     dp_auto_avoid = self._params.get_bool("dp_lincoln_auto_avoid")

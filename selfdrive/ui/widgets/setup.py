@@ -19,7 +19,7 @@ class SetupWidget(Widget):
     self._pair_device_btn = Button(lambda: tr("Pair device"), self._show_pairing, button_style=ButtonStyle.PRIMARY)
     self._open_settings_btn = Button(lambda: tr("Open"), lambda: self._open_settings_callback() if self._open_settings_callback else None,
                                      button_style=ButtonStyle.PRIMARY)
-    self._firehose_label = Label(lambda: tr("🔥 Firehose Mode 🔥"), font_weight=FontWeight.MEDIUM, font_size=64)
+    self._paired_label = Label(lambda: tr("Setup complete"), font_weight=FontWeight.MEDIUM, font_size=64)
 
   def set_open_settings_callback(self, callback):
     self._open_settings_callback = callback
@@ -28,7 +28,7 @@ class SetupWidget(Widget):
     if not ui_state.prime_state.is_paired():
       self._render_registration(rect)
     else:
-      self._render_firehose_prompt(rect)
+      self._render_paired_prompt(rect)
 
   def _render_registration(self, rect: rl.Rectangle):
     """Render registration prompt."""
@@ -55,8 +55,8 @@ class SetupWidget(Widget):
     button_rect = rl.Rectangle(x, y + 30, w, 200)
     self._pair_device_btn.render(button_rect)
 
-  def _render_firehose_prompt(self, rect: rl.Rectangle):
-    """Render firehose prompt widget."""
+  def _render_paired_prompt(self, rect: rl.Rectangle):
+    """Render paired device prompt widget."""
 
     rl.draw_rectangle_rounded(rl.Rectangle(rect.x, rect.y, rect.width, 500), 0.04, 20, rl.Color(51, 51, 51, 255))
 
@@ -66,13 +66,13 @@ class SetupWidget(Widget):
     w = rect.width - 112
     spacing = 42
 
-    # Title with fire emojis
-    self._firehose_label.render(rl.Rectangle(rect.x, y, rect.width, 64))
+    # Title
+    self._paired_label.render(rl.Rectangle(rect.x, y, rect.width, 64))
     y += 64 + spacing
 
     # Description
     desc_font = gui_app.font(FontWeight.NORMAL)
-    desc_text = tr("Maximize your training data uploads to improve openpilot's driving models.")
+    desc_text = tr("Open settings to configure features and view system status.")
     wrapped_desc = wrap_text(desc_font, desc_text, 40, int(w))
 
     for line in wrapped_desc:

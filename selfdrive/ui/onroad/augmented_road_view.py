@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
 from importlib.resources import as_file
 import os
@@ -273,7 +274,14 @@ class AugmentedRoadView(CameraView):
     self._road_loc_cache_t = 0.0
     self._road_name_last = ""
     self._road_name_last_t = 0.0
+    self._road_name_candidate = ""
+    self._road_name_candidate_t = 0.0
+    self._road_gps_last = ""
+    self._road_gps_last_t = 0.0
     self._road_font_cache: dict[tuple[int, ...], _DynamicFontCacheEntry] = {}
+    self._map_tv_raw_cache: str | None = None
+    self._map_tv_points_cache: int = 0
+    self._map_tv_cache_t = 0.0
 
     # Lincoln HUD enhancements
     self._hud_brake_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
@@ -325,14 +333,13 @@ class AugmentedRoadView(CameraView):
     # Draw all UI overlays
     self.model_renderer.render(self._content_rect)
     self._draw_hud_enhancements()
+    self._draw_performance_info()
     if not hide_hud:
       self._hud_renderer.render(self._content_rect)
     self.alert_renderer.render(self._content_rect)
     if not LITE:
       if not hide_hud:
         self.driver_state_renderer.render(self._content_rect)
-
-    self._draw_performance_info()
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
@@ -1200,6 +1207,7 @@ class AugmentedRoadView(CameraView):
     if rect.width <= 0 or rect.height <= 0:
       return
 
+    sm = ui_state.sm
     stats = self._get_perf_stats()
     curvature_text, steering_text, torque_text = self._get_curvature_steer_torque()
     direction_text = self._get_direction_label()
@@ -1208,23 +1216,73 @@ class AugmentedRoadView(CameraView):
     mem_usage = stats.get("mem_usage", "N/A")
     cpu_temp = stats.get("cpu_temp", "N/A")
 
+    is_ford = False
+    try:
+      is_ford = getattr(sm["carParams"], "brand", "") == "ford"
+    except Exception:
+      is_ford = False
+
+    diag_item = None
+    if is_ford:
+      gps_quality_ok = True
+      for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
+        if params is None:
+          continue
+        try:
+          gps_quality_ok = bool(params.get_bool("GPSQualityOK"))
+          break
+        except Exception:
+          continue
+
+      curve_src_val = 0
+      try:
+        src = getattr(sm["longitudinalPlan"], "curveSpeedSource", 0)
+        raw = getattr(src, "raw", None)
+        curve_src_val = int(raw) if raw is not None else int(src)
+      except Exception:
+        curve_src_val = 0
+
+      long_active = False
+      try:
+        long_active = bool(getattr(sm["controlsState"], "longActive", False))
+      except Exception:
+        long_active = False
+
+      map_points = self._get_map_target_velocities_points()
+      mp = str(map_points) if map_points is not None else "-"
+      src_str = "无"
+      if int(curve_src_val) == 2:
+        src_str = "地图"
+      elif int(curve_src_val) == 1:
+        src_str = "视觉"
+      diag_item = f"弯道: {src_str} G{int(gps_quality_ok)} L{int(long_active)} P{mp}"
+
     base_items = [
       f"{tr('Curvature')} {curvature_text}/{steering_text}/{torque_text}",
       f"{tr('Direction')} {direction_text}",
       f"{tr('Road')} {road_loc_text}",
       f"{tr('Control')} {control_text}",
+      *([diag_item] if diag_item else []),
       f"{tr('Memory')} {mem_usage}",
       f"{tr('CPU Temp')} {cpu_temp}",
     ]
 
     road_item_idx = 2
-    max_width = max(rect.width - 40, 0)
+    # Keep this bar away from the side HUD elements; too-wide bars can "cut" other UI overlays.
+    max_width = max(min(rect.width - 40.0, rect.width * 0.80), 0.0)
 
     items = list(base_items)
     road_label = f"{tr('Road')} "
     road_value = road_loc_text if road_loc_text else "--"
 
     road_item_font: rl.Font | None = None
+    diag_item_idx: int | None = None
+    diag_item_font: rl.Font | None = None
+    if diag_item:
+      try:
+        diag_item_idx = int(items.index(diag_item))
+      except Exception:
+        diag_item_idx = None
     measurements: list[rl.Vector2] = []
     gap_count = max(0, len(items) - 1)
     gap = 0.0
@@ -1239,10 +1297,21 @@ class AugmentedRoadView(CameraView):
         if self._font_has_missing_glyphs(base_font, items[road_item_idx]):
           road_item_font = self._get_dynamic_unifont_font(items[road_item_idx])
 
+      diag_item_font = None
+      if diag_item_idx is not None:
+        try:
+          base_font = font_fallback(self._perf_font)
+          if self._font_has_missing_glyphs(base_font, items[diag_item_idx]):
+            diag_item_font = self._get_dynamic_unifont_font(items[diag_item_idx])
+        except Exception:
+          diag_item_font = None
+
       measurements = []
       for idx, text in enumerate(items):
         if idx == road_item_idx and road_item_font is not None:
           measurements.append(self._measure_text_ex_no_fallback(road_item_font, text, PERF_FONT_SIZE))
+        elif diag_item_idx is not None and idx == diag_item_idx and diag_item_font is not None:
+          measurements.append(self._measure_text_ex_no_fallback(diag_item_font, text, PERF_FONT_SIZE))
         else:
           measurements.append(measure_text_cached(self._perf_font, text, PERF_FONT_SIZE))
 
@@ -1288,12 +1357,29 @@ class AugmentedRoadView(CameraView):
 
     cursor_x = bar_x + PERF_PADDING
     text_y = bar_y + PERF_PADDING
+    # Temporarily clip text to the bar bounds to prevent overlap with other HUD elements,
+    # then restore the content scissor rectangle for subsequent renderers.
+    try:
+      rl.begin_scissor_mode(int(bar_x), int(bar_y), int(bar_width), int(bar_height))
+    except Exception:
+      pass
     for idx, (text, measurement) in enumerate(zip(items, measurements, strict=True)):
       if idx == road_item_idx and road_item_font is not None:
         self._draw_text_ex_no_fallback(road_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
+      elif diag_item_idx is not None and idx == diag_item_idx and diag_item_font is not None:
+        self._draw_text_ex_no_fallback(diag_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       else:
         rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       cursor_x += measurement.x + gap
+    try:
+      rl.begin_scissor_mode(
+        int(self._content_rect.x),
+        int(self._content_rect.y),
+        int(self._content_rect.width),
+        int(self._content_rect.height)
+      )
+    except Exception:
+      pass
 
   @staticmethod
   def _ellipsize_text_to_width(text: str, max_width: float, measure_width, ellipsis: str = "...") -> str:
@@ -1390,6 +1476,48 @@ class AugmentedRoadView(CameraView):
     self._prune_road_font_cache(max_entries=8)
     return font
 
+  def _get_map_target_velocities_points(self) -> int | None:
+    """
+    Returns the number of map target-velocity points currently available from mapd.
+
+    This is a lightweight, HUD-friendly summary to help diagnose whether "地图融合" is
+    working without collecting logs.
+    """
+    now = time.monotonic()
+    if (now - float(self._map_tv_cache_t)) < 0.5:
+      return int(self._map_tv_points_cache)
+
+    raw = None
+    for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
+      if params is None:
+        continue
+      try:
+        raw = params.get("MapTargetVelocities")
+      except Exception:
+        raw = None
+      if raw:
+        break
+
+    if not raw:
+      self._map_tv_raw_cache = None
+      self._map_tv_points_cache = 0
+      self._map_tv_cache_t = float(now)
+      return 0
+
+    if raw != self._map_tv_raw_cache:
+      points = 0
+      try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+          points = len(parsed)
+      except Exception:
+        points = 0
+      self._map_tv_raw_cache = raw
+      self._map_tv_points_cache = int(points)
+
+    self._map_tv_cache_t = float(now)
+    return int(self._map_tv_points_cache)
+
   def _prune_road_font_cache(self, max_entries: int) -> None:
     if len(self._road_font_cache) <= max_entries:
       return
@@ -1429,6 +1557,16 @@ class AugmentedRoadView(CameraView):
     if now - self._road_loc_cache_t < 0.5:
       return self._road_loc_cache
 
+    gps_quality_ok = True
+    for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
+      if params is None:
+        continue
+      try:
+        gps_quality_ok = bool(params.get_bool("GPSQualityOK"))
+        break
+      except Exception:
+        continue
+
     # Prefer mapd-provided road name (OSM matched); fall back to GPS coordinates.
     road_name = ""
     for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
@@ -1444,19 +1582,42 @@ class AugmentedRoadView(CameraView):
         continue
 
     if road_name:
-      max_chars = 22
-      if len(road_name) > max_chars:
-        road_name = road_name[:max_chars - 3] + "..."
-      self._road_name_last = road_name
-      self._road_name_last_t = now
-      self._road_loc_cache = road_name
-      self._road_loc_cache_t = now
-      return road_name
+      # Keep the full road name; the renderer will ellipsize to width as needed.
+      # Guard against pathological values from mapd to avoid excessive measurements.
+      road_name = " ".join(road_name.split())
+      if len(road_name) > 120:
+        road_name = road_name[:117] + "..."
+
+      # When GNSS is unstable (multipath), map matching can briefly jump to parallel roads.
+      # Gate changes and hold the last stable RoadName to avoid flicker/wrong-road display.
+      if not gps_quality_ok and self._road_name_last:
+        road_name = ""
+      elif self._road_name_last and road_name != self._road_name_last:
+        debounce_s = 1.0
+        if self._road_name_candidate != road_name:
+          self._road_name_candidate = road_name
+          self._road_name_candidate_t = now
+          road_name = ""
+        elif (now - self._road_name_candidate_t) < debounce_s:
+          road_name = ""
+        else:
+          self._road_name_candidate = ""
+          self._road_name_candidate_t = 0.0
+      else:
+        self._road_name_candidate = ""
+        self._road_name_candidate_t = 0.0
+
+      if road_name:
+        self._road_name_last = road_name
+        self._road_name_last_t = now
+        self._road_loc_cache = road_name
+        self._road_loc_cache_t = now
+        return road_name
 
     # mapd can briefly output an empty road name during GPS jitter or process restarts.
     # Keep the last valid match to avoid flickering to raw coordinates, especially when stopped.
     sm = ui_state.sm
-    hold_s = 10.0
+    hold_s = 30.0
     try:
       if getattr(sm, "alive", {}).get("carState", False):
         car_state = sm["carState"]
@@ -1497,7 +1658,16 @@ class AugmentedRoadView(CameraView):
       except Exception:
         continue
 
-    self._road_loc_cache = f"{lat:.5f},{lon:.5f}" if lat is not None and lon is not None else "--"
+    if lat is not None and lon is not None:
+      gps_text = f"{lat:.5f},{lon:.5f}"
+      self._road_gps_last = gps_text
+      self._road_gps_last_t = now
+      self._road_loc_cache = gps_text
+    elif self._road_gps_last and (now - self._road_gps_last_t) < hold_s:
+      # GPS can briefly drop fix; keep the last known coordinates for a short time to avoid "--" flicker.
+      self._road_loc_cache = self._road_gps_last
+    else:
+      self._road_loc_cache = "--"
     self._road_loc_cache_t = now
     return self._road_loc_cache
 
