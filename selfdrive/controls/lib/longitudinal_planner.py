@@ -43,7 +43,7 @@ _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
 # Map Turn Speed Controller constants (FrogPilot-style)
-_MAP_EARTH_RADIUS_M = 6373000.0
+_MAP_EARTH_RADIUS_M = 6378137.0
 _MAP_TO_RADIANS = math.pi / 180.0
 
 # FrogPilot-style curve speed control defaults
@@ -382,7 +382,8 @@ class LongitudinalPlanner:
       self._obstacle_present_since = None
     self._obstacle_present_prev = obstacle_present
 
-    controls_enabled = bool(getattr(sm['controlsState'], "enabled", False))
+    # controlsState.enabled doesn't exist in this branch's log schema, so use selfdriveState.enabled.
+    controls_enabled = bool(getattr(sm['selfdriveState'], "enabled", False))
     curve_speed_control = bool(curve_speed_control)
 
     v_cruise_cluster = float(v_cruise)
@@ -393,32 +394,22 @@ class LongitudinalPlanner:
     v_cruise_diff = float(v_cruise_cluster - v_cruise)
 
     gps_position = None
-    gps_msg = None
     try:
-      gps_ext = sm["gpsLocationExternal"] if sm.valid.get("gpsLocationExternal", False) else None
-      gps_int = sm["gpsLocation"] if sm.valid.get("gpsLocation", False) else None
-      if gps_ext is not None and getattr(gps_ext, "hasFix", False):
-        gps_msg = gps_ext
-      elif gps_int is not None and getattr(gps_int, "hasFix", False):
-        gps_msg = gps_int
+      llk = sm["liveLocationKalman"] if sm.valid.get("liveLocationKalman", False) else None
+      if llk is not None:
+        localizer_valid = (llk.status == log.LiveLocationKalman.Status.valid) and llk.positionGeodetic.valid
+        if llk.gpsOK and localizer_valid:
+          lat = float(llk.positionGeodetic.value[0])
+          lon = float(llk.positionGeodetic.value[1])
+          bearing = float(math.degrees(llk.calibratedOrientationNED.value[2]))
+          if math.isfinite(lat) and math.isfinite(lon) and math.isfinite(bearing):
+            gps_position = {
+              "latitude": lat,
+              "longitude": lon,
+              "bearing": bearing,
+            }
     except Exception:
-      gps_msg = None
-
-    if gps_msg is not None:
-      try:
-        lat = float(gps_msg.latitude)
-        lon = float(gps_msg.longitude)
-        bearing = float(getattr(gps_msg, "bearingDeg", 0.0))
-        if math.isfinite(lat) and math.isfinite(lon):
-          if not math.isfinite(bearing):
-            bearing = 0.0
-          gps_position = {
-            "latitude": lat,
-            "longitude": lon,
-            "bearing": bearing,
-          }
-      except Exception:
-        gps_position = None
+      gps_position = None
 
     if gps_position is not None:
       try:
@@ -501,8 +492,8 @@ class LongitudinalPlanner:
       targets = [self._fp_map_target, self._fp_vision_target, v_cruise_pre_curve]
       v_cruise = min([target if target > _FP_CRUISING_SPEED else v_cruise_pre_curve for target in targets])
 
-    map_turn_limit_active = bool(curve_speed_control and self._fp_map_target > 0.1 and self._fp_map_target < (v_cruise_pre_curve - 1e-3))
-    vision_turn_limit_active = bool(curve_speed_control and self._fp_vision_target > 0.1 and self._fp_vision_target < (v_cruise_pre_curve - 1e-3))
+    map_turn_limit_active = bool(curve_speed_control and self._fp_map_target < v_cruise_pre_curve)
+    vision_turn_limit_active = bool(curve_speed_control and self._fp_vision_target < v_cruise_pre_curve)
 
     self._fp_map_target = float(self._fp_map_target + v_cruise_diff)
     self._fp_vision_target = float(self._fp_vision_target + v_cruise_diff)
@@ -614,7 +605,9 @@ class LongitudinalPlanner:
     # HUD source label: report which limiter is actively tightening the cruise target.
     # NOTE: Don't gate on `long_control_off`/`longActive` since Ford often runs stock ACC; users still want to know
     # whether the limiting comes from map or vision.
-    if map_turn_limit_active:
+    if map_turn_limit_active and vision_turn_limit_active:
+      self._curve_speed_source = 2 if self._fp_map_target <= self._fp_vision_target else 1
+    elif map_turn_limit_active:
       self._curve_speed_source = 2  # map
     elif self.curve_v_target is not None:
       self._curve_speed_source = 1  # vision

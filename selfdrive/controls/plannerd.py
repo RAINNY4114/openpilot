@@ -40,7 +40,7 @@ def main():
   last_flag_refresh_frame = 0
 
   def curve_speed_control_enabled() -> bool:
-    return CP.openpilotLongitudinalControl and params.get_bool("CurveSpeedControl")
+    return params.get_bool("CurveSpeedControl")
 
   while True:
     sm.update()
