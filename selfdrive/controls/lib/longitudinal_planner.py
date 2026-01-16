@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import math
-import os
 import time
 import numpy as np
 
@@ -43,22 +42,16 @@ OBSTACLE_V_CAP_UP_RATE = 2.0    # m/s^2 (rate-limit on releasing v_cap)
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
-# Map Turn Speed Controller (mapd) constants (similar to FrogPilot/CP behavior)
+# Map Turn Speed Controller constants (FrogPilot-style)
 _MAP_EARTH_RADIUS_M = 6373000.0
 _MAP_TO_RADIANS = math.pi / 180.0
-_MAP_TARGET_JERK = -0.6   # m/s^3
-_MAP_TARGET_ACCEL = -1.2  # m/s^2
-_MAP_TARGET_OFFSET_S = 1.0
-# Preview speed cap lookahead:
-# - Only engage once a limiting segment is within the "base" horizon (avoid slowing too early).
-# - Once engaged, use an "extended" horizon to capture the minimum target across the whole upcoming curve/S-curve
-#   to reduce step-downs mid-curve as new points enter the base window.
-_MAP_PREVIEW_BASE_TIME_S = 10.0
-_MAP_PREVIEW_BASE_MIN_HORIZON_M = 80.0
-_MAP_PREVIEW_BASE_MAX_HORIZON_M = 400.0
-_MAP_PREVIEW_EXT_TIME_S = 20.0
-_MAP_PREVIEW_EXT_MIN_HORIZON_M = 120.0
-_MAP_PREVIEW_EXT_MAX_HORIZON_M = 800.0
+
+# FrogPilot-style curve speed control defaults
+_FP_TARGET_LAT_A = 2.0
+_FP_CURVE_SENSITIVITY = 1.0
+_FP_TURN_AGGRESSIVENESS = 1.0
+_FP_CRUISING_SPEED = 5.0
+_FP_MTSCC_CURVATURE_CHECK = True
 
 class DPFlags:
   ACM = 1
@@ -113,39 +106,26 @@ class LongitudinalPlanner:
     self.solverExecutionTime = 0.0
     self.acm = ACM()
     self.aem = AEM()
-    # Lincoln/Ford 专用弯道限速状态
-    self.curve_k_smooth = 0.0
-    self.curve_active = False
+    # Curve speed control (FrogPilot-style)
     self.curve_v_target = None
-    self.curve_exit_timer = 0.0
-    self.curve_a_target = 0.0
-    self.last_curve_log_t = 0.0
-    self.curve_log_dir = "/data/media/0/lincoln_curve_logs"
+    self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
+    self._fp_map_target = float("nan")
+    self._fp_vision_target = float("nan")
+    self._fp_road_curvature = 0.0
+    self._fp_road_curvature_detected = False
     self._params = Params()
     self._params_memory = Params("/dev/shm/params")
-    self._curve_cfg = {}
-    self._curve_param_last = 0.0
+    self._fp_curve_cfg = {}
+    self._fp_curve_param_last = 0.0
 
     self._map_target_velocities_raw = None
     self._map_target_velocities = []
     self._map_v_target = 0.0
     self._map_a_target = 0.0
-    self._map_a_target_filtered = 0.0
     self._map_turn_limit_active = False
     self._map_data_available = False
     self._map_points = 0
     self._map_min_dist_m = 0.0
-    self._map_lock_lat = 0.0
-    self._map_lock_lon = 0.0
-    self._map_lock_v = 0.0
-    self._map_preview_v = 0.0
-    self._map_prev_lat = float("nan")
-    self._map_prev_lon = float("nan")
-    self._map_heading_x = 0.0  # unit vector in local meters (east)
-    self._map_heading_y = 0.0  # unit vector in local meters (north)
-    self._map_heading_valid = False
-    self._map_v_cap = float("nan")  # rate-limited cruise cap used for stock ACC comfort
-    self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
     self._obstacle_last_det_t = 0.0
     self._obstacle_cone_in_path = False
     self._obstacle_person_in_path = False
@@ -156,11 +136,10 @@ class LongitudinalPlanner:
     self._obstacle_present_since: float | None = None
     self._obstacle_v_cap = float("nan")
 
-  def _lincoln_curve_config(self):
-    # 小环折加载，1s 内不重复读取参数
+  def _fp_curve_config(self):
     now = time.monotonic()
-    if now - self._curve_param_last < 1.0 and self._curve_cfg:
-      return self._curve_cfg
+    if now - self._fp_curve_param_last < 1.0 and self._fp_curve_cfg:
+      return self._fp_curve_cfg
 
     def _safe_int(name: str, default: int) -> int:
       try:
@@ -169,24 +148,34 @@ class LongitudinalPlanner:
       except Exception:
         return default
 
-    window_m = max(30, min(190, _safe_int("dp_lincoln_curve_window_m", 130)))
-    k_enter_milli = max(2, min(20, _safe_int("dp_lincoln_curve_k_enter", 4)))  # 0.002~0.020
-    k_enter = k_enter_milli * 1e-3
-    k_exit = k_enter * 0.70
-    # 固定舒适横向上限 1.8 m/s²（不再暴露给用户调节）
-    a_lat = 1.8
-    decel_cm = _safe_int("dp_lincoln_curve_decel", -320)                       # cm/s^2, negative
-    decel_max = min(-0.5, max(-500, decel_cm) / 100.0)                         # clamp to [-5.0, -0.5]
-    self._curve_cfg = {
-      "window_m": float(window_m),
-      "k_enter": float(k_enter),
-      "k_exit": float(k_exit),
-      "a_lat": float(a_lat),
-      "decel_max": float(decel_max),
-      "exit_h": 0.70,  # 固定退出滞回，移除可调
+    def _safe_bool(name: str, default: bool) -> bool:
+      try:
+        val = self._params.get_bool(name)
+        return bool(val)
+      except Exception:
+        return default
+
+    curve_sensitivity = _safe_int("CurveSensitivity", int(_FP_CURVE_SENSITIVITY * 100)) / 100.0
+    if not math.isfinite(curve_sensitivity) or curve_sensitivity <= 0.0:
+      curve_sensitivity = float(_FP_CURVE_SENSITIVITY)
+
+    turn_aggressiveness = _safe_int("TurnAggressiveness", int(_FP_TURN_AGGRESSIVENESS * 100)) / 100.0
+    if not math.isfinite(turn_aggressiveness) or turn_aggressiveness <= 0.0:
+      turn_aggressiveness = float(_FP_TURN_AGGRESSIVENESS)
+
+    map_enabled = _safe_bool("MapTurnControl", True)
+    vision_enabled = _safe_bool("VisionTurnControl", True)
+    mtsc_curvature_check = _safe_bool("MTSCCurvatureCheck", True)
+
+    self._fp_curve_cfg = {
+      "curve_sensitivity": float(curve_sensitivity),
+      "turn_aggressiveness": float(turn_aggressiveness),
+      "map_enabled": bool(map_enabled),
+      "vision_enabled": bool(vision_enabled),
+      "mtsc_curvature_check": bool(mtsc_curvature_check),
     }
-    self._curve_param_last = now
-    return self._curve_cfg
+    self._fp_curve_param_last = now
+    return self._fp_curve_cfg
 
   def _map_distance_to_point(self, lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
     ax = lat_a * _MAP_TO_RADIANS
@@ -197,28 +186,12 @@ class LongitudinalPlanner:
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
     return _MAP_EARTH_RADIUS_M * c
 
-  @staticmethod
-  def _map_local_xy(lat0: float, lon0: float, lat1: float, lon1: float) -> tuple[float, float]:
-    # Local tangent-plane approximation (good enough for small map windows).
-    lat0_r = float(lat0) * _MAP_TO_RADIANS
-    dlat = (float(lat1) - float(lat0)) * _MAP_TO_RADIANS
-    dlon = (float(lon1) - float(lon0)) * _MAP_TO_RADIANS
-    x = dlon * math.cos(lat0_r) * _MAP_EARTH_RADIUS_M
-    y = dlat * _MAP_EARTH_RADIUS_M
-    return float(x), float(y)
-
   def _map_target_velocities_list(self) -> list:
     raw = None
     try:
       raw = self._params_memory.get("MapTargetVelocities")
     except Exception:
       raw = None
-
-    if not raw:
-      try:
-        raw = self._params.get("MapTargetVelocities")
-      except Exception:
-        raw = None
 
     if not raw:
       self._map_target_velocities_raw = None
@@ -240,649 +213,97 @@ class LongitudinalPlanner:
     return parsed
 
   @staticmethod
-  def _map_calculate_velocity(t: float, target_jerk: float, a_ego: float, v_ego: float) -> float:
-    return v_ego + a_ego * t + (target_jerk / 2) * (t ** 2)
+  def _fp_parse_map_point(target_velocity) -> tuple[float, float] | None:
+    try:
+      tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
+      tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
+    except Exception:
+      return None
+    if not (math.isfinite(tlat) and math.isfinite(tlon)):
+      return None
+    return tlat, tlon
 
   @staticmethod
-  def _map_calculate_distance(t: float, target_jerk: float, a_ego: float, v_ego: float) -> float:
-    return t * v_ego + (a_ego / 2) * (t ** 2) + (target_jerk / 6) * (t ** 3)
+  def _fp_calc_road_curvature(model_msg, v_ego: float) -> float:
+    try:
+      orientation_rate = np.array(model_msg.orientationRate.z)
+      velocity = np.array(model_msg.velocity.x)
+    except Exception:
+      return 0.0
+    if orientation_rate.size == 0 or velocity.size == 0:
+      return 0.0
+    try:
+      max_pred_lat_acc = max(np.max(orientation_rate * velocity), np.min(orientation_rate * velocity), key=abs)
+    except Exception:
+      return 0.0
+    return float(max_pred_lat_acc / max(v_ego, 1.0) ** 2)
 
-  def _map_turn_target_speed(self, v_ego: float, a_ego: float, lat: float, lon: float, v_cruise: float) -> tuple[float, float]:
-    target_velocities = self._map_target_velocities_list()
+  def _fp_calc_curvature(self, p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> float:
+    side_a = self._map_distance_to_point(p2[0], p2[1], p3[0], p3[1])
+    side_b = self._map_distance_to_point(p1[0], p1[1], p3[0], p3[1])
+    side_c = self._map_distance_to_point(p1[0], p1[1], p2[0], p2[1])
+
+    s = (side_a + side_b + side_c) / 2.0
+    area_squared = s * (s - side_a) * (s - side_b) * (s - side_c)
+    if area_squared <= 0.0:
+      return 0.0
+    area = math.sqrt(area_squared)
+    if area <= 0.0:
+      return 0.0
+
+    radius = (side_a * side_b * side_c) / (4.0 * area)
+    if radius <= 0.0:
+      return 0.0
+    return 1.0 / radius
+
+  def _fp_map_curvature(self, lat: float, lon: float, v_ego: float, target_velocities: list) -> float:
     if not target_velocities:
-      return 0.0, 0.0
+      self._map_min_dist_m = 0.0
+      return 1e-6
 
-    min_dist = 1e9
-    min_idx = 0
+    points: list[tuple[float, float]] = []
     distances: list[float] = []
-    ahead_flags: list[bool] = []
-
-    for i, target_velocity in enumerate(target_velocities):
-      try:
-        tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
-        tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
-      except Exception:
-        distances.append(1e9)
-        ahead_flags.append(False)
+    min_idx = 0
+    min_dist = 1e9
+    for target_velocity in target_velocities:
+      point = self._fp_parse_map_point(target_velocity)
+      if point is None:
         continue
-
-      ahead = True
-      if self._map_heading_valid:
-        try:
-          dx, dy = self._map_local_xy(lat, lon, tlat, tlon)
-          ahead = (dx * float(self._map_heading_x) + dy * float(self._map_heading_y)) >= 0.0
-        except Exception:
-          ahead = True
-
-      if not ahead:
-        distances.append(1e9)
-        ahead_flags.append(False)
-        continue
-
+      tlat, tlon = point
+      points.append((tlat, tlon))
       d = self._map_distance_to_point(lat, lon, tlat, tlon)
       distances.append(d)
-      ahead_flags.append(True)
       if d < min_dist:
         min_dist = d
-        min_idx = i
+        min_idx = len(points) - 1
 
     self._map_min_dist_m = float(min_dist) if math.isfinite(min_dist) else 0.0
+    if len(points) < 3:
+      return 1e-6
 
-    forward_points = target_velocities[min_idx:]
     forward_distances = distances[min_idx:]
-    forward_ahead = ahead_flags[min_idx:]
+    forward_points = points[min_idx:]
+    if not forward_distances or len(forward_points) < 3:
+      return 1e-6
 
-    # 1) In-curve hold: use the current segment's map speed cap so we don't accelerate inside long curves/S-curves
-    #    even when v_ego is already below the cap.
-    v_hold = 0.0
-    if min_dist < 30.0 and forward_points and (not self._map_heading_valid or bool(forward_ahead[0])):
-      try:
-        tv_here = float(forward_points[0].get("velocity", forward_points[0].get("speed", 0.0)))
-      except Exception:
-        tv_here = 0.0
-      if tv_here > 70.0:  # likely km/h
-        tv_here *= CV.KPH_TO_MS
-      if math.isfinite(tv_here) and tv_here > 0.1 and tv_here < (v_cruise - 1e-3):
-        v_hold = float(tv_here)
+    lookahead_dist = float(ModelConstants.T_IDXS[-1]) * float(v_ego)
+    cumulative_distance = 0.0
+    target_idx = None
+    for i, distance in enumerate(forward_distances):
+      cumulative_distance += float(distance)
+      if cumulative_distance >= lookahead_dist:
+        target_idx = i
+        break
 
-    # 2) Preview cap:
-    #    "preview cap" is a *soft* speed cap used when we don't need to brake yet, but want to avoid
-    #    step-downs as more map points become visible (e.g. long curves / S-curves).
-    #
-    #    IMPORTANT: We don't clamp to the map's minimum speed immediately. Instead we compute a distance-based
-    #    cap (v_cap) that only starts tightening when it's actually time to start slowing down comfortably.
-    preview_ext_horizon = max(_MAP_PREVIEW_EXT_MIN_HORIZON_M, min(_MAP_PREVIEW_EXT_MAX_HORIZON_M, v_ego * _MAP_PREVIEW_EXT_TIME_S))
-    v_preview_ext = 0.0
-    d_preview_ext = 0.0
+    if target_idx is None or target_idx == 0 or target_idx >= len(forward_points) - 1:
+      return 1e-6
 
-    # 3) Approach decel: find upcoming target speeds that require deceleration *now* (physics check).
-    valid_velocities: list[tuple[float, float, float, float]] = []  # (target_v, dist_m, lat, lon)
-    for i, target_velocity in enumerate(forward_points):
-      if self._map_heading_valid and (not bool(forward_ahead[i])):
-        continue
-      try:
-        tv = float(target_velocity.get("velocity", target_velocity.get("speed", 0.0)))
-      except Exception:
-        continue
-      if tv > 70.0:  # likely km/h
-        tv *= CV.KPH_TO_MS
-      if not math.isfinite(tv) or tv <= 0.0:
-        continue
-      d = float(forward_distances[i])
-      if tv < (v_cruise - 1e-3) and d < preview_ext_horizon:
-        if v_preview_ext <= 0.1 or tv < v_preview_ext:
-          v_preview_ext = float(tv)
-          d_preview_ext = float(d)
+    p1 = forward_points[target_idx - 1]
+    p2 = forward_points[target_idx]
+    p3 = forward_points[target_idx + 1]
+    return max(self._fp_calc_curvature(p1, p2, p3), 1e-6)
 
-      if tv >= v_ego - 1e-3:
-        continue
-
-      a_diff = (a_ego - _MAP_TARGET_ACCEL)
-      accel_t = abs(a_diff / _MAP_TARGET_JERK) if abs(_MAP_TARGET_JERK) > 1e-6 else 0.0
-      min_accel_v = self._map_calculate_velocity(accel_t, _MAP_TARGET_JERK, a_ego, v_ego)
-
-      max_d = 0.0
-      if tv > min_accel_v:
-        qa = 0.5 * _MAP_TARGET_JERK
-        qb = a_ego
-        qc = v_ego - tv
-        disc = qb * qb - 4 * qa * qc
-        if disc < 0.0 or abs(qa) < 1e-9:
-          continue
-        sqrt_disc = math.sqrt(disc)
-        t_a = (-qb - sqrt_disc) / (2 * qa)
-        t_b = (-qb + sqrt_disc) / (2 * qa)
-        t = t_a if t_a > 0.0 else t_b
-        if t <= 0.0 or math.isnan(t) or math.isinf(t):
-          continue
-        max_d += self._map_calculate_distance(t, _MAP_TARGET_JERK, a_ego, v_ego)
-      else:
-        max_d += self._map_calculate_distance(accel_t, _MAP_TARGET_JERK, a_ego, v_ego)
-        t = abs((min_accel_v - tv) / _MAP_TARGET_ACCEL) if abs(_MAP_TARGET_ACCEL) > 1e-6 else 0.0
-        max_d += self._map_calculate_distance(t, 0.0, _MAP_TARGET_ACCEL, min_accel_v)
-
-      if d < max_d + tv * _MAP_TARGET_OFFSET_S:
-        try:
-          tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
-          tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
-        except Exception:
-          tlat = 0.0
-          tlon = 0.0
-        valid_velocities.append((float(tv), d, float(tlat), float(tlon)))
-
-    # 4) Lock map target until passed (prevents jitter/early release due to GPS/path noise).
-    lock_d = None
-    if self._map_lock_v > 0.1 and forward_points:
-      for i, target_velocity in enumerate(forward_points):
-        if self._map_heading_valid and (not bool(forward_ahead[i])):
-          continue
-        try:
-          tlat = float(target_velocity.get("latitude", target_velocity.get("lat", 0.0)))
-          tlon = float(target_velocity.get("longitude", target_velocity.get("lon", target_velocity.get("lng", 0.0))))
-          tv = float(target_velocity.get("velocity", target_velocity.get("speed", 0.0)))
-        except Exception:
-          continue
-        if tv > 70.0:
-          tv *= CV.KPH_TO_MS
-        if (abs(tlat - self._map_lock_lat) < 1e-6 and abs(tlon - self._map_lock_lon) < 1e-6 and
-            abs(float(tv) - float(self._map_lock_v)) < 1e-3):
-          lock_d = float(forward_distances[i])
-          break
-
-    v_target = 0.0
-    d_target = 0.0
-    if valid_velocities:
-      cand_v, cand_d, cand_lat, cand_lon = min(valid_velocities, key=lambda x: x[0])
-      v_target = float(cand_v)
-      d_target = float(cand_d)
-      self._map_lock_v = float(cand_v)
-      self._map_lock_lat = float(cand_lat)
-      self._map_lock_lon = float(cand_lon)
-    elif lock_d is not None:
-      v_target = float(self._map_lock_v)
-      d_target = float(lock_d)
-    else:
-      # Clear stale lock
-      self._map_lock_v = 0.0
-      self._map_lock_lat = 0.0
-      self._map_lock_lon = 0.0
-
-    v_preview = float(v_preview_ext) if v_preview_ext > 0.1 else 0.0
-
-    # If no decel target is active, fall back to "in-curve hold" cap.
-    if v_target <= 0.1 and v_hold > 0.1:
-      self._map_preview_v = 0.0
-      return float(v_hold), 0.0
-    if v_target <= 0.1 and v_preview > 0.1:
-      # Smooth preview cap to reduce jitter and step-like behavior:
-      # - Tighten immediately (safety).
-      # - Relax slowly (comfort + avoid accelerate/decelerate oscillations).
-      try:
-        v_min = float(v_preview)
-      except Exception:
-        v_min = 0.0
-
-      # Distance-based preview cap: "what max speed can we hold *now* and still comfortably reach v_min by d_min".
-      d_min = float(d_preview_ext) if math.isfinite(float(d_preview_ext)) else 0.0
-      d_use = max(d_min - v_ego * _MAP_TARGET_OFFSET_S, 1.0)
-      a_preview = max(0.1, abs(float(_MAP_TARGET_ACCEL)))
-      v_cap = 0.0
-      if v_min > 0.1 and math.isfinite(v_min):
-        v_cap = math.sqrt(max(0.0, v_min * v_min + 2.0 * a_preview * d_use))
-        if v_cruise > 0.1 and math.isfinite(v_cruise):
-          v_cap = min(float(v_cruise), float(v_cap))
-
-      if self._map_preview_v <= 0.1 or not math.isfinite(self._map_preview_v):
-        self._map_preview_v = float(v_cap)
-      elif math.isfinite(v_cap) and v_cap > 0.1:
-        if v_cap < self._map_preview_v:
-          self._map_preview_v = float(v_cap)
-        else:
-          tau_s = 2.0
-          alpha = float(self.dt / (tau_s + self.dt)) if self.dt > 0.0 else 0.0
-          self._map_preview_v = float(self._map_preview_v + (v_cap - self._map_preview_v) * alpha)
-      return float(self._map_preview_v), 0.0
-
-    self._map_preview_v = 0.0
-    if v_target <= 0.1:
-      return 0.0, 0.0
-
-    # Only request decel when we're above the target speed; otherwise it's a pure speed cap.
-    if v_target >= v_ego - 1e-3:
-      return float(v_target), 0.0
-
-    # At highway speeds, ignore extremely close targets to avoid hard braking on stale/behind points.
-    # Vision curve speed remains a parallel safety net for last-second slowdowns.
-    if (float(v_ego) > 15.0) and (float(d_target) < 10.0):
-      return 0.0, 0.0
-
-    d_use = max(d_target - v_ego * _MAP_TARGET_OFFSET_S, 1.0)
-    required_decel = (v_target ** 2 - v_ego ** 2) / (2.0 * d_use)
-    required_decel = min(0.0, float(required_decel))
-
-    # Always request *some* decel once map says it's time to slow down.
-    # Cap by the same comfort limit as the vision curve controller.
-    decel_cap = self._lincoln_curve_config().get("decel_max", -3.2)
-    # Fade out the minimum decel as we approach the target speed to avoid a hard "-0.30 -> 0" step.
-    dv = max(0.0, float(v_ego - v_target))
-    min_decel = -0.30 * min(1.0, dv / 2.0)  # 0..-0.30 for dv in [0..2] m/s
-    map_a_target = max(float(decel_cap), min(float(min_decel), required_decel))
-
-    # Smooth map decel engagement to avoid a sudden "stab" on first activation.
-    # Tighten (more negative) with a jerk limit, relax slowly to reduce oscillations.
-    prev_a = float(self._map_a_target_filtered) if math.isfinite(float(self._map_a_target_filtered)) else 0.0
-    raw_a = float(map_a_target)
-    if raw_a < prev_a:
-      max_jerk_down = 2.0  # m/s^3
-      step = float(max_jerk_down) * float(self.dt)
-      filt_a = max(raw_a, prev_a - step)
-    else:
-      tau_s = 0.8
-      alpha = float(self.dt / (tau_s + self.dt)) if self.dt > 0.0 else 1.0
-      filt_a = prev_a + (raw_a - prev_a) * alpha
-
-    self._map_a_target_filtered = float(filt_a)
-    return float(v_target), float(self._map_a_target_filtered)
-
-  @staticmethod
-  def parse_model(model_msg):
-    if (len(model_msg.position.x) == ModelConstants.IDX_N and
-      len(model_msg.velocity.x) == ModelConstants.IDX_N and
-      len(model_msg.acceleration.x) == ModelConstants.IDX_N):
-      x = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.position.x)
-      v = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.velocity.x)
-      a = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.acceleration.x)
-      j = np.zeros(len(T_IDXS_MPC))
-    else:
-      x = np.zeros(len(T_IDXS_MPC))
-      v = np.zeros(len(T_IDXS_MPC))
-      a = np.zeros(len(T_IDXS_MPC))
-      j = np.zeros(len(T_IDXS_MPC))
-    if len(model_msg.meta.disengagePredictions.gasPressProbs) > 1:
-      throttle_prob = model_msg.meta.disengagePredictions.gasPressProbs[1]
-    else:
-      throttle_prob = 1.0
-    return x, v, a, j, throttle_prob
-
-  def _apply_lincoln_curve_speed(self, sm, accel_clip, v_cruise: float, log_enabled: bool):
-    """
-    Ford/Lincoln 专用弯道减速（更稳健的前瞻 + 滞回）：
-    - 取模型曲率在前方窗口内的最大值并平滑
-    - 以舒适侧向加速度上限计算目标速度，带进入/退出滞回，避免出口抖动
-    - 提前按照等效减速度收紧纵向上限（可能为负）实现预减速
-    """
-    model = sm['modelV2']
-    car_state = sm['carState']
-    v_ego = car_state.vEgo
-    self.curve_a_target = 0.0
-
-    # 基础检查
-    if len(model.position.x) != ModelConstants.IDX_N or len(model.orientationRate.z) != ModelConstants.IDX_N:
-      if log_enabled:
-        self._log_curve(reason="model_invalid")
-      self.curve_v_target = None
-      return accel_clip, v_cruise
-    if v_ego < 1.0:
-      if log_enabled:
-        self._log_curve(reason="low_speed", v=v_ego)
-      self.curve_v_target = None
-      return accel_clip, v_cruise
-
-    # 取 MPC 时间轴上的预测值
-    v_pred = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.velocity.x)
-    turn_rates = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.orientationRate.z)
-    positions = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model.position.x)
-
-    cfg = self._lincoln_curve_config()
-
-    # 计算曲率，并截断到车辆可下发的信号范围
-    v_denom = np.clip(v_pred, max(1.0, v_ego * 0.7), 100.0)
-    curvatures = np.abs(turn_rates / v_denom)
-    curvatures = np.clip(curvatures, 0.0, 0.02)  # Ford 非 CAN FD 信号上限
-    window_mask = positions <= cfg["window_m"]  # 关注前方窗口
-    if not np.any(window_mask):
-      if log_enabled:
-        self._log_curve(reason="no_window_points")
-      self.curve_v_target = None
-      return accel_clip, v_cruise
-
-    k_window = curvatures[window_mask]
-    pos_window = positions[window_mask]
-    k_max = float(np.max(k_window))
-    critical_idx = int(np.argmax(k_window))
-    critical_distance = float(pos_window[critical_idx])
-    k_p80 = float(np.quantile(k_window, 0.8)) if k_window.size else 0.0
-    # 原始模型曲率（未截断）与粗略置信度（std 或 0）
-    k_window_raw = np.abs(turn_rates / v_denom)[window_mask]
-    k_model_max = float(np.max(k_window_raw)) if k_window_raw.size else 0.0
-    try:
-      orient_std = getattr(model.orientationRateStd, "z", [])
-      k_std_window = np.abs(np.array(orient_std)) / v_denom
-      k_model_std = float(np.max(k_std_window[window_mask])) if len(k_std_window) == len(v_pred) else 0.0
-    except Exception:
-      k_model_std = 0.0
-
-    if k_max < 1e-4 or critical_distance < 5.0:
-      if log_enabled:
-        self._log_curve(reason="k_too_small", k_max=k_max, dist=critical_distance, v=v_ego)
-      self.curve_v_target = None
-      return accel_clip, v_cruise
-
-    # 平滑曲率，进入/退出滞回，减弱抖动
-    alpha = 0.6
-    self.curve_k_smooth = alpha * k_max + (1 - alpha) * self.curve_k_smooth
-    k_enter = cfg["k_enter"]
-    k_exit = cfg["k_exit"]
-    enter_now = np.any(k_window >= k_enter)
-
-    if self.curve_active:
-      if self.curve_k_smooth < k_exit:
-        # 退出滞回：计时后再退出，避免出口抖动
-        self.curve_exit_timer += self.dt
-        if self.curve_exit_timer > cfg["exit_h"]:
-          self.curve_active = False
-          self.curve_exit_timer = 0.0
-      else:
-        self.curve_exit_timer = 0.0
-    else:
-      if enter_now or self.curve_k_smooth >= k_enter:
-        self.curve_active = True
-        self.curve_exit_timer = 0.0
-
-    if not self.curve_active:
-      if log_enabled:
-        self._log_curve(reason="below_enter", k=k_max, k_smooth=self.curve_k_smooth, v=v_ego)
-      self.curve_v_target = None
-      self.curve_a_target = 0.0
-      return accel_clip, v_cruise
-
-    # 目标侧向加速度上限（舒适），带安全系数
-    a_lat_limit = cfg["a_lat"]
-    v_limit = math.sqrt(a_lat_limit / max(self.curve_k_smooth, 1e-4))
-
-    # 只有当弯道目标速度会限制用户的巡航设定时才介入（与 HUD 图标条件一致）。
-    if v_cruise <= 0.1 or v_limit >= v_cruise - 1e-3:
-      if log_enabled:
-        self._log_curve(reason="not_limiting_v_cruise", v=v_ego, v_limit=v_limit, v_cruise=v_cruise, k=self.curve_k_smooth)
-      self.curve_v_target = None
-      self.curve_a_target = 0.0
-      return accel_clip, v_cruise
-
-    # 初始化一个“弯道期间的 v_cruise 上限”，确保图标出现时立即开始缓慢减速
-    if self.curve_v_target is None or not math.isfinite(self.curve_v_target):
-      self.curve_v_target = min(v_cruise, max(v_limit, v_ego))
-
-    # 选取触发距离：优先首个超过阈值的点，否则用最大值位置；附加累积弯度提前触发
-    trigger_distance = critical_distance
-    trigger_curv = k_max
-    trigger_type = "max"
-    trigger_mask = k_window >= k_enter
-    if np.any(trigger_mask):
-      first_idx = int(np.argmax(trigger_mask))
-      trigger_distance = float(pos_window[first_idx])
-      trigger_curv = float(k_window[first_idx])
-      trigger_type = "first_k"
-    # 累积弯度/航向变化触发：积分 |k|·ds，随速降低阈值
-    if len(pos_window) > 1:
-      ds = np.diff(pos_window, prepend=pos_window[0])
-      acc_ds = np.cumsum(np.abs(k_window) * ds)
-      bend_cum = float(acc_ds[-1])
-    else:
-      acc_ds = np.array([])
-      bend_cum = 0.0
-    bend_thresh = float(np.deg2rad(np.interp(v_ego, [0., 25., 40.], [5.0, 4.0, 3.0])))  # 随速减小
-    if bend_cum >= bend_thresh and bend_thresh > 0.0 and acc_ds.size:
-      idx_bend = int(np.argmax(acc_ds >= bend_thresh))
-      trigger_distance = float(pos_window[idx_bend])
-      trigger_curv = float(k_window[idx_bend])
-      trigger_type = "bend"
-    # 预留距离（包含系统延迟补偿）：
-    # - 过去用 `max(trigger_distance, v_ego*1.5)` 会在“弯道很近”时把距离人为放大，导致减速过晚/不够。
-    # - 这里用一个小的时间偏移把有效距离收紧，优先保证安全（避免高速入弯冲出车道）。
-    d_use = max(trigger_distance - v_ego * 0.7, 1.0)
-
-    # 等效减速度：a = (v_f^2 - v_i^2) / (2*d_use)
-    required_decel = 0.0
-    decel_cap = cfg["decel_max"]
-    if v_ego > v_limit + 1e-3:
-      required_decel = (v_limit ** 2 - v_ego ** 2) / max(2 * d_use, 1.0)
-      # 保底减速：即使距离很远，也要开始“轻微收油/缓刹”，否则容易出现前段太软、后段突然急刹的体感。
-      dv = max(0.0, float(v_ego - v_limit))
-      min_decel = -0.30 * min(1.0, dv / 2.0)  # 0..-0.30 for dv in [0..2] m/s
-      required_decel = min(float(required_decel), float(min_decel))
-      required_decel = max(float(required_decel), float(decel_cap))
-      self.curve_a_target = float(required_decel)
-
-      # 让 v_cruise 上限按 required_decel 逐步下降，图标出现即开始“慢慢减速”
-      self.curve_v_target = max(v_limit, self.curve_v_target + required_decel * self.dt)
-
-    # 应用弯道目标速度上限
-    v_cruise = min(v_cruise, float(self.curve_v_target))
-
-    mpc_a_max_min = float("nan")
-
-    if log_enabled:
-      curv_cmd = getattr(sm['carControl'].actuators, "curvature", 0.0) if sm['carControl'].actuators is not None else 0.0
-      accel_cmd = getattr(sm['carControl'].actuators, "accel", 0.0) if sm['carControl'].actuators is not None else 0.0
-      curv_current = - (car_state.yawRate if hasattr(car_state, "yawRate") else 0.0) / max(v_ego, 0.1)
-      steer_torque = getattr(car_state, "steeringTorque", 0.0)
-      steer_fault_temp = getattr(car_state, "steerFaultTemporary", False)
-      steer_fault_perm = getattr(car_state, "steerFaultPermanent", False)
-      sensors_invalid = getattr(car_state, "vehicleSensorsInvalid", False)
-      steer_override = getattr(car_state, "steeringPressed", False)
-      ctrl_active = getattr(sm['controlsState'], "active", False)
-      ctrl_long_active = getattr(sm['controlsState'], "longActive", False)
-      ctrl_lat_active = getattr(sm['controlsState'], "latActive", False)
-      ctrl_alert_type = getattr(sm['controlsState'], "alertType", 0)
-      ctrl_alert_size = getattr(sm['controlsState'], "alertSize", 0)
-      ctrl_alert_sound = getattr(sm['controlsState'], "alertSound", 0)
-      cs_enabled = getattr(sm['carState'].cruiseState, "enabled", False)
-      cs_available = getattr(sm['carState'].cruiseState, "available", False)
-      cs_speed = getattr(sm['carState'].cruiseState, "speed", 0.0)
-      self._log_curve({
-        "reason": "active",
-        "v_ego": v_ego,
-        "v_limit": v_limit,
-        "k_smooth": self.curve_k_smooth,
-        "k_max": k_max,
-        "k_model_max": k_model_max,
-        "k_model_std": k_model_std,
-        "k_enter": k_enter,
-        "k_exit": k_exit,
-        "k_p80": k_p80,
-        "distance": critical_distance,
-        "trigger_distance": trigger_distance,
-        "trigger_curv": trigger_curv,
-        "trigger_type": trigger_type,
-        "bend_cum": bend_cum,
-        "bend_thresh": bend_thresh,
-        "d_use": d_use,
-        "required_decel": required_decel,
-        "accel_clip_max": accel_clip[1],
-        "yaw_rate": car_state.yawRate if hasattr(car_state, "yawRate") else 0.0,
-        "steer_angle": car_state.steeringAngleDeg if hasattr(car_state, "steeringAngleDeg") else 0.0,
-        "lat_active": getattr(sm['controlsState'], "latActive", False),
-        "alerts": getattr(sm['controlsState'], "alertText1", "") if hasattr(sm['controlsState'], "alertText1") else "",
-        "curv_cmd": curv_cmd,
-        "curv_current": curv_current,
-        "steer_pressed": steer_override,
-        "gas_pressed": getattr(car_state, "gasPressed", False),
-        "brake_pressed": getattr(car_state, "brakePressed", False),
-        "accel_cmd": accel_cmd,
-        "accel_actual": getattr(car_state, "aEgo", 0.0),
-        "mpc_a_max_min": mpc_a_max_min,
-        "v_desired": self.v_desired_filter.x,
-        "v_plan0": self.v_desired_trajectory[0] if len(self.v_desired_trajectory) else 0.0,
-        "steer_torque": steer_torque,
-        "steer_fault_temp": steer_fault_temp,
-        "steer_fault_perm": steer_fault_perm,
-        "sensors_invalid": sensors_invalid,
-        "ctrl_active": ctrl_active,
-        "ctrl_long_active": ctrl_long_active,
-        "ctrl_lat_active": ctrl_lat_active,
-        "ctrl_alert_type": ctrl_alert_type,
-        "ctrl_alert_size": ctrl_alert_size,
-        "ctrl_alert_sound": ctrl_alert_sound,
-        "cs_enabled": cs_enabled,
-        "cs_available": cs_available,
-        "cs_speed": cs_speed,
-        "a_lat_limit": a_lat_limit,
-        "window_m": cfg["window_m"],
-        "exit_h": cfg["exit_h"],
-        "decel_setting": decel_cap,
-        "v_map_target": getattr(self, "_map_v_target", 0.0),
-        "map_a_target": getattr(self, "_map_a_target", 0.0),
-        "map_active": getattr(self, "_map_turn_limit_active", False),
-        "map_data": getattr(self, "_map_data_available", False),
-        "map_points": getattr(self, "_map_points", 0),
-        "map_min_dist": getattr(self, "_map_min_dist_m", 0.0),
-      })
-    return accel_clip, v_cruise
-
-  def _log_curve(self, data: dict = None, reason: str = "", force: bool = False, **kwargs):
-    now = time.monotonic()
-    if not force and now - self.last_curve_log_t < 0.5:
-      return
-    self.last_curve_log_t = now
-    try:
-      os.makedirs(self.curve_log_dir, exist_ok=True)
-      ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-      if data is None:
-        data = {}
-      if kwargs:
-        data.update(kwargs)
-      if reason:
-        data["reason"] = reason
-      headers = [
-        "timestamp",
-        "reason",
-        "v_ego(m/s)",
-        "v_limit(m/s)",
-        "k_smooth",
-        "k_max",
-        "k_model_max",
-        "k_model_std",
-        "k_enter",
-        "k_exit",
-        "k_p80",
-        "a_lat_limit(m/s^2)",
-        "window_m",
-        "exit_h(s)",
-        "decel_setting(m/s^2)",
-        "distance_to_peak(m)",
-        "trigger_distance(m)",
-        "trigger_curv",
-        "trigger_type",
-        "bend_cum(rad)",
-        "bend_thresh(rad)",
-        "d_use(m)",
-        "required_decel(m/s^2)",
-        "accel_clip_max(m/s^2)",
-        "mpc_a_max_min(m/s^2)",
-        "curv_cmd",
-        "curv_current",
-        "accel_cmd",
-        "accel_actual",
-        "v_desired",
-        "v_plan0",
-        "yaw_rate",
-        "steer_angle",
-        "steer_torque",
-        "steer_pressed",
-        "gas_pressed",
-        "brake_pressed",
-        "steer_fault_temp",
-        "steer_fault_perm",
-        "sensors_invalid",
-        "lat_active",
-        "ctrl_active",
-        "ctrl_long_active",
-        "ctrl_lat_active",
-        "ctrl_alert_type",
-        "ctrl_alert_size",
-        "ctrl_alert_sound",
-        "cs_enabled",
-        "cs_available",
-        "cs_speed",
-        "alerts",
-        "v_map_target(m/s)",
-        "map_a_target(m/s^2)",
-        "map_active",
-        "map_data",
-        "map_points",
-        "map_min_dist(m)",
-      ]
-      values = [
-        ts,
-        data.get('reason', ''),
-        f"{data.get('v_ego', 0):.2f}",
-        f"{data.get('v_limit', 0):.2f}",
-        f"{data.get('k_smooth', 0):.5f}",
-        f"{data.get('k_max', 0):.5f}",
-        f"{data.get('k_model_max',0):.5f}",
-        f"{data.get('k_model_std',0):.5f}",
-        f"{data.get('k_enter',0):.5f}",
-        f"{data.get('k_exit',0):.5f}",
-        f"{data.get('k_p80',0):.5f}",
-        f"{data.get('a_lat_limit',0):.2f}",
-        f"{data.get('window_m',0):.1f}",
-        f"{data.get('exit_h',0):.2f}",
-        f"{data.get('decel_setting',0):.2f}",
-        f"{data.get('distance', 0):.1f}",
-        f"{data.get('trigger_distance',0):.1f}",
-        f"{data.get('trigger_curv',0):.5f}",
-        data.get('trigger_type',""),
-        f"{data.get('bend_cum',0):.5f}",
-        f"{data.get('bend_thresh',0):.5f}",
-        f"{data.get('d_use',0):.1f}",
-        f"{data.get('required_decel', 0):.2f}",
-        f"{data.get('accel_clip_max', 0):.2f}",
-        f"{data.get('mpc_a_max_min', 0):.2f}",
-        f"{data.get('curv_cmd',0):.5f}",
-        f"{data.get('curv_current',0):.5f}",
-        f"{data.get('accel_cmd',0):.2f}",
-        f"{data.get('accel_actual',0):.2f}",
-        f"{data.get('v_desired',0):.2f}",
-        f"{data.get('v_plan0',0):.2f}",
-        f"{data.get('yaw_rate', 0):.3f}",
-        f"{data.get('steer_angle', 0):.2f}",
-        f"{data.get('steer_torque',0):.2f}",
-        str(data.get('steer_pressed', False)),
-        str(data.get('gas_pressed', False)),
-        str(data.get('brake_pressed', False)),
-        str(data.get('steer_fault_temp', False)),
-        str(data.get('steer_fault_perm', False)),
-        str(data.get('sensors_invalid', False)),
-        str(data.get('lat_active', False)),
-        str(data.get('ctrl_active', False)),
-        str(data.get('ctrl_long_active', False)),
-        str(data.get('ctrl_lat_active', False)),
-        str(data.get('ctrl_alert_type', 0)),
-        str(data.get('ctrl_alert_size', 0)),
-        str(data.get('ctrl_alert_sound', 0)),
-        str(data.get('cs_enabled', False)),
-        str(data.get('cs_available', False)),
-        f"{data.get('cs_speed', 0.0):.2f}",
-        f"\"{data.get('alerts','')}\"",
-        f"{data.get('v_map_target', 0.0):.2f}",
-        f"{data.get('map_a_target', 0.0):.2f}",
-        str(data.get('map_active', False)),
-        str(data.get('map_data', False)),
-        str(data.get('map_points', 0)),
-        f"{data.get('map_min_dist', 0.0):.1f}",
-      ]
-      line = ",".join(values) + "\n"
-      fname = os.path.join(self.curve_log_dir, time.strftime("curve_%Y%m%d.log", time.localtime()))
-      write_header = not os.path.exists(fname) or os.path.getsize(fname) == 0
-      with open(fname, "a", encoding="utf-8") as f:
-        if write_header:
-          f.write(",".join(headers) + "\n")
-        f.write(line)
-    except Exception as e:
-      cloudlog.error(f"curve log failed: {e}")
-
-  def update(self, sm, dp_flags = 0, lincoln_curve_speed: bool = False, lincoln_curve_log: bool = False,
-             lincoln_osm_realtime_cruise: bool = False):
+  def update(self, sm, dp_flags = 0, curve_speed_control: bool = False):
     mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
 
     if dp_flags & DPFlags.AEM:
@@ -929,125 +350,126 @@ class LongitudinalPlanner:
       self._obstacle_present_since = None
     self._obstacle_present_prev = obstacle_present
 
-    # Map-based turn speed target (priority over vision curve limit when it actively limits v_cruise)
-    self._map_v_target = 0.0
-    self._map_a_target = 0.0
-    self._map_turn_limit_active = False
-    self._map_data_available = False
-    self._map_points = 0
-    self._map_min_dist_m = 0.0
+    controls_enabled = bool(getattr(sm['controlsState'], "enabled", False))
+    curve_speed_control = bool(curve_speed_control)
 
-    v_map_target = 0.0
-    map_a_target = 0.0
-    map_turn_limit_active = False
-    map_data_available = False
-    if lincoln_osm_realtime_cruise and v_cruise > 0.1 and getattr(sm['selfdriveState'], "enabled", False):
-      # GPS quality gating: when GNSS is unstable (multipath / wrong-road), ignore map speed targets to prevent
-      # phantom braking. mapd publishes a filtered "GPSQualityOK" into /dev/shm/params.
-      gps_quality_ok = True
+    v_cruise_cluster = float(v_cruise)
+    try:
+      v_cruise_cluster = float(max(float(sm['controlsState'].vCruiseCluster) * CV.KPH_TO_MS, v_cruise))
+    except Exception:
+      v_cruise_cluster = float(v_cruise)
+    v_cruise_diff = float(v_cruise_cluster - v_cruise)
+
+    gps_position = None
+    llk = None
+    try:
+      llk = sm["liveLocationKalman"]
+    except Exception:
+      llk = None
+
+    if llk is not None:
       try:
-        gps_quality_ok = bool(self._params_memory.get_bool("GPSQualityOK"))
+        localizer_valid = (llk.status == log.LiveLocationKalman.Status.valid) and llk.positionGeodetic.valid
+        if llk.gpsOK and localizer_valid:
+          gps_position = {
+            "latitude": float(llk.positionGeodetic.value[0]),
+            "longitude": float(llk.positionGeodetic.value[1]),
+            "bearing": math.degrees(float(llk.calibratedOrientationNED.value[2])),
+          }
       except Exception:
-        gps_quality_ok = True
+        gps_position = None
 
-      lat_lon: tuple[float, float] | None = None
-      gps_for_heading = None
-      if gps_quality_ok:
-        for service in ("gpsLocationExternal", "gpsLocation"):
-          if service not in sm.data:
-            continue
-          gps = sm[service]
-          if not getattr(gps, "hasFix", False):
-            continue
-          try:
-            lat = float(gps.latitude)
-            lon = float(gps.longitude)
-          except Exception:
-            continue
-          if not (math.isfinite(lat) and math.isfinite(lon)):
-            continue
-          lat_lon = (lat, lon)
-          gps_for_heading = gps
-          break
+    if gps_position is not None:
+      try:
+        self._params_memory.put("LastGPSPosition", json.dumps(gps_position))
+      except Exception:
+        pass
+    else:
+      try:
+        self._params_memory.remove("LastGPSPosition")
+      except Exception:
+        pass
 
-        if lat_lon is not None:
-          # Heading estimate for filtering "behind" / mismatched map points (prevents phantom braking on highways).
-          # Prefer GPS bearing, then velocity direction, finally delta-position.
-          try:
-            lat = float(lat_lon[0])
-            lon = float(lat_lon[1])
-            heading_updated = False
-            heading_x = float(self._map_heading_x)
-            heading_y = float(self._map_heading_y)
+    curve_sensitivity = float(_FP_CURVE_SENSITIVITY)
+    turn_aggressiveness = float(_FP_TURN_AGGRESSIVENESS)
+    fp_map_enabled = False
+    fp_vision_enabled = False
+    fp_mtsc_check = bool(_FP_MTSCC_CURVATURE_CHECK)
+    if curve_speed_control:
+      fp_cfg = self._fp_curve_config()
+      curve_sensitivity = float(fp_cfg.get("curve_sensitivity", curve_sensitivity))
+      turn_aggressiveness = float(fp_cfg.get("turn_aggressiveness", turn_aggressiveness))
+      fp_map_enabled = bool(fp_cfg.get("map_enabled", False))
+      fp_vision_enabled = bool(fp_cfg.get("vision_enabled", False))
+      fp_mtsc_check = bool(fp_cfg.get("mtsc_curvature_check", fp_mtsc_check))
 
-            bearing = None
-            if gps_for_heading is not None and float(v_ego) > 1.0:
-              try:
-                b = float(getattr(gps_for_heading, "bearingDeg", float("nan")))
-                if math.isfinite(b):
-                  bearing = b
-              except Exception:
-                pass
+    road_curvature = 0.0
+    road_curvature_detected = False
+    if curve_speed_control:
+      road_curvature = self._fp_calc_road_curvature(sm['modelV2'], v_ego)
+      self._fp_road_curvature = float(road_curvature)
+      try:
+        road_curvature_detected = (1.0 / abs(road_curvature)) ** 0.5 < v_ego > _FP_CRUISING_SPEED
+      except Exception:
+        road_curvature_detected = False
+      road_curvature_detected = bool(road_curvature_detected and not (sm['carState'].leftBlinker or sm['carState'].rightBlinker))
+      self._fp_road_curvature_detected = bool(road_curvature_detected)
+    else:
+      self._fp_road_curvature = 0.0
+      self._fp_road_curvature_detected = False
 
-              if bearing is None:
-                try:
-                  vned = getattr(gps_for_heading, "vNED", None)
-                  if vned is not None and len(vned) >= 2:
-                    v_n = float(vned[0])
-                    v_e = float(vned[1])
-                    if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
-                      bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
-                except Exception:
-                  pass
-
-              if bearing is None:
-                try:
-                  v_n = float(getattr(gps_for_heading, "vN", float("nan")))
-                  v_e = float(getattr(gps_for_heading, "vE", float("nan")))
-                  if math.isfinite(v_n) and math.isfinite(v_e) and (abs(v_n) + abs(v_e) > 0.2):
-                    bearing = (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
-                except Exception:
-                  pass
-
-            if bearing is not None:
-              br = float(bearing) * _MAP_TO_RADIANS
-              hx = math.sin(br)
-              hy = math.cos(br)
-              if math.isfinite(hx) and math.isfinite(hy):
-                heading_x, heading_y = float(hx), float(hy)
-                heading_updated = True
-
-            if not heading_updated and math.isfinite(float(self._map_prev_lat)) and math.isfinite(float(self._map_prev_lon)):
-              dx, dy = self._map_local_xy(float(self._map_prev_lat), float(self._map_prev_lon), lat, lon)
-              norm = math.hypot(dx, dy)
-              if math.isfinite(norm) and norm > 2.0:  # >2m
-                heading_x, heading_y = float(dx / norm), float(dy / norm)
-                heading_updated = True
-
-            if heading_updated:
-              self._map_heading_x = float(heading_x)
-              self._map_heading_y = float(heading_y)
-              self._map_heading_valid = True
-
-            self._map_prev_lat = float(lat)
-            self._map_prev_lon = float(lon)
-          except Exception:
-            pass
-
-          try:
-            v_map_target, map_a_target = self._map_turn_target_speed(v_ego, sm['carState'].aEgo, lat_lon[0], lat_lon[1], v_cruise)
-            map_data_available = len(self._map_target_velocities) > 0
-          except Exception:
-            v_map_target = 0.0
-            map_a_target = 0.0
-            map_turn_limit_active = False
-            map_data_available = False
-
-    self._map_v_target = float(v_map_target)
-    self._map_a_target = float(map_a_target)
+    target_velocities = []
+    map_data_available = False
+    if curve_speed_control and fp_map_enabled:
+      target_velocities = self._map_target_velocities_list()
+      map_data_available = bool(target_velocities)
     self._map_data_available = bool(map_data_available)
-    self._map_points = int(len(self._map_target_velocities)) if map_data_available else 0
-    self._map_turn_limit_active = bool(v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3))
+    self._map_points = len(target_velocities) if map_data_available else 0
+
+    map_curv = 1e-6
+    if map_data_available and gps_position is not None:
+      map_curv = self._fp_map_curvature(gps_position["latitude"], gps_position["longitude"], v_ego, target_velocities)
+    else:
+      self._map_min_dist_m = 0.0
+
+    if not math.isfinite(float(self._fp_map_target)):
+      self._fp_map_target = float(v_cruise)
+    if not math.isfinite(float(self._fp_vision_target)):
+      self._fp_vision_target = float(v_cruise)
+
+    if curve_speed_control and fp_map_enabled and controls_enabled and v_ego > _FP_CRUISING_SPEED:
+      mtsc_active = self._fp_map_target < v_cruise
+      if road_curvature_detected and mtsc_active:
+        self._fp_map_target = float(self._fp_map_target)
+      elif not road_curvature_detected and fp_mtsc_check:
+        self._fp_map_target = float(v_cruise)
+      else:
+        map_speed = math.sqrt((_FP_TARGET_LAT_A * turn_aggressiveness) / (map_curv * curve_sensitivity))
+        self._fp_map_target = max(_FP_CRUISING_SPEED, float(map_speed))
+    else:
+      self._fp_map_target = float(v_cruise)
+
+    if curve_speed_control and fp_vision_enabled and controls_enabled and road_curvature_detected and v_ego > _FP_CRUISING_SPEED:
+      vtsc_speed = math.sqrt((_FP_TARGET_LAT_A * turn_aggressiveness) / (abs(road_curvature) * curve_sensitivity))
+      self._fp_vision_target = max(_FP_CRUISING_SPEED, float(vtsc_speed))
+    else:
+      self._fp_vision_target = float(v_cruise)
+
+    v_cruise_pre_curve = float(v_cruise)
+    if curve_speed_control:
+      targets = [self._fp_map_target, self._fp_vision_target, v_cruise_pre_curve]
+      v_cruise = min([target if target > _FP_CRUISING_SPEED else v_cruise_pre_curve for target in targets])
+
+    map_turn_limit_active = bool(curve_speed_control and self._fp_map_target > 0.1 and self._fp_map_target < (v_cruise_pre_curve - 1e-3))
+    vision_turn_limit_active = bool(curve_speed_control and self._fp_vision_target > 0.1 and self._fp_vision_target < (v_cruise_pre_curve - 1e-3))
+
+    self._fp_map_target = float(self._fp_map_target + v_cruise_diff)
+    self._fp_vision_target = float(self._fp_vision_target + v_cruise_diff)
+
+    self._map_v_target = float(self._fp_map_target)
+    self._map_a_target = 0.0
+    self._map_turn_limit_active = bool(map_turn_limit_active)
+    self.curve_v_target = float(self._fp_vision_target) if vision_turn_limit_active else None
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
@@ -1082,40 +504,6 @@ class LongitudinalPlanner:
     else:
       accel_clip = [ACCEL_MIN, ACCEL_MAX]
 
-    if lincoln_curve_speed:
-      accel_clip, v_cruise = self._apply_lincoln_curve_speed(sm, accel_clip, v_cruise, log_enabled=lincoln_curve_log)
-    else:
-      self.curve_v_target = None
-      self.curve_a_target = 0.0
-
-    # 重要状态变化/告警即时记录（不受节流影响）
-    if lincoln_curve_log:
-      cs = sm['carState']
-      ctrl = sm['controlsState']
-      alert_text = getattr(ctrl, "alertText1", "") if hasattr(ctrl, "alertText1") else ""
-      if (hasattr(ctrl, "latActive") and not ctrl.latActive) or alert_text:
-        curv_current = - (cs.yawRate if hasattr(cs, "yawRate") else 0.0) / max(cs.vEgo, 0.1)
-        self._log_curve({
-          "reason": "alert_or_lat_off",
-          "v_ego": cs.vEgo,
-          "k_current": curv_current,
-          "steer_torque": getattr(cs, "steeringTorque", 0.0),
-          "steer_pressed": getattr(cs, "steeringPressed", False),
-          "steer_fault_temp": getattr(cs, "steerFaultTemporary", False),
-          "steer_fault_perm": getattr(cs, "steerFaultPermanent", False),
-          "sensors_invalid": getattr(cs, "vehicleSensorsInvalid", False),
-          "alerts": alert_text,
-          "ctrl_active": getattr(ctrl, "active", False),
-          "ctrl_long_active": getattr(ctrl, "longActive", False),
-          "ctrl_lat_active": getattr(ctrl, "latActive", False),
-          "ctrl_alert_type": getattr(ctrl, "alertType", 0),
-          "ctrl_alert_size": getattr(ctrl, "alertSize", 0),
-          "ctrl_alert_sound": getattr(ctrl, "alertSound", 0),
-          "cs_enabled": getattr(cs.cruiseState, "enabled", False),
-          "cs_available": getattr(cs.cruiseState, "available", False),
-          "cs_speed": getattr(cs.cruiseState, "speed", 0.0),
-        }, force=True)
-
     if reset_state:
       self.v_desired_filter.x = v_ego
       # Clip aEgo to cruise limits to prevent large accelerations when becoming active
@@ -1132,47 +520,8 @@ class LongitudinalPlanner:
       clipped_accel_coast_interp = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [accel_clip[1], clipped_accel_coast])
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
 
-    # Map turn limit (raw): map is requesting a lower cruise cap than the current cruise target.
-    # NOTE: We later extend this with the rate-limited cap state so "release" is also smooth.
-    map_turn_limit_active_raw = v_map_target > 0.1 and v_map_target < (v_cruise - 1e-3)
-    map_turn_limit_active = bool(map_turn_limit_active_raw)
-
     if force_slow_decel:
       v_cruise = 0.0
-
-    # Smooth map speed caps to reduce "step-down" braking and RPM spikes on stock ACC.
-    # Tighten quickly, release slowly, and reset when disengaged.
-    if reset_state or (not lincoln_osm_realtime_cruise) or (not getattr(sm['selfdriveState'], "enabled", False)):
-      self._map_v_cap = float("nan")
-      map_turn_limit_active = False
-      self._map_turn_limit_active = False
-    else:
-      if not math.isfinite(float(self._map_v_cap)):
-        self._map_v_cap = float(v_cruise)
-
-      v_cruise_pre_cap = float(v_cruise)
-      v_cap_target = float(v_cruise_pre_cap)
-      if map_turn_limit_active_raw and float(v_map_target) > 0.1:
-        v_cap_target = float(min(v_cruise_pre_cap, float(v_map_target)))
-
-      # Use a conservative rate limit; map_a_target is filtered already and can be 0.0 during preview caps.
-      down_rate = float(np.interp(abs(float(map_a_target)), [0.0, 0.3, 1.5, 3.0], [0.8, 1.2, 2.0, 2.5]))  # m/s per second
-      up_rate = 0.6  # m/s per second
-      down_step = down_rate * float(self.dt)
-      up_step = up_rate * float(self.dt)
-
-      if v_cap_target < float(self._map_v_cap):
-        self._map_v_cap = max(v_cap_target, float(self._map_v_cap) - down_step)
-      else:
-        self._map_v_cap = min(v_cap_target, float(self._map_v_cap) + up_step)
-
-      # Apply cap for both engagement and release to avoid step changes.
-      if v_cruise_pre_cap > 0.1:
-        v_cruise = min(v_cruise_pre_cap, float(self._map_v_cap))
-
-      # "active" means the rate-limited map cap is currently limiting v_cruise (engaging, holding, or releasing).
-      map_turn_limit_active = bool(v_cruise_pre_cap > 0.1 and v_cruise > 0.1 and v_cruise < (v_cruise_pre_cap - 1e-3))
-      self._map_turn_limit_active = bool(map_turn_limit_active)
 
     dp_auto_avoid = self._params.get_bool("dp_lincoln_auto_avoid")
 
@@ -1267,14 +616,6 @@ class LongitudinalPlanner:
     else:
       output_a_target = min(output_a_target_mpc, output_a_target_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
-
-    # Ensure curve speed control actually requests decel when active.
-    # Limiting v_cruise alone can be too soft depending on planner mode and cruise clipping.
-    if lincoln_curve_speed and not long_control_off and self.curve_a_target < -1e-3:
-      output_a_target = min(output_a_target, float(self.curve_a_target))
-
-    if lincoln_osm_realtime_cruise and map_turn_limit_active and not long_control_off and map_a_target < -1e-3:
-      output_a_target = min(output_a_target, float(map_a_target))
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)

@@ -1,4 +1,4 @@
-# 林肯面板：HUD 显示增强（dp_lincoln_hud_enhanced）
+﻿# 林肯面板：HUD 显示增强（dp_lincoln_hud_enhanced）
 
 本功能是**纯 UI 可视化增强**：只改变 HUD 的绘制效果，不改变任何控制/规划逻辑。
 
@@ -134,47 +134,27 @@
 
 - `selfdrive/ui/onroad/augmented_road_view.py` → `_draw_border()`（边框颜色动态更新）
 
-### 2.5 弯道限速提示（1:1 复刻 FrogPilot 的曲线提示控件）
+### 2.5 弯道限速提示（FP 1:1）
 
-> 说明：这是“弯道限速（`dp_lincoln_curve_speed`）/地图实时巡航（`dp_lincoln_osm_realtime_cruise`）”的 HUD 可视化提示，**不依赖** `dp_lincoln_hud_enhanced` 开关（即：就算不启用 HUD 显示增强，只要弯道限速/地图限速在工作，这个提示也会出现）。
+> 说明：这是 `CurveSpeedControl` 的 HUD 可视化提示，不依赖 `dp_lincoln_hud_enhanced`。
+> 只要曲率限速正在收紧 `v_cruise`，提示就会显示。
 
 **显示内容**
-- 弯道图标（根据弯道方向选择左/右图标；加入方向去抖/滞回，避免轻微弯道/噪声导致左右来回抖动）
-- 上行：`前方弯道 xx m · 视觉/地图融合`（来源标记：当前“实际收紧巡航目标”的限速器）
-- 下行：`目标 xx km/h/mph`
+- 弯道方向图标（左/右）
+- 上行：`前方弯道 xx m · 地图融合 / 视觉`
+- 下行：`目标 xx km/h` / `mph`
 
-**显示条件（与 FrogPilot 一致：只在“预测会限速”时出现）**
-- `carParams.brand == "ford"`
-- 已设定巡航速度（左上角 `MAX` 有效数值）
-- `dp_lincoln_curve_speed == 1` **或** `dp_lincoln_osm_realtime_cruise == 1`
-- 预测弯道目标速度 `< 当前设定巡航速度`
+**显示条件**
+- `CurveSpeedControl=1`
+- `ShowCSCStatus=1`
+- 已设定巡航速度
+- `longitudinalPlan.curveSpeedSource` 为 1 或 2
+- `min(longitudinalPlan.speeds) < 当前设定巡航速度`
 
 **数据来源 / 计算**
-- 使用 `modelV2.position.x / modelV2.velocity.x / modelV2.orientationRate.z` 计算前方窗口内曲率峰值并平滑
-- 目标速度：`v_limit = sqrt(a_lat / k_smooth)`（`a_lat` 固定 1.8 m/s²）
-- 弯道距离：取前方窗口内**首次**曲率达到 `k_enter` 的 `position.x`（兜底：最大曲率点距离）
-- 地图融合直出（新增）：当 `longitudinalPlan.curveSpeedSource==2` 且 `min(longitudinalPlan.speeds) < 设定巡航速度` 时，直接用该最小速度作为“目标速度”，并在发布的 horizon 内估算“距离到最小速度点”（用于解决“地图正在限速但视觉曲率很轻微导致图标不出现”的问题）
-- 来源标记：来自 `longitudinalPlan.curveSpeedSource`
-  - `1=视觉`：视觉弯道限速正在收紧 `vCruise`
-  - `2=地图融合`：地图弯道限速正在收紧 `vCruise`（此时视觉提示仍在工作，但地图更保守，最终以地图为准）
-  - `0=无`：当前未收紧 `vCruise`（上行只显示 `前方弯道 xx m`，不追加来源标记）
-- 参数沿用弯道限速设置：`dp_lincoln_curve_window_m`、`dp_lincoln_curve_k_enter`
-
-**资源与代码位置**
-- 图标 PNG：左弯 `selfdrive/assets/icons/curve_speed.png`、右弯 `selfdrive/assets/icons/curveR_speed.png`（避免依赖纹理镜像）
-- 计算与绘制：`selfdrive/ui/onroad/hud_renderer.py`
-  - `_update_curve_speed_widget()`：生成目标速度/距离文本 + 方向
-  - `_draw_curve_speed_control()`：绘制图标与蓝色信息框（上：距离；下：目标速度）
-
-**HUD 位置（1:1 对齐 FrogPilot 的相对布局）**
-- 参考 FrogPilot：`curveSpeedRect.x = setSpeedRect.right() + UI_BORDER_SIZE`
-  - FrogPilot 参考文件：`frogpilot/ui/qt/onroad/frogpilot_annotated_camera.cc`（`paintCurveSpeedControl`）
-  - FrogPilot 图标资源：`frogpilot/assets/other_images/curve_speed.png`
-- 本仓库实现：
-  - 图标左上角：`x = set_speed_rect.x + set_speed_rect.width + UI_CONFIG.border_size`，`y = set_speed_rect.y`
-  - 容器尺寸：`widget_size = UI_CONFIG.button_size * 1.25`
-  - 蓝色信息框：`y + widget_size + 10`，高度 `100`（两行文字：前方弯道距离 + 目标速度）
-    - 宽度：按文本测量自动扩展（最小 `widget_size * 2`），避免长文案溢出到蓝框外（如 `前方弯道 xx m · 地图`）
+- 目标速度 / 距离：`longitudinalPlan.speeds`（预测 horizon 内最小值 + 距离估算）
+- 方向：`modelV2.orientationRate.z` 与 `modelV2.velocity.x` 计算曲率符号
+- 来源标记：`curveSpeedSource`（2=地图，1=视觉）
 
 ### 2.6 HUD 底部性能条（道路名称/逆地理）
 
@@ -197,8 +177,8 @@
 **关键代码**
 - 绘制：`selfdrive/ui/onroad/augmented_road_view.py` → `_draw_performance_info()` / `_get_road_location_text()`
 - 进程启动条件：`system/manager/process_config.py` → `mapd(...)`
-  - 下载离线地图进行中：始终运行
-  - 上路：开启 `dp_lincoln_osm_realtime_cruise` 或开启性能条（`dp_lincoln_perf_info_enabled`），或开启弯道限速（`dp_lincoln_curve_speed` 且离线地图存在）时运行
+  - 常驻运行（always_run=True）
+  - 离线地图存在时持续输出 `MapTargetVelocities`
 
 ## 3. 重要说明
 
@@ -273,3 +253,5 @@
 - 播放进程：`selfdrive/ui/soundd.py`
   - 订阅 `customReservedRawData0`，检测 `hazInPath` 从 `False→True` 的跃迁后播放一次
   - 仅在驾驶员未打灯、且车速 ≥ 10mph 时播放（避免无效/误提示）
+
+

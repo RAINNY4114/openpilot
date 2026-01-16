@@ -347,14 +347,6 @@ class OSMMapsLayout(Widget):
     )
     self._eta_item.set_visible(lambda: self._download_in_progress())
 
-    self._realtime_cruise_item = toggle_item(
-      title=lambda: tr("Realtime cruise mode"),
-      description=lambda: tr("Use offline maps for real-time cruise assistance (no navigation). Requires maps downloaded."),
-      initial_state=self._params.get_bool("dp_lincoln_osm_realtime_cruise"),
-      callback=lambda val: self._params.put_bool("dp_lincoln_osm_realtime_cruise", val),
-      enabled=lambda: self._offline_maps_exist(),
-    )
-
     self._remove_maps_item = button_item(
       title=lambda: tr("Remove Maps"),
       button_text=lambda: tr("REMOVE"),
@@ -390,7 +382,6 @@ class OSMMapsLayout(Widget):
       self._remove_maps_item,
       self._reset_downloader_item,
       self._storage_used_item,
-      self._realtime_cruise_item,
     ], line_separator=True, spacing=0)
 
     self._countries_scroller = Scroller(self._build_countries_items(), line_separator=False, spacing=0)

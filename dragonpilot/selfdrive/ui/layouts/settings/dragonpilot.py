@@ -139,13 +139,6 @@ class DragonpilotLayout(Widget):
       callback=lambda val: self._params.put_bool("dp_lat_road_edge_detection", val),
     )
 
-    self._toggles["dp_lat_cone_detection"] = toggle_item(
-      title=lambda: tr("Cone Detection (Experimental)"),
-      description=lambda: tr("Detect traffic cones ahead and publish results for UI/debug and future features."),
-      initial_state=self._params.get_bool("dp_lat_cone_detection"),
-      callback=lambda val: self._params.put_bool("dp_lat_cone_detection", val),
-    )
-
   def _lon_toggles(self):
     self._toggles["title_lon"] = simple_item(title=lambda: tr("### Longitudinal ###"))
 

@@ -69,40 +69,14 @@ def comma_connect(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not params.get_bool("dp_dev_disable_connect")
 
 def coned(started: bool, params: Params, CP: car.CarParams) -> bool:
-  # Run onroad for Ford/Lincoln.
-  # NOTE: HUD object markers and lane-occupancy cues depend on coned publishing `customReservedRawData0`.
-  # If coned is gated behind optional features, the UI will show only the default single lead box.
-  try:
-    return started and getattr(CP, "brand", "") == "ford"
-  except Exception:
+  # Run onroad when cone detection is enabled so HUD object markers and lane-occupancy cues have data.
+  if not started:
     return False
+  return bool(params.get_bool("dp_lat_cone_detection"))
 
 def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
-  # Run mapd when:
-  # - user requested an offline maps download, or
-  # - onroad realtime cruise mode is enabled, or
-  # - Lincoln performance overlay is enabled (HUD needs RoadName), or
-  # - Ford/Lincoln curve speed is enabled (so map features work without extra gating)
-  try:
-    params_memory = Params("/dev/shm/params")
-    if params_memory.get("OSMDownloadLocations"):
-      return True
-  except Exception:
-    pass
-
-  ford_curve_needs_mapd = False
-  try:
-    ford_curve_needs_mapd = (
-      getattr(CP, "brand", "") == "ford" and
-      params.get_bool("dp_lincoln_curve_speed") and
-      os.path.isdir("/data/media/0/osm/offline")
-    )
-  except Exception:
-    ford_curve_needs_mapd = False
-
-  return started and (params.get_bool("dp_lincoln_osm_realtime_cruise") or
-                      params.get_bool("dp_lincoln_perf_info_enabled") or
-                      ford_curve_needs_mapd)
+  # Align with FrogPilot behavior: mapd stays running so map data is always ready.
+  return True
 
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))

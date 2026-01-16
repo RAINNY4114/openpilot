@@ -22,7 +22,7 @@ def main():
   longitudinal_planner = LongitudinalPlanner(CP)
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance'])
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState',
-                           'gpsLocationExternal', 'gpsLocation',
+                           'liveLocationKalman',
                            'customReservedRawData0',
                            'modelV2', 'selfdriveState'],
                            poll='modelV2')
@@ -39,20 +39,8 @@ def main():
   dp_flags = refresh_dp_flags()
   last_flag_refresh_frame = 0
 
-  def lincoln_curve_speed_enabled() -> bool:
-    return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_speed")
-  def lincoln_curve_log_enabled() -> bool:
-    return CP.brand == "ford" and params.get_bool("dp_lincoln_curve_log")
-  def lincoln_osm_realtime_enabled() -> bool:
-    # Keep the explicit toggle, but also enable when curve speed is enabled so map-based curve previews
-    # don't require an extra "one-time" setting gate.
-    if CP.brand != "ford":
-      return False
-    if params.get_bool("dp_lincoln_osm_realtime_cruise"):
-      return True
-    if not params.get_bool("dp_lincoln_curve_speed"):
-      return False
-    return os.path.isdir("/data/media/0/osm/offline")
+  def curve_speed_control_enabled() -> bool:
+    return CP.openpilotLongitudinalControl and params.get_bool("CurveSpeedControl")
 
   while True:
     sm.update()
@@ -61,8 +49,7 @@ def main():
       if sm.frame - last_flag_refresh_frame > 100:  # ~0.5s @ 20 Hz model
         dp_flags = refresh_dp_flags()
         last_flag_refresh_frame = sm.frame
-      longitudinal_planner.update(sm, dp_flags, lincoln_curve_speed=lincoln_curve_speed_enabled(), lincoln_curve_log=lincoln_curve_log_enabled(),
-                                  lincoln_osm_realtime_cruise=lincoln_osm_realtime_enabled())
+      longitudinal_planner.update(sm, dp_flags, curve_speed_control=curve_speed_control_enabled())
       longitudinal_planner.publish(sm, pm)
 
       ldw.update(sm.frame, sm['modelV2'], sm['carState'], sm['carControl'])

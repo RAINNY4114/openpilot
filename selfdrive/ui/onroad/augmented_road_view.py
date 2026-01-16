@@ -1216,73 +1216,24 @@ class AugmentedRoadView(CameraView):
     mem_usage = stats.get("mem_usage", "N/A")
     cpu_temp = stats.get("cpu_temp", "N/A")
 
-    is_ford = False
-    try:
-      is_ford = getattr(sm["carParams"], "brand", "") == "ford"
-    except Exception:
-      is_ford = False
-
-    diag_item = None
-    if is_ford:
-      gps_quality_ok = True
-      for params in (getattr(self, "_params_memory", None), getattr(self, "_params", None)):
-        if params is None:
-          continue
-        try:
-          gps_quality_ok = bool(params.get_bool("GPSQualityOK"))
-          break
-        except Exception:
-          continue
-
-      curve_src_val = 0
-      try:
-        src = getattr(sm["longitudinalPlan"], "curveSpeedSource", 0)
-        raw = getattr(src, "raw", None)
-        curve_src_val = int(raw) if raw is not None else int(src)
-      except Exception:
-        curve_src_val = 0
-
-      long_active = False
-      try:
-        long_active = bool(getattr(sm["controlsState"], "longActive", False))
-      except Exception:
-        long_active = False
-
-      map_points = self._get_map_target_velocities_points()
-      mp = str(map_points) if map_points is not None else "-"
-      src_str = "无"
-      if int(curve_src_val) == 2:
-        src_str = "地图"
-      elif int(curve_src_val) == 1:
-        src_str = "视觉"
-      diag_item = f"弯道: {src_str} G{int(gps_quality_ok)} L{int(long_active)} P{mp}"
-
     base_items = [
       f"{tr('Curvature')} {curvature_text}/{steering_text}/{torque_text}",
       f"{tr('Direction')} {direction_text}",
       f"{tr('Road')} {road_loc_text}",
       f"{tr('Control')} {control_text}",
-      *([diag_item] if diag_item else []),
       f"{tr('Memory')} {mem_usage}",
       f"{tr('CPU Temp')} {cpu_temp}",
     ]
 
     road_item_idx = 2
     # Keep this bar away from the side HUD elements; too-wide bars can "cut" other UI overlays.
-    max_width = max(min(rect.width - 40.0, rect.width * 0.80), 0.0)
+    max_width = max(min(rect.width - 40.0, rect.width * 0.98), 0.0)
 
     items = list(base_items)
     road_label = f"{tr('Road')} "
     road_value = road_loc_text if road_loc_text else "--"
 
     road_item_font: rl.Font | None = None
-    diag_item_idx: int | None = None
-    diag_item_font: rl.Font | None = None
-    if diag_item:
-      try:
-        diag_item_idx = int(items.index(diag_item))
-      except Exception:
-        diag_item_idx = None
     measurements: list[rl.Vector2] = []
     gap_count = max(0, len(items) - 1)
     gap = 0.0
@@ -1297,21 +1248,10 @@ class AugmentedRoadView(CameraView):
         if self._font_has_missing_glyphs(base_font, items[road_item_idx]):
           road_item_font = self._get_dynamic_unifont_font(items[road_item_idx])
 
-      diag_item_font = None
-      if diag_item_idx is not None:
-        try:
-          base_font = font_fallback(self._perf_font)
-          if self._font_has_missing_glyphs(base_font, items[diag_item_idx]):
-            diag_item_font = self._get_dynamic_unifont_font(items[diag_item_idx])
-        except Exception:
-          diag_item_font = None
-
       measurements = []
       for idx, text in enumerate(items):
         if idx == road_item_idx and road_item_font is not None:
           measurements.append(self._measure_text_ex_no_fallback(road_item_font, text, PERF_FONT_SIZE))
-        elif diag_item_idx is not None and idx == diag_item_idx and diag_item_font is not None:
-          measurements.append(self._measure_text_ex_no_fallback(diag_item_font, text, PERF_FONT_SIZE))
         else:
           measurements.append(measure_text_cached(self._perf_font, text, PERF_FONT_SIZE))
 
@@ -1366,8 +1306,6 @@ class AugmentedRoadView(CameraView):
     for idx, (text, measurement) in enumerate(zip(items, measurements, strict=True)):
       if idx == road_item_idx and road_item_font is not None:
         self._draw_text_ex_no_fallback(road_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
-      elif diag_item_idx is not None and idx == diag_item_idx and diag_item_font is not None:
-        self._draw_text_ex_no_fallback(diag_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       else:
         rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       cursor_x += measurement.x + gap

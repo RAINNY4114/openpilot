@@ -331,18 +331,9 @@ class HudRenderer(Widget):
 
     sm = ui_state.sm
     try:
-      car_params = sm["carParams"]
-      if getattr(car_params, "brand", "") != "ford":
-        self._curve_active = False
-        self._curve_exit_timer = 0.0
-        return
-    except Exception:
-      return
-
-    try:
-      curve_speed_enabled = ui_state.params.get_bool("dp_lincoln_curve_speed")
-      map_realtime_enabled = ui_state.params.get_bool("dp_lincoln_osm_realtime_cruise")
-      if not curve_speed_enabled and not map_realtime_enabled:
+      curve_speed_enabled = ui_state.params.get_bool("CurveSpeedControl")
+      show_curve_speed = ui_state.params.get_bool("ShowCSCStatus")
+      if not (curve_speed_enabled and show_curve_speed):
         self._curve_active = False
         self._curve_exit_timer = 0.0
         return
@@ -397,7 +388,7 @@ class HudRenderer(Widget):
     speed_conversion = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
     speed_unit = tr("km/h") if ui_state.is_metric else tr("mph")
 
-    if src_val == 2 and speeds:
+    if src_val in (1, 2) and speeds:
       try:
         v_min = float(min(float(v) for v in speeds if math.isfinite(float(v)) and float(v) > 0.0))
       except Exception:
@@ -441,11 +432,12 @@ class HudRenderer(Widget):
           k_signed_at_max = 0.0
           k_max = 0.0
 
+        source_label = "地图融合" if src_val == 2 else "视觉"
         self._curve_speed_str = f"目标 {round(v_min_disp)} {speed_unit}"
         self._update_curve_icon_direction(k_signed_at_max, k_max, now, force=not prev_show)
         base = f"前方弯道 {max(0, int(round(dist_to_min)))} m"
-        self._curve_state_str = "地图融合"
-        self._curve_dist_str = f"{base} · {self._curve_state_str}"
+        self._curve_state_str = source_label
+        self._curve_dist_str = f"{base} · {source_label}"
 
         try:
           base_font = font_fallback(self._font_medium)
@@ -463,137 +455,6 @@ class HudRenderer(Widget):
 
         self._curve_show = True
         return
-
-    window_m = max(30, min(190, self._safe_int_param("dp_lincoln_curve_window_m", 130)))
-    k_enter_milli = max(2, min(20, self._safe_int_param("dp_lincoln_curve_k_enter", 4)))
-    k_enter = (k_enter_milli / 1000.0)
-    k_exit = k_enter * 0.70
-
-    k_max = 0.0
-    k_signed_at_max = 0.0
-    dist_at_max = 0.0
-    dist_at_enter = None
-    for pos, v_pred, turn_rate in zip(positions, v_preds, turn_rates, strict=True):
-      try:
-        pos_f = float(pos)
-        if not math.isfinite(pos_f) or pos_f > window_m:
-          continue
-        v_pred_f = float(v_pred)
-        turn_rate_f = float(turn_rate)
-        if not math.isfinite(v_pred_f) or not math.isfinite(turn_rate_f):
-          continue
-      except Exception:
-        continue
-
-      v_pred_f = max(max(1.0, v_ego * 0.7), min(100.0, v_pred_f))
-      k_signed = turn_rate_f / v_pred_f
-      k = abs(k_signed)
-      k = min(k, 0.02)
-      if dist_at_enter is None and k >= k_enter:
-        dist_at_enter = pos_f
-      if k > k_max:
-        k_max = k
-        k_signed_at_max = k_signed
-        dist_at_max = pos_f
-
-    if k_max < 1e-4:
-      self._curve_active = False
-      self._curve_exit_timer = 0.0
-      self._curve_k_smooth = 0.0
-      return
-
-    alpha = 0.6
-    self._curve_k_smooth = alpha * k_max + (1.0 - alpha) * self._curve_k_smooth
-
-    enter_now = k_max >= k_enter
-    if self._curve_active:
-      if self._curve_k_smooth < k_exit:
-        self._curve_exit_timer += dt
-        if self._curve_exit_timer > 0.70:
-          self._curve_active = False
-          self._curve_exit_timer = 0.0
-      else:
-        self._curve_exit_timer = 0.0
-    else:
-      if enter_now or self._curve_k_smooth >= k_enter:
-        self._curve_active = True
-        self._curve_exit_timer = 0.0
-
-    if not self._curve_active:
-      return
-
-    v_limit = math.sqrt(1.8 / max(self._curve_k_smooth, 1e-4))
-    speed_conversion = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
-    v_limit_disp = v_limit * speed_conversion
-    if not math.isfinite(v_limit_disp) or v_limit_disp <= 0.0:
-      return
-
-    # Only show when curve target would limit the user's set speed.
-    if v_limit_disp >= self.set_speed:
-      return
-
-    # Show the curve target speed itself (not clamped to current speed), so "目标" is always the limit.
-    display_speed = v_limit_disp
-    speed_unit = tr("km/h") if ui_state.is_metric else tr("mph")
-    self._curve_speed_str = f"目标 {round(display_speed)} {speed_unit}"
-    self._update_curve_icon_direction(k_signed_at_max, k_max, now, force=not prev_show)
-
-    dist_m = float(dist_at_enter if dist_at_enter is not None else dist_at_max)
-    dist = dist_m
-    unit = "m"
-
-    source_str = ""
-    src_val = 0
-    try:
-      src = getattr(sm["longitudinalPlan"], "curveSpeedSource", None)
-      raw = getattr(src, "raw", None)
-      if raw is not None:
-        src_val = int(raw)
-      else:
-        try:
-          src_val = int(src)  # may be an int or an int-like enum
-        except Exception:
-          src_name = ""
-          if isinstance(src, str):
-            src_name = src
-          else:
-            src_name = getattr(src, "name", "") or str(src)
-          src_name = src_name.strip().lower()
-          if src_name.endswith("map"):
-            src_val = 2
-          elif src_name.endswith("vision"):
-            src_val = 1
-          else:
-            src_val = 0
-    except Exception:
-      src_val = 0
-
-    if src_val == 2:
-      source_str = "地图融合"
-    else:
-      # The curve widget itself is vision-triggered. If the planner hasn't published a limiter source yet,
-      # default to "视觉" so the UI always shows a consistent label while the widget is visible.
-      source_str = "视觉"
-
-    base = f"前方弯道 {max(0, int(round(dist)))} {unit}"
-    self._curve_state_str = source_str
-    self._curve_dist_str = f"{base} · {source_str}" if source_str else base
-
-    try:
-      base_font = font_fallback(self._font_medium)
-      if self._font_has_missing_glyphs(base_font, self._curve_dist_str):
-        self._curve_dist_font = self._get_dynamic_unifont_font(self._curve_dist_str)
-    except Exception:
-      self._curve_dist_font = None
-
-    try:
-      base_font = font_fallback(self._font_bold)
-      if self._font_has_missing_glyphs(base_font, self._curve_speed_str):
-        self._curve_speed_font = self._get_dynamic_unifont_font(self._curve_speed_str)
-    except Exception:
-      self._curve_speed_font = None
-
-    self._curve_show = True
 
   def _draw_curve_speed_control(self) -> None:
     if not self._curve_show or self._set_speed_rect is None:

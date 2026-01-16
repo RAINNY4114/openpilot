@@ -1,4 +1,5 @@
 import os
+import os
 import subprocess
 import sys
 import threading
@@ -8,13 +9,13 @@ from openpilot.common.params import Params
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import Widget, DialogResult
-from openpilot.system.ui.widgets.confirm_dialog import alert_dialog
+from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog, alert_dialog
 from openpilot.system.ui.widgets.keyboard import Keyboard
 from openpilot.system.ui.widgets.list_view import (
   button_item,
   dual_button_item,
+  multiple_button_item,
   simple_item,
-  double_spin_button_item,
   spin_button_item,
   text_item,
   toggle_item,
@@ -25,6 +26,7 @@ DEFAULT_DEST = "NAS@192.168.50.200:/volume1/openpilot"
 DEFAULT_PORT = "22"
 DEFAULT_KEY = ""
 DEFAULT_STATUS = "Waiting for action"
+OSM_OFFLINE_DIR = "/data/media/0/osm/offline"
 NAS_SCRIPT = os.path.join(BASEDIR, "selfdrive", "ui", "tools", "lincoln_media_manager.py")
 
 
@@ -37,6 +39,16 @@ class LincolnLayout(Widget):
     self._nas_action_inflight = False
 
     self._nas_summary()  # ensure defaults written
+    self._normalize_curve_method()
+
+    self._curve_method_setting = multiple_button_item(
+      title=lambda: tr("Curve Detection Method"),
+      description=lambda: tr("How curves are detected. <b>Map-Based</b> uses downloaded map data to identify curves and determine the appropriate speed in which to handle them at, while <b>Vision</b> relies solely on the driving model. <b>Map + Vision</b> uses both and applies the safer (lower) target speed."),
+      buttons=[lambda: tr("Map Based"), lambda: tr("Vision"), lambda: tr("Map + Vision")],
+      selected_index=self._curve_method_index(),
+      button_width=255,
+      callback=self._on_curve_method_selected,
+    )
 
     self._scroller = Scroller([
       simple_item(title=lambda: tr("### Lincoln Blindspot Voice Alerts ###")),
@@ -86,48 +98,43 @@ class LincolnLayout(Widget):
       
       simple_item(title=lambda: tr("### Curve Speed Control ###")),
       toggle_item(
-        title=lambda: tr("Dynamic Turn Speed Control"),
-        description=lambda: tr("Slow down automatically in curves for Lincoln/Ford (model-based, comfort tuned)."),
-        initial_state=self._params.get_bool("dp_lincoln_curve_speed"),
-        callback=lambda val: self._params.put_bool("dp_lincoln_curve_speed", val),
+        title=lambda: tr("Curve Speed Control"),
+        description=lambda: tr("Automatically slow down for upcoming curves using downloaded maps or the driving model."),
+        initial_state=self._params.get_bool("CurveSpeedControl"),
+        callback=lambda val: self._params.put_bool("CurveSpeedControl", val),
       ),
+      self._curve_method_setting,
       toggle_item(
-        title=lambda: tr("Curve speed debug log"),
-        description=lambda: tr("Write curve speed details (model curvature, speed limit, decel) to /data/media/0/lincoln_curve_logs/."),
-        initial_state=self._params.get_bool("dp_lincoln_curve_log"),
-        callback=lambda val: self._params.put_bool("dp_lincoln_curve_log", val),
+        title=lambda: tr("Curve Detection Failsafe"),
+        description=lambda: tr("Only trigger <b>Curve Speed Control</b> if a curve is detected with the model while using the <b>Map-Based</b> method. Useful to help prevent false positives."),
+        initial_state=self._params.get_bool("MTSCCurvatureCheck"),
+        callback=lambda val: self._params.put_bool("MTSCCurvatureCheck", val),
       ),
       spin_button_item(
-        title=lambda: tr("Curve lookahead window"),
-        description=lambda: tr("Default 130 m (50–190). Highway/low visibility: 140–180; city/low speed: 80–110. Higher = earlier slowdown; lower = waits until closer."),
-        initial_value=self._get_param_int("dp_lincoln_curve_window_m", 130),
-        callback=lambda val: self._params.put("dp_lincoln_curve_window_m", int(val)),
+        title=lambda: tr("Curve Detection Sensitivity"),
+        description=lambda: tr("How sensitive openpilot is when detecting curves. Higher values trigger earlier responses at the risk of triggering too often, while lower values increase confidence at the risk of triggering too infrequently."),
+        initial_value=self._get_param_int("CurveSensitivity", 100),
+        callback=lambda val: self._params.put("CurveSensitivity", int(val)),
         min_val=50,
-        max_val=190,
+        max_val=200,
         step=5,
-        suffix=tr(" m"),
+        suffix=tr(" %"),
       ),
-      double_spin_button_item(
-        title=lambda: tr("Enter curvature threshold"),
-        description=lambda: tr("Default 0.004 (0.002–0.010). Twisty/mountain: 0.003–0.004; flat/highway: 0.005–0.006. Lower = more sensitive; higher = smoother but later."),
-        initial_value=self._get_param_int("dp_lincoln_curve_k_enter", 4) / 1000.0,
-        callback=lambda val: self._params.put("dp_lincoln_curve_k_enter", int(round(val * 1000))),
-        min_val=0.002,
-        max_val=0.010,
-        step=0.001,
-        decimals=3,
-        suffix="",
+      spin_button_item(
+        title=lambda: tr("Curve Speed Aggressiveness"),
+        description=lambda: tr("How aggressive openpilot is when navigating through curves. Higher values result in faster turns but may reduce comfort or stability, while lower values result in slower, smoother turns at the risk of being overly cautious."),
+        initial_value=self._get_param_int("TurnAggressiveness", 100),
+        callback=lambda val: self._params.put("TurnAggressiveness", int(val)),
+        min_val=50,
+        max_val=200,
+        step=5,
+        suffix=tr(" %"),
       ),
-      double_spin_button_item(
-        title=lambda: tr("Max curve decel"),
-        description=lambda: tr("Default -3.20 m/s² (-3.5 to -2.0). Gentler ride: -2.5~-2.8; need earlier braking: -3.3~-3.5. More negative = earlier/stronger; less negative = gentler/possibly late."),
-        initial_value=self._get_param_int("dp_lincoln_curve_decel", -320) / 100.0,
-        callback=lambda val: self._params.put("dp_lincoln_curve_decel", int(round(val * 100))),
-        min_val=-3.5,
-        max_val=-2.0,
-        step=0.1,
-        decimals=2,
-        suffix=tr(" m/s^2"),
+      toggle_item(
+        title=lambda: tr("Show Curve Speed Control Speed"),
+        description=lambda: tr("Show <b>Curve Speed Control</b>'s desired speed on the driving screen."),
+        initial_state=self._params.get_bool("ShowCSCStatus"),
+        callback=lambda val: self._params.put_bool("ShowCSCStatus", val),
       ),
       simple_item(title=lambda: tr("### Following & Stopping ###")),
       spin_button_item(
@@ -141,6 +148,12 @@ class LincolnLayout(Widget):
         suffix=tr(" m"),
       ),
       simple_item(title=lambda: tr("### Obstacle Avoidance (Experimental) ###")),
+      toggle_item(
+        title=lambda: tr("Cone Detection (Experimental)"),
+        description=lambda: tr("Detect traffic cones ahead and publish results for UI/debug and future features."),
+        initial_state=self._params.get_bool("dp_lat_cone_detection"),
+        callback=lambda val: self._params.put_bool("dp_lat_cone_detection", val),
+      ),
       toggle_item(
         title=lambda: tr("Auto avoidance"),
         description=lambda: tr("When cones/vehicles are detected in-path, automatically slow down then initiate a lane change to pass, and return when clear. Pedestrians trigger a stop (no auto lane change). Experimental and requires blindspot sensors."),
@@ -190,6 +203,8 @@ class LincolnLayout(Widget):
     self._scroller.render(rect)
 
   def show_event(self):
+    self._normalize_curve_method()
+    self._curve_method_setting.action_item.set_selected_button(self._curve_method_index())
     self._scroller.show_event()
 
   def hide_event(self):
@@ -245,6 +260,71 @@ class LincolnLayout(Widget):
       host = target
     remote_path = remote_path or "/"
     return user or "NAS", host or "unknown", remote_path
+
+  def _has_offline_maps(self) -> bool:
+    try:
+      if not os.path.isdir(OSM_OFFLINE_DIR):
+        return False
+      with os.scandir(OSM_OFFLINE_DIR) as it:
+        return any(True for _ in it)
+    except Exception:
+      return False
+
+  def _normalize_curve_method(self) -> None:
+    map_enabled = bool(self._params.get_bool("MapTurnControl"))
+    vision_enabled = bool(self._params.get_bool("VisionTurnControl"))
+    has_maps = self._has_offline_maps()
+
+    if not has_maps and map_enabled:
+      self._params.put_bool("MapTurnControl", False)
+      self._params.put_bool("VisionTurnControl", True)
+      return
+
+    if not map_enabled and not vision_enabled:
+      if has_maps:
+        self._params.put_bool("MapTurnControl", True)
+        self._params.put_bool("VisionTurnControl", False)
+      else:
+        self._params.put_bool("MapTurnControl", False)
+        self._params.put_bool("VisionTurnControl", True)
+
+  def _curve_method_index(self) -> int:
+    map_enabled = bool(self._params.get_bool("MapTurnControl"))
+    vision_enabled = bool(self._params.get_bool("VisionTurnControl"))
+    if map_enabled and vision_enabled:
+      return 2
+    if map_enabled and not vision_enabled:
+      return 0
+    if vision_enabled and not map_enabled:
+      return 1
+    return 0 if self._has_offline_maps() else 1
+
+  def _on_curve_method_selected(self, index: int) -> None:
+    if index == 0:
+      if not self._has_offline_maps():
+        dlg = ConfirmDialog(tr("The <b>Map Based</b> options are only available when some <b>Map Data</b> has been downloaded!"),
+                            tr("OK"), cancel_text="", rich=True)
+        gui_app.set_modal_overlay(dlg)
+        self._curve_method_setting.action_item.set_selected_button(1)
+        self._params.put_bool("MapTurnControl", False)
+        self._params.put_bool("VisionTurnControl", True)
+        return
+      self._params.put_bool("MapTurnControl", True)
+      self._params.put_bool("VisionTurnControl", False)
+    elif index == 1:
+      self._params.put_bool("MapTurnControl", False)
+      self._params.put_bool("VisionTurnControl", True)
+    else:
+      if not self._has_offline_maps():
+        dlg = ConfirmDialog(tr("The <b>Map Based</b> options are only available when some <b>Map Data</b> has been downloaded!"),
+                            tr("OK"), cancel_text="", rich=True)
+        gui_app.set_modal_overlay(dlg)
+        self._curve_method_setting.action_item.set_selected_button(1)
+        self._params.put_bool("MapTurnControl", False)
+        self._params.put_bool("VisionTurnControl", True)
+        return
+      self._params.put_bool("MapTurnControl", True)
+      self._params.put_bool("VisionTurnControl", True)
 
   def _on_nas_configure(self):
     self._nas_pending_steps = ["dest", "port", "key"]
