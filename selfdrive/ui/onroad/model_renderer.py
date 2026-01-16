@@ -749,6 +749,7 @@ class ModelRenderer(Widget):
       int(a * 255)
     )
 
+  @staticmethod
   def _blend_colors(begin_colors, end_colors, t):
     if t >= 1.0:
       return end_colors
