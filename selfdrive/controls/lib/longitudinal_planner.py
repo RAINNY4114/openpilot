@@ -238,6 +238,38 @@ class LongitudinalPlanner:
       return 0.0
     return float(max_pred_lat_acc / max(v_ego, 1.0) ** 2)
 
+  @staticmethod
+  def parse_model(model_msg):
+    if (len(model_msg.position.x) == ModelConstants.IDX_N and
+      len(model_msg.velocity.x) == ModelConstants.IDX_N and
+      len(model_msg.acceleration.x) == ModelConstants.IDX_N):
+      x = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.position.x)
+      v = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.velocity.x)
+      a = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.acceleration.x)
+      j = np.zeros(len(T_IDXS_MPC))
+      if len(T_IDXS_MPC) > 1:
+        t_diffs = np.diff(T_IDXS_MPC)
+        if np.all(t_diffs > 0):
+          j[:-1] = np.diff(a) / t_diffs
+          j[-1] = j[-2]
+    else:
+      x = np.zeros(len(T_IDXS_MPC))
+      v = np.zeros(len(T_IDXS_MPC))
+      a = np.zeros(len(T_IDXS_MPC))
+      j = np.zeros(len(T_IDXS_MPC))
+
+    try:
+      probs = model_msg.meta.disengagePredictions.gasPressProbs
+      if len(probs) > 1:
+        throttle_prob = probs[1]
+      elif len(probs) == 1:
+        throttle_prob = probs[0]
+      else:
+        throttle_prob = 1.0
+    except Exception:
+      throttle_prob = 1.0
+    return x, v, a, j, float(throttle_prob)
+
   def _fp_calc_curvature(self, p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> float:
     side_a = self._map_distance_to_point(p2[0], p2[1], p3[0], p3[1])
     side_b = self._map_distance_to_point(p1[0], p1[1], p3[0], p3[1])
