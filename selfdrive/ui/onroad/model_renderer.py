@@ -551,7 +551,11 @@ class ModelRenderer(Widget):
         draw_polygon(self._rect, self._path.projected_points, gradient=self._dp_ui_rainbow_gradient)
       return
 
-    allow_throttle = sm['longitudinalPlan'].allowThrottle or not self._longitudinal_control
+    try:
+      allow_throttle = bool(getattr(sm['longitudinalPlan'], "allowThrottle", True))
+    except Exception:
+      allow_throttle = True
+    allow_throttle = allow_throttle or not self._longitudinal_control
     self._blend_filter.update(int(allow_throttle))
 
     if self._experimental_mode:
