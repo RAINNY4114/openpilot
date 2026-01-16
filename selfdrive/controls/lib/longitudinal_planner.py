@@ -361,20 +361,29 @@ class LongitudinalPlanner:
     v_cruise_diff = float(v_cruise_cluster - v_cruise)
 
     gps_position = None
-    llk = None
+    gps_msg = None
     try:
-      llk = sm["liveLocationKalman"]
+      gps_ext = sm["gpsLocationExternal"] if sm.valid.get("gpsLocationExternal", False) else None
+      gps_int = sm["gpsLocation"] if sm.valid.get("gpsLocation", False) else None
+      if gps_ext is not None and getattr(gps_ext, "hasFix", False):
+        gps_msg = gps_ext
+      elif gps_int is not None and getattr(gps_int, "hasFix", False):
+        gps_msg = gps_int
     except Exception:
-      llk = None
+      gps_msg = None
 
-    if llk is not None:
+    if gps_msg is not None:
       try:
-        localizer_valid = (llk.status == log.LiveLocationKalman.Status.valid) and llk.positionGeodetic.valid
-        if llk.gpsOK and localizer_valid:
+        lat = float(gps_msg.latitude)
+        lon = float(gps_msg.longitude)
+        bearing = float(getattr(gps_msg, "bearingDeg", 0.0))
+        if math.isfinite(lat) and math.isfinite(lon):
+          if not math.isfinite(bearing):
+            bearing = 0.0
           gps_position = {
-            "latitude": float(llk.positionGeodetic.value[0]),
-            "longitude": float(llk.positionGeodetic.value[1]),
-            "bearing": math.degrees(float(llk.calibratedOrientationNED.value[2])),
+            "latitude": lat,
+            "longitude": lon,
+            "bearing": bearing,
           }
       except Exception:
         gps_position = None

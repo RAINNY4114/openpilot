@@ -1,4 +1,5 @@
 import colorsys
+import math
 import numpy as np
 import pyray as rl
 from cereal import messaging, car
@@ -85,6 +86,8 @@ class ModelRenderer(Widget):
     self._experimental_mode = False
     self._blend_filter = FirstOrderFilter(1.0, 0.25, 1 / gui_app.target_fps)
     self._prev_allow_throttle = True
+    self._curve_path_filter = FirstOrderFilter(0.0, 1.0, 1 / gui_app.target_fps)
+    self._curve_path_alert = 0.0
     self._lane_line_probs = np.zeros(4, dtype=np.float32)
     self._road_edge_stds = np.zeros(2, dtype=np.float32)
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
@@ -178,6 +181,7 @@ class ModelRenderer(Widget):
       self._draw_live_tracks(sm)
 
     # Draw elements
+    self._update_curve_path_alert(sm)
     self._draw_lane_lines()
     self._draw_path(sm)
 
@@ -446,6 +450,54 @@ class ModelRenderer(Widget):
 
     return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha), d_rel=d_rel, x=x, y=y, sz=sz, v_lead=v_lead)
 
+  def _update_curve_path_alert(self, sm) -> None:
+    target = 0.0
+
+    if not ui_state.started:
+      self._curve_path_alert = float(self._curve_path_filter.update(0.0))
+      return
+
+    try:
+      if not ui_state.params.get_bool("CurveSpeedControl"):
+        self._curve_path_alert = float(self._curve_path_filter.update(0.0))
+        return
+    except Exception:
+      self._curve_path_alert = float(self._curve_path_filter.update(0.0))
+      return
+
+    if sm.recv_frame["longitudinalPlan"] < ui_state.started_frame:
+      self._curve_path_alert = float(self._curve_path_filter.update(0.0))
+      return
+
+    long_plan = sm["longitudinalPlan"]
+    src_val = 0
+    try:
+      src = getattr(long_plan, "curveSpeedSource", None)
+      raw = getattr(src, "raw", None)
+      src_val = int(raw if raw is not None else src)
+    except Exception:
+      src_val = 0
+
+    if src_val in (1, 2):
+      target = 1.0
+      try:
+        speeds = list(getattr(long_plan, "speeds", []) or [])
+      except Exception:
+        speeds = []
+
+      v_ego = float(getattr(sm["carState"], "vEgo", 0.0))
+      if speeds and math.isfinite(v_ego) and v_ego > 1.0:
+        try:
+          v_min = float(min(float(v) for v in speeds if math.isfinite(float(v)) and float(v) > 0.0))
+        except Exception:
+          v_min = 0.0
+        if v_min > 0.0:
+          drop_ratio = (v_ego - v_min) / max(v_ego * 0.35, 1.0)
+          target = float(np.clip(drop_ratio, 0.0, 1.0))
+      target = max(target, 0.25)
+
+    self._curve_path_alert = float(self._curve_path_filter.update(target))
+
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
     for i, lane_line in enumerate(self._lane_lines):
@@ -519,6 +571,17 @@ class ModelRenderer(Widget):
         stops=[0.0, 0.5, 1.0],
       )
       draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
+
+      curve_t = float(self._curve_path_alert)
+      if curve_t > 0.001:
+        top_alpha = int(30 + curve_t * 140)
+        curve_overlay = Gradient(
+          start=(0.0, 1.0),
+          end=(0.0, 0.0),
+          colors=[rl.Color(255, 60, 0, 0), rl.Color(255, 60, 0, top_alpha)],
+          stops=[0.0, 1.0],
+        )
+        draw_polygon(self._rect, self._path.projected_points, gradient=curve_overlay)
 
       # Lincoln HUD enhancements: tint the road band as we approach lead, then restore to green when clear
       if ui_state.dp_lincoln_hud_enhanced and self._lead_box_intensity > 0.01:
@@ -682,7 +745,6 @@ class ModelRenderer(Widget):
       int(a * 255)
     )
 
-  @staticmethod
   def _blend_colors(begin_colors, end_colors, t):
     if t >= 1.0:
       return end_colors
