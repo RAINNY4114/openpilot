@@ -30,6 +30,7 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
+OBSTACLE_DET_CONFIRM_S = 0.2
 OBSTACLE_SLOW_SPEED_MPH = 12.0
 OBSTACLE_STOP_DELAY_S = 3.0
 OBSTACLE_APPROACH_SPEED_MPH = 35.0
@@ -382,13 +383,14 @@ class LongitudinalPlanner:
       self._obstacle_present_since = None
     self._obstacle_present_prev = obstacle_present
 
-    # controlsState.enabled doesn't exist in this branch's log schema, so use selfdriveState.enabled.
-    controls_enabled = bool(getattr(sm['selfdriveState'], "enabled", False))
+    controls_enabled = bool(getattr(sm['controlsState'], "enabled", getattr(sm['selfdriveState'], "enabled", False)))
     curve_speed_control = bool(curve_speed_control)
+    if not self.CP.openpilotLongitudinalControl:
+      curve_speed_control = False
 
     v_cruise_cluster = float(v_cruise)
     try:
-      v_cruise_cluster = float(max(float(sm['controlsState'].vCruiseCluster) * CV.KPH_TO_MS, v_cruise))
+      v_cruise_cluster = float(max(float(sm['carState'].vCruiseCluster) * CV.KPH_TO_MS, v_cruise))
     except Exception:
       v_cruise_cluster = float(v_cruise)
     v_cruise_diff = float(v_cruise_cluster - v_cruise)
@@ -441,7 +443,10 @@ class LongitudinalPlanner:
       road_curvature = self._fp_calc_road_curvature(sm['modelV2'], v_ego)
       self._fp_road_curvature = float(road_curvature)
       try:
-        road_curvature_detected = (1.0 / abs(road_curvature)) ** 0.5 < v_ego > _FP_CRUISING_SPEED
+        lat_accel_pred = abs(float(road_curvature)) * max(float(v_ego), 1.0) ** 2
+        sensitivity = float(max(curve_sensitivity, 0.1))
+        detect_threshold = 1.0 / sensitivity
+        road_curvature_detected = (lat_accel_pred > detect_threshold) and (v_ego > _FP_CRUISING_SPEED)
       except Exception:
         road_curvature_detected = False
       road_curvature_detected = bool(road_curvature_detected and not (sm['carState'].leftBlinker or sm['carState'].rightBlinker))
@@ -560,7 +565,8 @@ class LongitudinalPlanner:
     # Auto obstacle slowdown (experimental):
     # - cones/vehicles: progressively cap cruise speed, then attempt an auto lane change (handled in modeld).
     # - pedestrians: stop (no auto lane change).
-    if dp_auto_avoid and obstacle_present and getattr(sm['selfdriveState'], "enabled", False):
+    obstacle_confirmed = obstacle_present and (self._obstacle_present_since is not None) and (now - self._obstacle_present_since) >= OBSTACLE_DET_CONFIRM_S
+    if dp_auto_avoid and obstacle_confirmed and getattr(sm['selfdriveState'], "enabled", False):
       accel_clip[1] = min(accel_clip[1], 0.0)  # prevent accelerating towards the obstacle
 
       v_cap_target = 0.0
@@ -651,8 +657,11 @@ class LongitudinalPlanner:
       output_a_target = min(output_a_target_mpc, output_a_target_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
 
-    for idx in range(2):
-      accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
+    accel_clip_lower_rate = 0.05
+    if map_turn_limit_active or vision_turn_limit_active:
+      accel_clip_lower_rate = 0.15
+    accel_clip[0] = np.clip(accel_clip[0], self.prev_accel_clip[0] - accel_clip_lower_rate, self.prev_accel_clip[0] + accel_clip_lower_rate)
+    accel_clip[1] = np.clip(accel_clip[1], self.prev_accel_clip[1] - 0.05, self.prev_accel_clip[1] + 0.05)
     output_a_target_clipped = float(np.clip(output_a_target, accel_clip[0], accel_clip[1]))
 
     # Ford/Lincoln comfort: limit positive jerk to reduce abrupt tip-in (high RPM / delayed upshifts),

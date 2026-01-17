@@ -15,7 +15,7 @@ from openpilot.system.ui.widgets import Widget
 
 CLIP_MARGIN = 500
 MIN_DRAW_DISTANCE = 10.0
-MAX_DRAW_DISTANCE = 100.0
+MAX_DRAW_DISTANCE = 160.0
 
 THROTTLE_COLORS = [
   rl.Color(13, 248, 122, 102),   # HSLF(148/360, 0.94, 0.51, 0.4)
@@ -495,6 +495,30 @@ class ModelRenderer(Widget):
           drop_ratio = (v_ego - v_min) / max(v_ego * 0.35, 1.0)
           target = float(np.clip(drop_ratio, 0.0, 1.0))
       target = max(target, 0.25)
+
+    # If curve speed control is not actively limiting, still tint based on predicted curvature.
+    if src_val not in (1, 2):
+      try:
+        model = sm["modelV2"]
+        v_preds = list(getattr(getattr(model, "velocity", None), "x", []) or [])
+        turn_rates = list(getattr(getattr(model, "orientationRate", None), "z", []) or [])
+      except Exception:
+        v_preds = []
+        turn_rates = []
+
+      if v_preds and turn_rates and len(v_preds) == len(turn_rates):
+        lat_accel_max = 0.0
+        for v_pred, turn_rate in zip(v_preds, turn_rates, strict=True):
+          v_pred_f = float(v_pred)
+          turn_rate_f = float(turn_rate)
+          if not math.isfinite(v_pred_f) or not math.isfinite(turn_rate_f):
+            continue
+          lat_accel = abs(turn_rate_f * v_pred_f)
+          if lat_accel > lat_accel_max:
+            lat_accel_max = lat_accel
+        if lat_accel_max > 0.5:
+          curve_target = float(np.clip((lat_accel_max - 0.5) / 1.5, 0.0, 1.0))
+          target = max(target, curve_target)
 
     self._curve_path_alert = float(self._curve_path_filter.update(target))
 
