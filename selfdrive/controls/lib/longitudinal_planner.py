@@ -13,7 +13,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, CRUISE_MIN_ACCEL
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
@@ -30,8 +30,9 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
-OBSTACLE_DET_CONFIRM_S = 0.4
-OBSTACLE_CONFIDENCE_MIN = 0.5
+OBSTACLE_DET_CONFIRM_S = 1.0
+OBSTACLE_CONFIDENCE_MIN = 0.8
+OBSTACLE_CONE_CONF_MIN = 0.95
 OBSTACLE_SLOW_SPEED_MPH = 12.0
 OBSTACLE_STOP_DELAY_S = 3.0
 OBSTACLE_APPROACH_SPEED_MPH = 35.0
@@ -133,6 +134,9 @@ class LongitudinalPlanner:
     self._obstacle_cone_in_path = False
     self._obstacle_person_in_path = False
     self._obstacle_vehicle_in_path = False
+    self._obstacle_cone_in_path_raw = False
+    self._obstacle_person_in_path_raw = False
+    self._obstacle_vehicle_in_path_raw = False
     self._obstacle_metric = 0.0
     self._haz_metric = 0.0
     self._obstacle_present_prev = False
@@ -367,6 +371,9 @@ class LongitudinalPlanner:
           self._obstacle_cone_in_path = bool(payload.get("inPath", False))
           self._obstacle_person_in_path = bool(payload.get("personInPath", False))
           self._obstacle_vehicle_in_path = bool(payload.get("vehicleInPath", False))
+          self._obstacle_cone_in_path_raw = bool(payload.get("inPathRaw", False))
+          self._obstacle_person_in_path_raw = bool(payload.get("personInPathRaw", False))
+          self._obstacle_vehicle_in_path_raw = bool(payload.get("vehicleInPathRaw", False))
           self._obstacle_metric = float(payload.get("obstacleMetric", 0.0) or 0.0)
           self._haz_metric = float(payload.get("hazMetric", 0.0) or 0.0)
           self._obstacle_last_det_t = now
@@ -377,10 +384,16 @@ class LongitudinalPlanner:
       self._obstacle_cone_in_path = False
       self._obstacle_person_in_path = False
       self._obstacle_vehicle_in_path = False
+      self._obstacle_cone_in_path_raw = False
+      self._obstacle_person_in_path_raw = False
+      self._obstacle_vehicle_in_path_raw = False
       self._obstacle_metric = 0.0
       self._haz_metric = 0.0
 
-    obstacle_present = self._obstacle_cone_in_path or self._obstacle_person_in_path or self._obstacle_vehicle_in_path
+    cone_present = self._obstacle_cone_in_path and self._obstacle_cone_in_path_raw
+    person_present = self._obstacle_person_in_path and self._obstacle_person_in_path_raw
+    vehicle_present = self._obstacle_vehicle_in_path and self._obstacle_vehicle_in_path_raw
+    obstacle_present = cone_present or person_present or vehicle_present
     if obstacle_present and not self._obstacle_present_prev:
       self._obstacle_present_since = now
     if not obstacle_present:
@@ -389,11 +402,13 @@ class LongitudinalPlanner:
 
     obstacle_conf = 0.0
     try:
-      obstacle_conf = float(max(self._obstacle_metric, self._haz_metric))
+      obstacle_conf = float(self._obstacle_metric)
     except Exception:
       obstacle_conf = 0.0
     obstacle_conf = float(max(0.0, min(1.0, obstacle_conf)))
-    obstacle_high_conf = bool(obstacle_present and obstacle_conf >= OBSTACLE_CONFIDENCE_MIN)
+    cone_only = bool(cone_present and not person_present and not vehicle_present)
+    conf_threshold = OBSTACLE_CONE_CONF_MIN if cone_only else OBSTACLE_CONFIDENCE_MIN
+    obstacle_high_conf = bool(obstacle_present and obstacle_conf >= conf_threshold)
     if obstacle_high_conf and not self._obstacle_conf_prev:
       self._obstacle_conf_since = now
     if not obstacle_high_conf:
@@ -462,8 +477,9 @@ class LongitudinalPlanner:
       try:
         lat_accel_pred = abs(float(road_curvature)) * max(float(v_ego), 1.0) ** 2
         sensitivity = float(max(curve_sensitivity, 0.1))
-        speed_trigger_scale = float(np.interp(v_ego, [0.0, 16.7, 27.8], [1.0, 0.85, 0.7]))
-        detect_threshold = (1.0 / sensitivity) * speed_trigger_scale
+        speed_ratio = float(max(v_ego, 0.0) / 22.2)  # ~80 km/h
+        speed_factor = float(1.0 / (1.0 + 0.45 * speed_ratio * speed_ratio))
+        detect_threshold = (1.0 / sensitivity) * speed_factor
         road_curvature_detected = (lat_accel_pred > detect_threshold) and (v_ego > _FP_CRUISING_SPEED)
       except Exception:
         road_curvature_detected = False
@@ -649,7 +665,13 @@ class LongitudinalPlanner:
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
 
-    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
+    cruise_min_accel = None
+    if map_turn_limit_active or vision_turn_limit_active:
+      speed_ratio = float(max(v_ego, 0.0) / 22.2)  # ~80 km/h
+      cruise_min_accel = float(CRUISE_MIN_ACCEL - 1.2 * (1.0 - 1.0 / (1.0 + speed_ratio * speed_ratio)))
+    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j,
+                    personality=sm['selfdriveState'].personality,
+                    cruise_min_accel=cruise_min_accel)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
