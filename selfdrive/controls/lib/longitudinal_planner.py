@@ -30,7 +30,8 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
-OBSTACLE_DET_CONFIRM_S = 0.2
+OBSTACLE_DET_CONFIRM_S = 0.4
+OBSTACLE_CONFIDENCE_MIN = 0.5
 OBSTACLE_SLOW_SPEED_MPH = 12.0
 OBSTACLE_STOP_DELAY_S = 3.0
 OBSTACLE_APPROACH_SPEED_MPH = 35.0
@@ -136,6 +137,8 @@ class LongitudinalPlanner:
     self._haz_metric = 0.0
     self._obstacle_present_prev = False
     self._obstacle_present_since: float | None = None
+    self._obstacle_conf_prev = False
+    self._obstacle_conf_since: float | None = None
     self._obstacle_v_cap = float("nan")
 
   def _fp_curve_config(self):
@@ -384,6 +387,19 @@ class LongitudinalPlanner:
       self._obstacle_present_since = None
     self._obstacle_present_prev = obstacle_present
 
+    obstacle_conf = 0.0
+    try:
+      obstacle_conf = float(max(self._obstacle_metric, self._haz_metric))
+    except Exception:
+      obstacle_conf = 0.0
+    obstacle_conf = float(max(0.0, min(1.0, obstacle_conf)))
+    obstacle_high_conf = bool(obstacle_present and obstacle_conf >= OBSTACLE_CONFIDENCE_MIN)
+    if obstacle_high_conf and not self._obstacle_conf_prev:
+      self._obstacle_conf_since = now
+    if not obstacle_high_conf:
+      self._obstacle_conf_since = None
+    self._obstacle_conf_prev = obstacle_high_conf
+
     controls_enabled = bool(getattr(sm['controlsState'], "enabled", getattr(sm['selfdriveState'], "enabled", False)))
     curve_speed_control = bool(curve_speed_control)
     if not self.CP.openpilotLongitudinalControl:
@@ -446,7 +462,8 @@ class LongitudinalPlanner:
       try:
         lat_accel_pred = abs(float(road_curvature)) * max(float(v_ego), 1.0) ** 2
         sensitivity = float(max(curve_sensitivity, 0.1))
-        detect_threshold = 1.0 / sensitivity
+        speed_trigger_scale = float(np.interp(v_ego, [0.0, 16.7, 27.8], [1.0, 0.85, 0.7]))
+        detect_threshold = (1.0 / sensitivity) * speed_trigger_scale
         road_curvature_detected = (lat_accel_pred > detect_threshold) and (v_ego > _FP_CRUISING_SPEED)
       except Exception:
         road_curvature_detected = False
@@ -566,7 +583,7 @@ class LongitudinalPlanner:
     # Auto obstacle slowdown (experimental):
     # - cones/vehicles: progressively cap cruise speed, then attempt an auto lane change (handled in modeld).
     # - pedestrians: stop (no auto lane change).
-    obstacle_confirmed = obstacle_present and (self._obstacle_present_since is not None) and (now - self._obstacle_present_since) >= OBSTACLE_DET_CONFIRM_S
+    obstacle_confirmed = obstacle_high_conf and (self._obstacle_conf_since is not None) and (now - self._obstacle_conf_since) >= OBSTACLE_DET_CONFIRM_S
     if dp_auto_avoid and obstacle_confirmed and getattr(sm['selfdriveState'], "enabled", False):
       accel_clip[1] = min(accel_clip[1], 0.0)  # prevent accelerating towards the obstacle
 
@@ -669,6 +686,8 @@ class LongitudinalPlanner:
     accel_clip_lower_rate = 0.05
     if map_turn_limit_active or vision_turn_limit_active:
       accel_clip_lower_rate = 0.15
+      if v_ego > 17.0:
+        accel_clip_lower_rate = 0.25
     accel_clip[0] = np.clip(accel_clip[0], self.prev_accel_clip[0] - accel_clip_lower_rate, self.prev_accel_clip[0] + accel_clip_lower_rate)
     accel_clip[1] = np.clip(accel_clip[1], self.prev_accel_clip[1] - 0.05, self.prev_accel_clip[1] + 0.05)
     output_a_target_clipped = float(np.clip(output_a_target, accel_clip[0], accel_clip[1]))
