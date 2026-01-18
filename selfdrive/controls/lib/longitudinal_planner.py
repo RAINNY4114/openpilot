@@ -55,6 +55,7 @@ _MAP_TO_RADIANS = math.pi / 180.0
 # FrogPilot-style curve speed control defaults
 _FP_TARGET_LAT_A = 2.0
 _FP_CURVE_SENSITIVITY = 1.0
+_FP_CURVE_DETECT_LAT_A = 1.0  # m/s^2, align with FrogPilot's curve detection threshold
 _FP_TURN_AGGRESSIVENESS = 1.0
 _FP_CRUISING_SPEED = 5.0
 _FP_MTSCC_CURVATURE_CHECK = True
@@ -514,10 +515,7 @@ class LongitudinalPlanner:
       self._fp_road_curvature = float(road_curvature)
       try:
         lat_accel_pred = abs(float(road_curvature)) * max(float(v_ego), 1.0) ** 2
-        sensitivity = float(max(curve_sensitivity, 0.1))
-        speed_ratio = float(max(v_ego, 0.0) / 22.2)  # ~80 km/h
-        speed_factor = float(1.0 / (1.0 + 0.45 * speed_ratio * speed_ratio))
-        detect_threshold = (1.0 / sensitivity) * speed_factor
+        detect_threshold = float(_FP_CURVE_DETECT_LAT_A)
         road_curvature_detected = (lat_accel_pred > detect_threshold) and (v_ego > _FP_CRUISING_SPEED)
       except Exception:
         road_curvature_detected = False

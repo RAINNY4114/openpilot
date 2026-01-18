@@ -270,17 +270,14 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
-      # Ford/Lincoln: allow radar matching sooner (lower vision prob threshold) to improve long-range lead acquisition
-      # and cut-in responsiveness, while keeping the vision-only fallback conservative.
+      # Keep lead gating conservative to avoid phantom leads from roadside reflectors.
       match_prob_min = 0.5
       vision_prob_min = 0.5
-      if self.CP is not None and getattr(self.CP, "brand", "") == "ford" and not getattr(self.CP, "radarUnavailable", True):
-        # Lower threshold improves cut-in/long-range lead responsiveness on Ford radar platforms.
-        match_prob_min = 0.25
+      allow_radar_only = False
 
       self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
                                           low_speed_override=True, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
-                                          allow_radar_only=(match_prob_min < 0.5))
+                                          allow_radar_only=allow_radar_only)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
                                           low_speed_override=False, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
                                           allow_radar_only=False)
