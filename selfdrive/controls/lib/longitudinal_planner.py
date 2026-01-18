@@ -705,6 +705,14 @@ class LongitudinalPlanner:
     if map_turn_limit_active or vision_turn_limit_active:
       speed_ratio = float(max(v_ego, 0.0) / 22.2)  # ~80 km/h
       cruise_min_accel = float(CRUISE_MIN_ACCEL - 1.2 * (1.0 - 1.0 / (1.0 + speed_ratio * speed_ratio)))
+      try:
+        curve_target = float(min(self._fp_map_target, self._fp_vision_target))
+        if math.isfinite(curve_target):
+          dv = float(max(v_ego - curve_target, 0.0))
+          if dv > 0.1:
+            cruise_min_accel = float(min(cruise_min_accel, -dv / 2.0))
+      except Exception:
+        pass
     self.mpc.update(sm['radarState'], v_cruise, x, v, a, j,
                     personality=sm['selfdriveState'].personality,
                     cruise_min_accel=cruise_min_accel)
