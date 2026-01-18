@@ -21,6 +21,11 @@ class LaneOccupancy:
   right_side_close: bool
 
 
+@dataclass(frozen=True)
+class EgoLaneOccupancy:
+  min_dist_m: float
+
+
 def _min_nonzero(a: float, b: float) -> float:
   a = float(a)
   b = float(b)
@@ -175,3 +180,106 @@ def compute_lane_occupancy(*,
         right_side_close = True
 
   return LaneOccupancy(float(left_min), float(right_min), bool(left_side_close), bool(right_side_close))
+
+
+def compute_ego_lane_occupancy(*,
+                               objs: Sequence[dict],
+                               img_w: int,
+                               img_h: int,
+                               focal_length_px: float,
+                               lane_left_x: Sequence[float],
+                               lane_left_y: Sequence[float],
+                               lane_right_x: Sequence[float],
+                               lane_right_y: Sequence[float],
+                               lane_margin_m: float = 0.0,
+                               score_min_person: float = 0.25,
+                               score_min_vehicle: float = 0.30,
+                               score_min_cone: float = 0.25) -> EgoLaneOccupancy:
+  """
+  Estimate if any hazard object lies within the ego lane boundaries.
+
+  Returns:
+    - minimum forward distance (m) to a hazard object inside the ego lane (0 = none/unknown)
+  """
+  img_w = int(img_w)
+  img_h = int(img_h)
+  f_px = float(focal_length_px)
+  if img_w <= 0 or img_h <= 0 or f_px <= 1.0:
+    return EgoLaneOccupancy(0.0)
+
+  lane_left_x = np.asarray(lane_left_x, dtype=np.float32)
+  lane_left_y = np.asarray(lane_left_y, dtype=np.float32)
+  lane_right_x = np.asarray(lane_right_x, dtype=np.float32)
+  lane_right_y = np.asarray(lane_right_y, dtype=np.float32)
+  if lane_left_x.size < 2 or lane_right_x.size < 2:
+    return EgoLaneOccupancy(0.0)
+
+  if float(lane_left_x[0]) > float(lane_left_x[-1]):
+    lane_left_x = lane_left_x[::-1]
+    lane_left_y = lane_left_y[::-1]
+  if float(lane_right_x[0]) > float(lane_right_x[-1]):
+    lane_right_x = lane_right_x[::-1]
+    lane_right_y = lane_right_y[::-1]
+
+  ego_min = 0.0
+  margin = float(lane_margin_m)
+
+  for o in objs:
+    if not isinstance(o, dict):
+      continue
+
+    try:
+      cls = int(o.get("c", -1))
+      score = float(o.get("s", 0.0))
+      x1 = float(o.get("x1", 0.0))
+      y1 = float(o.get("y1", 0.0))
+      x2 = float(o.get("x2", 0.0))
+      y2 = float(o.get("y2", 0.0))
+    except Exception:
+      continue
+
+    if not (math.isfinite(score) and math.isfinite(x1) and math.isfinite(y1) and math.isfinite(x2) and math.isfinite(y2)):
+      continue
+    if x2 <= x1 or y2 <= y1:
+      continue
+
+    h_m = _obj_height_m(cls)
+    if h_m <= 0.1:
+      continue
+
+    if cls == PERSON_CLASS_ID and score < float(score_min_person):
+      continue
+    if cls == CONE_CLASS_ID and score < float(score_min_cone):
+      continue
+    if cls in VEHICLE_CLASS_IDS and score < float(score_min_vehicle):
+      continue
+
+    h_px = float(y2 - y1)
+    if h_px < 1.0:
+      continue
+
+    dist_m = (f_px * float(h_m)) / h_px
+    if not math.isfinite(dist_m):
+      continue
+    dist_m = float(max(0.0, min(250.0, dist_m)))
+    if dist_m <= 0.0:
+      continue
+
+    cx = 0.5 * (x1 + x2)
+    y_m = -((float(cx) - float(img_w) * 0.5) * dist_m / max(f_px, 1.0))
+    if not math.isfinite(y_m):
+      continue
+
+    y_left = _lane_y_at_x(lane_left_x, lane_left_y, dist_m)
+    y_right = _lane_y_at_x(lane_right_x, lane_right_y, dist_m)
+    if y_left is None or y_right is None:
+      continue
+
+    left_boundary = max(float(y_left), float(y_right))
+    right_boundary = min(float(y_left), float(y_right))
+
+    in_ego_lane = (right_boundary + margin) <= y_m <= (left_boundary - margin)
+    if in_ego_lane:
+      ego_min = _min_nonzero(ego_min, dist_m)
+
+  return EgoLaneOccupancy(float(ego_min))

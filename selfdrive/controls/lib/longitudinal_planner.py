@@ -21,6 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from dragonpilot.selfdrive.controls.lib.acm import ACM
 from dragonpilot.selfdrive.controls.lib.aem import AEM
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
+from openpilot.selfdrive.modeld.lane_occupancy import compute_ego_lane_occupancy
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -33,6 +34,8 @@ OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
 OBSTACLE_DET_CONFIRM_S = 1.0
 OBSTACLE_CONFIDENCE_MIN = 0.8
 OBSTACLE_CONE_CONF_MIN = 0.95
+OBSTACLE_LANE_PROB_MIN = 0.4
+OBSTACLE_LANE_MARGIN_M = 0.1
 OBSTACLE_SLOW_SPEED_MPH = 12.0
 OBSTACLE_STOP_DELAY_S = 3.0
 OBSTACLE_APPROACH_SPEED_MPH = 35.0
@@ -137,6 +140,8 @@ class LongitudinalPlanner:
     self._obstacle_cone_in_path_raw = False
     self._obstacle_person_in_path_raw = False
     self._obstacle_vehicle_in_path_raw = False
+    self._obstacle_ego_lane = False
+    self._obstacle_lane_conf = False
     self._obstacle_metric = 0.0
     self._haz_metric = 0.0
     self._obstacle_present_prev = False
@@ -376,6 +381,35 @@ class LongitudinalPlanner:
           self._obstacle_vehicle_in_path_raw = bool(payload.get("vehicleInPathRaw", False))
           self._obstacle_metric = float(payload.get("obstacleMetric", 0.0) or 0.0)
           self._haz_metric = float(payload.get("hazMetric", 0.0) or 0.0)
+          self._obstacle_ego_lane = False
+          self._obstacle_lane_conf = False
+          try:
+            img_w = int(payload.get("imgW", 0) or 0)
+            img_h = int(payload.get("imgH", 0) or 0)
+            focal_length_px = float(payload.get("focalLengthPx", 0.0) or 0.0)
+            objs = payload.get("objs", None) or []
+            model = sm["modelV2"]
+            lane_lines = model.laneLines
+            lane_probs = model.laneLineProbs
+            if (img_w > 0 and img_h > 0 and focal_length_px > 1.0 and isinstance(objs, list)
+                and len(lane_lines) >= 3 and len(lane_probs) >= 3
+                and float(lane_probs[1]) >= OBSTACLE_LANE_PROB_MIN and float(lane_probs[2]) >= OBSTACLE_LANE_PROB_MIN):
+              occ = compute_ego_lane_occupancy(
+                objs=objs,
+                img_w=img_w,
+                img_h=img_h,
+                focal_length_px=focal_length_px,
+                lane_left_x=lane_lines[1].x,
+                lane_left_y=lane_lines[1].y,
+                lane_right_x=lane_lines[2].x,
+                lane_right_y=lane_lines[2].y,
+                lane_margin_m=OBSTACLE_LANE_MARGIN_M,
+              )
+              self._obstacle_ego_lane = bool(occ.min_dist_m > 0.0)
+              self._obstacle_lane_conf = True
+          except Exception:
+            self._obstacle_ego_lane = False
+            self._obstacle_lane_conf = False
           self._obstacle_last_det_t = now
       except Exception:
         pass
@@ -387,6 +421,8 @@ class LongitudinalPlanner:
       self._obstacle_cone_in_path_raw = False
       self._obstacle_person_in_path_raw = False
       self._obstacle_vehicle_in_path_raw = False
+      self._obstacle_ego_lane = False
+      self._obstacle_lane_conf = False
       self._obstacle_metric = 0.0
       self._haz_metric = 0.0
 
@@ -394,6 +430,8 @@ class LongitudinalPlanner:
     person_present = self._obstacle_person_in_path and self._obstacle_person_in_path_raw
     vehicle_present = self._obstacle_vehicle_in_path and self._obstacle_vehicle_in_path_raw
     obstacle_present = cone_present or person_present or vehicle_present
+    if self._obstacle_lane_conf:
+      obstacle_present = obstacle_present and self._obstacle_ego_lane
     if obstacle_present and not self._obstacle_present_prev:
       self._obstacle_present_since = now
     if not obstacle_present:
