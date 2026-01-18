@@ -110,6 +110,7 @@ class LongitudinalPlanner:
     # Curve speed control (FrogPilot-style)
     self.curve_v_target = None
     self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
+    self._curve_speed_target = float("nan")
     self._fp_map_target = float("nan")
     self._fp_vision_target = float("nan")
     self._fp_road_curvature = 0.0
@@ -620,6 +621,14 @@ class LongitudinalPlanner:
     else:
       self._curve_speed_source = 0
 
+    if map_turn_limit_active or vision_turn_limit_active:
+      try:
+        self._curve_speed_target = float(min(self._fp_map_target, self._fp_vision_target))
+      except Exception:
+        self._curve_speed_target = float("nan")
+    else:
+      self._curve_speed_target = float("nan")
+
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
 
@@ -698,5 +707,9 @@ class LongitudinalPlanner:
     longitudinalPlan.allowBrake = True
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
     longitudinalPlan.curveSpeedSource = int(getattr(self, "_curve_speed_source", 0))
+    curve_target = float(getattr(self, "_curve_speed_target", float("nan")))
+    if not math.isfinite(curve_target) or curve_target <= 0.0:
+      curve_target = 0.0
+    longitudinalPlan.vTargetDEPRECATED = curve_target
 
     pm.send('longitudinalPlan', plan_send)

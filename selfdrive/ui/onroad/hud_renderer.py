@@ -394,15 +394,38 @@ class HudRenderer(Widget):
       except Exception:
         v_min = 0.0
 
-      v_min_disp = v_min * speed_conversion
-      if math.isfinite(v_min_disp) and v_min_disp > 0.0 and v_min_disp < self.set_speed:
-        # Estimate distance-to-min within the published horizon.
+      curve_target = None
+      try:
+        v_target = float(getattr(long_plan, "vTargetDEPRECATED", 0.0))
+        if math.isfinite(v_target) and v_target > 0.0:
+          curve_target = v_target
+      except Exception:
+        curve_target = None
+
+      if curve_target is None:
+        curve_target = v_min
+
+      v_target_disp = float(curve_target) * speed_conversion
+      if math.isfinite(v_target_disp) and v_target_disp > 0.0 and v_target_disp < self.set_speed:
+        # Estimate distance-to-target within the published horizon.
         t = list(ModelConstants.T_IDXS[:len(speeds)])
         dist_to_min = 0.0
         try:
           idx_min = int(min(range(len(speeds)), key=lambda i: float(speeds[i])))
         except Exception:
           idx_min = 0
+
+        idx_target = None
+        for i, v in enumerate(speeds):
+          try:
+            if float(v) <= float(curve_target) + 0.05:
+              idx_target = i
+              break
+          except Exception:
+            continue
+        if idx_target is None:
+          idx_target = idx_min
+
         for i in range(1, min(len(speeds), len(t))):
           dt_i = float(t[i] - t[i - 1])
           if dt_i <= 0.0:
@@ -410,7 +433,7 @@ class HudRenderer(Widget):
           v0 = float(speeds[i - 1])
           v1 = float(speeds[i])
           dist_to_min += 0.5 * (v0 + v1) * dt_i
-          if i >= idx_min:
+          if i >= idx_target:
             break
 
         # Use vision sign to pick L/R icon if available.
@@ -433,7 +456,7 @@ class HudRenderer(Widget):
           k_max = 0.0
 
         source_label = "地图融合" if src_val == 2 else "视觉"
-        self._curve_speed_str = f"目标 {round(v_min_disp)} {speed_unit}"
+        self._curve_speed_str = f"目标 {round(v_target_disp)} {speed_unit}"
         self._update_curve_icon_direction(k_signed_at_max, k_max, now, force=not prev_show)
         base = f"前方弯道 {max(0, int(round(dist_to_min)))} m"
         self._curve_state_str = source_label

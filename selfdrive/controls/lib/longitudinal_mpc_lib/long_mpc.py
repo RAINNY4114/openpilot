@@ -254,6 +254,21 @@ class LongitudinalMpc:
     except Exception:
       pass
 
+  def _lincoln_stop_gap_shift(self, v_ego: float) -> float:
+    if self._params is None:
+      return 0.0
+    try:
+      self._update_lincoln_params()
+      stop_distance_m = float(np.clip(self._lincoln_stop_distance_m, 3.0, 8.0))
+      stop_gap_shift = float(STOP_DISTANCE - stop_distance_m)
+      if not np.isfinite(stop_gap_shift):
+        return 0.0
+      # Only bias the stop gap near standstill; fade out above ~10 m/s.
+      scale = float(np.interp(v_ego, [0.0, 5.0, 10.0], [1.0, 1.0, 0.0]))
+      return float(stop_gap_shift * scale)
+    except Exception:
+      return 0.0
+
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.solver.reset()
@@ -366,23 +381,14 @@ class LongitudinalMpc:
     lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
 
-    # Ford/Lincoln: reduce the final stop gap slightly to avoid stopping overly far back (cut-ins at lights).
-    # IMPORTANT: In this MPC formulation, increasing the obstacle position makes the ego travel further while
-    # keeping the same "desired distance", which reduces the real-world stop gap. Only apply at very low speed.
-    if self._is_ford_platform() and radarstate.leadOne.status:
-      try:
-        self._update_lincoln_params()
-        stop_distance_m = float(np.clip(self._lincoln_stop_distance_m, 3.0, 8.0))
-        stop_gap_shift = float(STOP_DISTANCE - stop_distance_m)
-
-        lead_v = float(radarstate.leadOne.vLead)
-        lead_d = float(radarstate.leadOne.dRel)
-        if lead_v < 0.5 and v_ego < 5.0 and lead_d < 12.0:
-          stop_gap_shift = float(np.interp(v_ego, [0.0, 2.0, 5.0], [stop_gap_shift, stop_gap_shift, 0.0]))
-          if abs(stop_gap_shift) > 1e-6 and bool(np.isfinite(stop_gap_shift)):
-            lead_0_obstacle = lead_0_obstacle + stop_gap_shift
-      except Exception:
-        pass
+    # Ford/Lincoln: user-set stop gap (standstill) bias. Apply at low speeds for consistent stop distance.
+    if self._is_ford_platform():
+      stop_gap_shift = self._lincoln_stop_gap_shift(v_ego)
+      if abs(stop_gap_shift) > 1e-6 and bool(np.isfinite(stop_gap_shift)):
+        if radarstate.leadOne.status:
+          lead_0_obstacle = lead_0_obstacle + stop_gap_shift
+        if radarstate.leadTwo.status:
+          lead_1_obstacle = lead_1_obstacle + stop_gap_shift
 
     self.params[:,0] = ACCEL_MIN
     self.params[:,1] = ACCEL_MAX
