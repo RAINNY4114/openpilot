@@ -1228,6 +1228,7 @@ class AugmentedRoadView(CameraView):
     road_item_idx = 2
     # Keep this bar away from the side HUD elements; too-wide bars can "cut" other UI overlays.
     max_width = max(min(rect.width - 40.0, rect.width * 0.98), 0.0)
+    perf_font = font_fallback(self._perf_font)
 
     items = list(base_items)
     road_label = f"{tr('Road')} "
@@ -1244,7 +1245,7 @@ class AugmentedRoadView(CameraView):
 
       road_item_font = None
       if road_value not in ("", "--"):
-        base_font = font_fallback(self._perf_font)
+        base_font = perf_font
         if self._font_has_missing_glyphs(base_font, items[road_item_idx]):
           road_item_font = self._get_dynamic_unifont_font(items[road_item_idx])
 
@@ -1253,7 +1254,7 @@ class AugmentedRoadView(CameraView):
         if idx == road_item_idx and road_item_font is not None:
           measurements.append(self._measure_text_ex_no_fallback(road_item_font, text, PERF_FONT_SIZE))
         else:
-          measurements.append(measure_text_cached(self._perf_font, text, PERF_FONT_SIZE))
+          measurements.append(measure_text_cached(perf_font, text, PERF_FONT_SIZE))
 
       total_text_width = sum(size.x for size in measurements)
       gap = float(PERF_ITEM_GAP if gap_count else 0.0)
@@ -1270,9 +1271,9 @@ class AugmentedRoadView(CameraView):
         def measure_value_width(t: str, font: rl.Font = road_item_font) -> float:
           return self._measure_text_ex_no_fallback(font, t, PERF_FONT_SIZE).x
       else:
-        label_width = measure_text_cached(self._perf_font, road_label, PERF_FONT_SIZE).x
+        label_width = measure_text_cached(perf_font, road_label, PERF_FONT_SIZE).x
         def measure_value_width(t: str) -> float:
-          return measure_text_cached(self._perf_font, t, PERF_FONT_SIZE).x
+          return measure_text_cached(perf_font, t, PERF_FONT_SIZE).x
 
       available_for_road_item = max_width - 2 * PERF_PADDING - gap * gap_count - width_without_road
       available_for_value = available_for_road_item - label_width
@@ -1307,7 +1308,7 @@ class AugmentedRoadView(CameraView):
       if idx == road_item_idx and road_item_font is not None:
         self._draw_text_ex_no_fallback(road_item_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       else:
-        rl.draw_text_ex(self._perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
+        rl.draw_text_ex(perf_font, text, rl.Vector2(cursor_x, text_y), PERF_FONT_SIZE, 0, rl.WHITE)
       cursor_x += measurement.x + gap
     try:
       rl.begin_scissor_mode(
