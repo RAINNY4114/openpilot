@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from numbers import Number
 
 from cereal import car, log
@@ -17,6 +18,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.desire_helper import AUTO_LC_BLINKER_DELAY_SEC
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from dragonpilot.selfdrive.controls.lib.human_turn_detection import HumanTurnDetection, HTDState
@@ -170,6 +172,9 @@ class Controls:
     self.htd_state = HTDState.INACTIVE
 
     self._road_edge_curv_correction = 0.0
+    self._auto_lc_blinker_delay_until = 0.0
+    self._auto_lc_blinker_pending = False
+    self._auto_lc_last_state = LaneChangeState.off
 
   def update(self):
     self.sm.update(15)
@@ -217,10 +222,35 @@ class Controls:
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
 
-    # Enable blinkers while lane changing
-    if model_v2.meta.laneChangeState != LaneChangeState.off:
-      CC.leftBlinker = model_v2.meta.laneChangeDirection == LaneChangeDirection.left
-      CC.rightBlinker = model_v2.meta.laneChangeDirection == LaneChangeDirection.right
+    lc_state = model_v2.meta.laneChangeState
+    lc_dir = model_v2.meta.laneChangeDirection
+    one_blinker = CS.leftBlinker != CS.rightBlinker
+    now_mono = time.monotonic()
+
+    if lc_state == LaneChangeState.off:
+      self._auto_lc_blinker_delay_until = 0.0
+      self._auto_lc_blinker_pending = False
+    elif self._auto_lc_last_state == LaneChangeState.off and lc_state == LaneChangeState.preLaneChange:
+      if not one_blinker:
+        self._auto_lc_blinker_delay_until = now_mono + AUTO_LC_BLINKER_DELAY_SEC
+        self._auto_lc_blinker_pending = True
+
+    # Enable blinkers while lane changing (auto requests can delay briefly so voice leads).
+    if lc_state != LaneChangeState.off:
+      if lc_state != LaneChangeState.preLaneChange:
+        self._auto_lc_blinker_pending = False
+
+      allow_blinker = True
+      if self._auto_lc_blinker_pending and now_mono < self._auto_lc_blinker_delay_until:
+        allow_blinker = False
+      else:
+        self._auto_lc_blinker_pending = False
+
+      if allow_blinker:
+        CC.leftBlinker = lc_dir == LaneChangeDirection.left
+        CC.rightBlinker = lc_dir == LaneChangeDirection.right
+
+    self._auto_lc_last_state = lc_state
 
     if not CC.latActive:
       self.LaC.reset()

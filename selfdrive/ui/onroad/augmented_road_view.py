@@ -373,6 +373,8 @@ class AugmentedRoadView(CameraView):
     return rl.Rectangle(float(x_offset), float(y_offset), float(scale_x), float(scale_y))
 
   def _draw_object_detections(self, rect: rl.Rectangle) -> None:
+    if not self._params.get_bool("dp_lat_cone_detection"):
+      return
     sm = ui_state.sm
     det_ts_sof_ns = 0
     det_t_s: float | None = None

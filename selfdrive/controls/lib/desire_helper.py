@@ -1,4 +1,5 @@
 from cereal import log
+import os
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 import time
@@ -11,7 +12,8 @@ LANE_CHANGE_TIME_MAX = 10.
 AUTO_LANE_CHANGE_SPEED_MIN = 10 * CV.MPH_TO_MS
 # Auto lane-change: wait for turn-signal lead time before applying the "virtual torque"
 # to start the lane change (see preLaneChange -> laneChangeStarting).
-AUTO_LANE_CHANGE_START_DELAY_SEC = 3.0
+AUTO_LC_BLINKER_DELAY_SEC = float(os.getenv("DP_AUTO_LC_BLINKER_DELAY_SEC", "0.3"))
+AUTO_LANE_CHANGE_START_DELAY_SEC = 3.0 + AUTO_LC_BLINKER_DELAY_SEC
 
 DESIRES = {
   LaneChangeDirection.none: {

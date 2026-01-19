@@ -25,6 +25,7 @@ from openpilot.selfdrive.modeld.cone_detections import ObjDet
 PROCESS_NAME = "selfdrive.modeld.coned"
 
 MODEL_PKL_PATH = Path(__file__).parent / "models/Cone_YOLO11n_tinygrad.pkl"
+MODEL_ONNX_PATH = Path(__file__).parent / "models/Cone_YOLO11n.onnx"
 MODEL_INPUT_SIZE = 320
 
 TRAFFIC_CONE_CLASS_IDX = 80  # matches `Cone_YOLO11n.MODEL.md`
@@ -49,7 +50,8 @@ VEHICLE_AREA_MIN_FRAC = float(os.getenv("CONE_VEHICLE_AREA_MIN_FRAC", "0.010"))
 TWOWHEEL_AREA_MIN_FRAC = float(os.getenv("CONE_TWOWHEEL_AREA_MIN_FRAC", "0.006"))
 NMS_IOU_THRES = float(os.getenv("CONE_NMS_IOU", "0.45"))
 MAX_DET = int(os.getenv("CONE_MAX_DET", "64"))
-PUB_HZ = float(os.getenv("CONE_PUB_HZ", "10"))
+PUB_HZ = float(os.getenv("CONE_PUB_HZ", "20"))
+USE_ONNX = bool(int(os.getenv("CONE_USE_ONNX", "1")))
 
 # Optional edge-based bbox refinement (for visualization).
 # This refines YOLO boxes by running a cheap edge pass inside the ROI and taking the
@@ -435,11 +437,35 @@ def _update_metric_hold(prev: float, new: float, *, decay: float) -> float:
 
 class ConeDetector:
   def __init__(self):
-    if not MODEL_PKL_PATH.exists():
-      raise FileNotFoundError(f"missing model: {MODEL_PKL_PATH}")
+    self._use_onnx = False
+    self._onnx_sess = None
+    self._onnx_input_name = ""
 
-    with open(MODEL_PKL_PATH, "rb") as f:
-      self._model = pickle.load(f)
+    if USE_ONNX and MODEL_ONNX_PATH.exists():
+      try:
+        import onnxruntime as ort
+        sess_opts = ort.SessionOptions()
+        sess_opts.intra_op_num_threads = int(os.getenv("CONE_ONNX_INTRA_THREADS", "0") or 0)
+        sess_opts.inter_op_num_threads = int(os.getenv("CONE_ONNX_INTER_THREADS", "0") or 0)
+        self._onnx_sess = ort.InferenceSession(
+          str(MODEL_ONNX_PATH),
+          sess_options=sess_opts,
+          providers=["CPUExecutionProvider"],
+        )
+        self._onnx_input_name = self._onnx_sess.get_inputs()[0].name
+        self._use_onnx = True
+        cloudlog.warning("coned using ONNX runtime")
+      except Exception:
+        cloudlog.exception("coned ONNX init failed, falling back to tinygrad")
+        self._onnx_sess = None
+        self._onnx_input_name = ""
+
+    if not self._use_onnx:
+      if not MODEL_PKL_PATH.exists():
+        raise FileNotFoundError(f"missing model: {MODEL_PKL_PATH}")
+
+      with open(MODEL_PKL_PATH, "rb") as f:
+        self._model = pickle.load(f)
 
   def _detect_class(self, *, boxes_xywh: np.ndarray, class_scores: np.ndarray, score_min: float,
                     scale: float, pad_x: int, pad_y: int, img_w: int, img_h: int) -> list[ConeDet]:
@@ -547,7 +573,12 @@ class ConeDetector:
     inp = letterboxed.astype(np.float32) / 255.0
     inp = np.transpose(inp, (2, 0, 1))[None, :, :, :]  # BCHW
 
-    out = self._model(images=Tensor(inp, device="NPY")).numpy()[0]  # (85, 2100)
+    if self._use_onnx and self._onnx_sess is not None:
+      out = self._onnx_sess.run(None, {self._onnx_input_name: inp})[0]
+      if out.ndim == 3:
+        out = out[0]
+    else:
+      out = self._model(images=Tensor(inp, device="NPY")).numpy()[0]  # (85, 2100)
     boxes_xywh = out[:4].T
     all_scores = out[4:].T
     h0, w0 = img_rgb.shape[:2]

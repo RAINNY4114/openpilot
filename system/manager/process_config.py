@@ -72,7 +72,9 @@ def coned(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Run onroad when cone detection is enabled so HUD object markers and lane-occupancy cues have data.
   if not started:
     return False
-  return bool(params.get_bool("dp_lat_cone_detection"))
+  return bool(params.get_bool("dp_lat_cone_detection") or
+              params.get_bool("dp_lincoln_auto_avoid") or
+              params.get_bool("dp_lincoln_auto_overtake"))
 
 def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Align with FrogPilot behavior: mapd stays running so map data is always ready.

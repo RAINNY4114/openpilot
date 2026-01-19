@@ -130,12 +130,6 @@ class LincolnLayout(Widget):
         step=5,
         suffix=tr(" %"),
       ),
-      toggle_item(
-        title=lambda: tr("Show Curve Speed Control Speed"),
-        description=lambda: tr("Show <b>Curve Speed Control</b>'s desired speed on the driving screen."),
-        initial_state=self._params.get_bool("ShowCSCStatus"),
-        callback=lambda val: self._params.put_bool("ShowCSCStatus", val),
-      ),
       simple_item(title=lambda: tr("### Following & Stopping ###")),
       spin_button_item(
         title=lambda: tr("Stop distance (standstill)"),
