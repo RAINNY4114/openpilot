@@ -19,6 +19,7 @@ AddOption('--asan', action='store_true', help='turn on ASAN')
 AddOption('--ubsan', action='store_true', help='turn on UBSan')
 AddOption('--mutation', action='store_true', help='generate mutation-ready code')
 AddOption('--ccflags', action='store', type='string', default='', help='pass arbitrary flags over the command line')
+AddOption('--pc_thneed', action='store_true', default=False, help='build thneed runner on PC')
 AddOption('--minimal',
           action='store_false',
           dest='extras',

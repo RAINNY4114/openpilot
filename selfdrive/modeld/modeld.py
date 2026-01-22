@@ -34,8 +34,10 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_pose_
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.models.commonmodel_pyx import DrivingModelFrame, CLContext
 from openpilot.selfdrive.modeld.runners.tinygrad_helpers import qcom_tensor_from_opencl_address
+from openpilot.selfdrive.modeld.model_manager_helpers import get_active_bundle, get_tinygrad_bundle_paths
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from openpilot.selfdrive.modeld.lane_occupancy import compute_lane_occupancy
+from openpilot.selfdrive.livedelay.helpers import get_lat_delay
 from dragonpilot.selfdrive.controls.lib.road_edge_detector import RoadEdgeDetector
 
 
@@ -46,6 +48,21 @@ VISION_PKL_PATH = Path(__file__).parent / 'models/driving_vision_tinygrad.pkl'
 POLICY_PKL_PATH = Path(__file__).parent / 'models/driving_policy_tinygrad.pkl'
 VISION_METADATA_PATH = Path(__file__).parent / 'models/driving_vision_metadata.pkl'
 POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.pkl'
+
+
+def _resolve_tinygrad_paths(params: Params) -> tuple[Path, Path, Path, Path, bool]:
+  bundle = get_active_bundle(params)
+  if bundle is not None:
+    paths = get_tinygrad_bundle_paths(bundle)
+    if paths and all(path.is_file() for path in paths.values()):
+      return (
+        paths["vision_meta"],
+        paths["policy_meta"],
+        paths["vision"],
+        paths["policy"],
+        True,
+      )
+  return (VISION_METADATA_PATH, POLICY_METADATA_PATH, VISION_PKL_PATH, POLICY_PKL_PATH, False)
 
 LAT_SMOOTH_SECONDS = 0.1
 LONG_SMOOTH_SECONDS = 0.3
@@ -180,18 +197,40 @@ class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
   def __init__(self, context: CLContext):
-    with open(VISION_METADATA_PATH, 'rb') as f:
-      vision_metadata = pickle.load(f)
-      self.vision_input_shapes =  vision_metadata['input_shapes']
+    params = Params()
+    vision_meta_path, policy_meta_path, vision_pkl_path, policy_pkl_path, using_bundle = _resolve_tinygrad_paths(params)
+
+    def _load_metadata_and_models() -> tuple[int, int]:
+      with open(vision_meta_path, 'rb') as f:
+        vision_metadata = pickle.load(f)
+      with open(policy_meta_path, 'rb') as f:
+        policy_metadata = pickle.load(f)
+
+      self.vision_input_shapes = vision_metadata['input_shapes']
       self.vision_input_names = list(self.vision_input_shapes.keys())
       self.vision_output_slices = vision_metadata['output_slices']
-      vision_output_size = vision_metadata['output_shapes']['outputs'][1]
-
-    with open(POLICY_METADATA_PATH, 'rb') as f:
-      policy_metadata = pickle.load(f)
-      self.policy_input_shapes =  policy_metadata['input_shapes']
+      self.policy_input_shapes = policy_metadata['input_shapes']
       self.policy_output_slices = policy_metadata['output_slices']
-      policy_output_size = policy_metadata['output_shapes']['outputs'][1]
+
+      with open(vision_pkl_path, "rb") as f:
+        self.vision_run = pickle.load(f)
+      with open(policy_pkl_path, "rb") as f:
+        self.policy_run = pickle.load(f)
+
+      return (vision_metadata['output_shapes']['outputs'][1],
+              policy_metadata['output_shapes']['outputs'][1])
+
+    try:
+      vision_output_size, policy_output_size = _load_metadata_and_models()
+    except Exception as err:
+      if using_bundle:
+        cloudlog.warning(f"modeld: failed to load downloaded model, falling back: {err}")
+        params.remove("ModelManager_ActiveBundle")
+      vision_meta_path = VISION_METADATA_PATH
+      policy_meta_path = POLICY_METADATA_PATH
+      vision_pkl_path = VISION_PKL_PATH
+      policy_pkl_path = POLICY_PKL_PATH
+      vision_output_size, policy_output_size = _load_metadata_and_models()
 
     self.frames = {name: DrivingModelFrame(context, ModelConstants.MODEL_RUN_FREQ//ModelConstants.MODEL_CONTEXT_FREQ) for name in self.vision_input_names}
     self.prev_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
@@ -210,11 +249,7 @@ class ModelState:
     self.policy_output = np.zeros(policy_output_size, dtype=np.float32)
     self.parser = Parser()
 
-    with open(VISION_PKL_PATH, "rb") as f:
-      self.vision_run = pickle.load(f)
-
-    with open(POLICY_PKL_PATH, "rb") as f:
-      self.policy_run = pickle.load(f)
+    # models loaded in _load_metadata_and_models
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     parsed_model_outputs = {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
@@ -502,7 +537,7 @@ def main(demo=False):
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
-    lat_delay = sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
+    lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay, CP.steerActuatorDelay) + LAT_SMOOTH_SECONDS
     if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]

@@ -3,6 +3,7 @@ import os
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 import time
+from openpilot.selfdrive.controls.lib.lane_turn_desire import LaneTurnController
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
@@ -52,6 +53,8 @@ class DesireHelper:
     self.dp_lat_lca_speed = float(dp_lat_lca_speed * CV.MPH_TO_MS)
     self.dp_lat_lca_auto_sec = dp_lat_lca_auto_sec
     self.dp_lat_lca_auto_sec_start = 0.
+    self.lane_turn_controller = LaneTurnController()
+    self.lane_turn_desire = log.Desire.none
 
   @staticmethod
   def get_lane_change_direction(CS):
@@ -61,6 +64,17 @@ class DesireHelper:
              auto_lane_change_direction: LaneChangeDirection = LaneChangeDirection.none):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
+    self.lane_turn_controller.update_params()
+    self.lane_turn_controller.update_lane_turn(
+      blindspot_left=carstate.leftBlindspot,
+      blindspot_right=carstate.rightBlindspot,
+      left_blinker=carstate.leftBlinker,
+      right_blinker=carstate.rightBlinker,
+      v_ego=v_ego,
+    )
+    self.lane_turn_desire = self.lane_turn_controller.get_turn_desire()
+    if not lateral_active:
+      self.lane_turn_desire = log.Desire.none
 
     # Ignore auto requests while the driver is explicitly signaling.
     auto_request = (auto_lane_change_direction in (LaneChangeDirection.left, LaneChangeDirection.right)) and not one_blinker
@@ -151,7 +165,10 @@ class DesireHelper:
     self.prev_one_blinker = one_blinker
     self.prev_lane_change_request = lane_change_request
 
-    self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]
+    if self.lane_turn_desire in (log.Desire.turnLeft, log.Desire.turnRight):
+      self.desire = self.lane_turn_desire
+    else:
+      self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]
 
     # Send keep pulse once per second during LaneChangeStart.preLaneChange
     if self.lane_change_state in (LaneChangeState.off, LaneChangeState.laneChangeStarting):

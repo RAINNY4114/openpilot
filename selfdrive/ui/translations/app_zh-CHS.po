@@ -2409,3 +2409,348 @@ msgstr "自动超车"
 #: selfdrive/ui/layouts/settings/lincoln.py
 msgid "Highway-only: when a slower lead vehicle is detected ahead and the passing lane is clear, automatically initiate a lane change to pass, and return when clear. Experimental and requires blindspot sensors."
 msgstr "仅高速/高速公路：当前方检测到慢车且超车道清空时，自动发起变道超车，超车完成后自动回到原车道。实验性功能，需要盲点传感器（BSM）。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:84
+#, python-format
+msgid "### Download Status ###"
+msgstr "### 下载状态 ###"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:105
+#, python-format
+msgid "### Model Manager ###"
+msgstr "### 模型管理 ###"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:76
+#, python-format
+msgid "Cancel Download"
+msgstr "取消下载"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:278
+#, python-format
+msgid "Connect to the internet to download models."
+msgstr "请连接网络以下载模型。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:94
+#, python-format
+msgid "Current File"
+msgstr "当前文件"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:47
+#, python-format
+msgid "Current Model"
+msgstr "当前模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:69
+#, python-format
+msgid "DELETE"
+msgstr "删除"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:184 selfdrive/ui/layouts/settings/model_manager.py:189 selfdrive/ui/layouts/settings/model_manager.py:345 selfdrive/ui/layouts/settings/model_manager.py:360
+#, python-format
+msgid "Default Model"
+msgstr "默认模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:68
+#, python-format
+msgid "Delete Current Model"
+msgstr "删除当前模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:284
+#, python-format
+msgid "Download failed"
+msgstr "下载失败"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:282
+#, python-format
+msgid "Downloading {name}"
+msgstr "正在下载 {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:293
+#, python-format
+msgid "Driving Model"
+msgstr "驾驶模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:62
+#, python-format
+msgid "Fetch the latest model list from the server."
+msgstr "从服务器获取最新模型列表。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:234 selfdrive/ui/layouts/settings/model_manager.py:263
+#, python-format
+msgid "Idle"
+msgstr "空闲"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:200
+#, python-format
+msgid "Metadata"
+msgstr "元数据"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:257 selfdrive/ui/layouts/settings/model_manager.py:281 selfdrive/ui/layouts/settings/model_manager.py:287 selfdrive/ui/layouts/settings/model_manager.py:298 selfdrive/ui/layouts/settings/model_manager.py:395
+#, python-format
+msgid "Model"
+msgstr "模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:296
+#, python-format
+msgid "Navigation Model"
+msgstr "导航模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:244
+#, python-format
+msgid "No files"
+msgstr "无文件"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:144 selfdrive/ui/layouts/settings/model_manager.py:276
+#, python-format
+msgid "Only available when vehicle is off."
+msgstr "仅在车辆熄火时可用。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:88
+#, python-format
+msgid "Overall Progress"
+msgstr "总体进度"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:295
+#, python-format
+msgid "Policy Model"
+msgstr "策略模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:288
+#, python-format
+msgid "Ready - {name}"
+msgstr "就绪 - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:70
+#, python-format
+msgid "Remove downloaded files for the current model. The default model cannot be removed."
+msgstr "删除当前模型已下载的文件。默认模型不能删除。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:61
+#, python-format
+msgid "SYNC"
+msgstr "同步"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:145
+#, python-format
+msgid "Select a model to download and switch."
+msgstr "选择模型将自动下载并切换。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:55
+#, python-format
+msgid "Status"
+msgstr "状态"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:78
+#, python-format
+msgid "Stop the current model download."
+msgstr "停止当前模型下载。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:60
+#, python-format
+msgid "Sync Model List"
+msgstr "同步模型列表"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:406
+#, python-format
+msgid "Syncing model list..."
+msgstr "正在同步模型列表..."
+
+#: selfdrive/ui/layouts/settings/model_manager.py:289
+#, python-format
+msgid "Using default model"
+msgstr "正在使用默认模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:294
+#, python-format
+msgid "Vision Model"
+msgstr "视觉模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:272
+#, python-format
+msgid "Waiting..."
+msgstr "等待中..."
+
+#: selfdrive/ui/layouts/settings/model_manager.py:226
+#, python-format
+msgid "cached - {name}"
+msgstr "已缓存 - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:224
+#, python-format
+msgid "downloaded - {name}"
+msgstr "已下载 - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:228
+#, python-format
+msgid "failed - {name}"
+msgstr "失败 - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:229
+#, python-format
+msgid "pending - {name}"
+msgstr "等待中 - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:258
+#, python-format
+msgid "{done}/{total} ({pct}%) - {name}"
+msgstr "{done}/{total} ({pct}%) - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:222 selfdrive/ui/layouts/settings/model_manager.py:271
+#, python-format
+msgid "{pct}% ({eta}s) - {name}"
+msgstr "{pct}% ({eta}s) - {name}"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:325
+#, python-format
+msgid "{size:.2f} MB ({count} files)"
+msgstr "{size:.2f} MB（{count} 个文件）"
+
+#: selfdrive/ui/layouts/settings/settings.py:76
+#, python-format
+msgid "Model Manager"
+msgstr "模型管理"
+
+#: selfdrive/ui/layouts/settings/settings.py:76
+#, python-format
+msgid "Models"
+msgstr "模型"
+
+#: system/ui/widgets/tree_dialog.py:153
+#, python-format
+msgid "Search"
+msgstr "搜索"
+
+#: system/ui/widgets/tree_dialog.py:161
+#, python-format
+msgid "Enter search query"
+msgstr "输入搜索内容"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:96
+#, python-format
+msgid "Refresh Model List"
+msgstr "刷新模型列表"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:97
+#, python-format
+msgid "REFRESH"
+msgstr "刷新"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:100
+#, python-format
+msgid "Fetching Latest Models"
+msgstr "正在获取最新模型"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:104
+#, python-format
+msgid "Clear Model Cache"
+msgstr "清理模型缓存"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:105
+#, python-format
+msgid "CLEAR"
+msgstr "清理"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:122
+#, python-format
+msgid "Adjust Lane Turn Speed"
+msgstr "调整转弯速度"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:123
+#, python-format
+msgid "Set the maximum speed for lane turn desires. Default is 19 mph."
+msgstr "设置转弯意图的最高速度，默认 19 mph。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:128
+#, python-format
+msgid "Use Lane Turn Desires"
+msgstr "使用转弯意图"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:129
+#, python-format
+msgid "If you're driving at 20 mph (32 km/h) or below and have your blinker on, the car will plan a turn at the nearest drivable path."
+msgstr "当车速不高于 20 mph（32 km/h）且打转向灯时，车辆会在最近可行驶路径规划转弯。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:142
+#, python-format
+msgid "Adjust Software Delay"
+msgstr "调整软件延迟"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:143
+#, python-format
+msgid "Adjust the software delay when Live Learning Steer Delay is toggled off. The default software delay value is 0.2"
+msgstr "关闭实时学习转向延迟时可调整软件延迟，默认值为 0.2。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:148
+#, python-format
+msgid "Live Learning Steer Delay"
+msgstr "实时学习转向延迟"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:200
+#, python-format
+msgid "This will delete ALL downloaded models from the cache except the currently active model. Are you sure?"
+msgstr "这将删除缓存中的所有已下载模型（当前使用的模型除外）。确定继续？"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:201
+#, python-format
+msgid "Clear Cache"
+msgstr "清理缓存"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:250
+#, python-format
+msgid "from cache"
+msgstr "来自缓存"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:250
+#, python-format
+msgid "downloaded"
+msgstr "已下载"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:251
+#, python-format
+msgid "ready"
+msgstr "就绪"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:254
+#, python-format
+msgid "download failed"
+msgstr "下载失败"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:263
+#, python-format
+msgid "Model download has started in the background. We suggest resetting calibration. Would you like to do that now?"
+msgstr "模型已在后台开始下载，建议重置校准。现在要重置吗？"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:300
+#, python-format
+msgid "Favorites"
+msgstr "收藏"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:320
+#, python-format
+msgid "Enable this for the car to learn and adapt its steering response time. Disable to use a fixed steering response time. Keeping this on provides the stock openpilot experience."
+msgstr "开启后车辆会学习并适应转向响应时间；关闭则使用固定响应时间。保持开启可获得原厂 openpilot 体验。"
+
+#: selfdrive/ui/layouts/settings/model_manager.py:324
+#, python-format
+msgid "Live Steer Delay:"
+msgstr "实时转向延迟："
+
+#: selfdrive/ui/layouts/settings/model_manager.py:330
+#, python-format
+msgid "Actuator Delay:"
+msgstr "执行器延迟："
+
+#: selfdrive/ui/layouts/settings/model_manager.py:330
+#, python-format
+msgid "Software Delay:"
+msgstr "软件延迟："
+
+#: selfdrive/ui/layouts/settings/model_manager.py:330
+#, python-format
+msgid "Total Delay:"
+msgstr "总延迟："
+
+#: selfdrive/ui/layouts/settings/model_manager.py:359
+#, python-format
+msgid "Only available when vehicle is off, or always offroad mode is on"
+msgstr "仅在车辆熄火或始终离线模式开启时可用"

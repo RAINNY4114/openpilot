@@ -2,10 +2,11 @@ import os
 import operator
 import platform
 
-from cereal import car
+from cereal import car, custom
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.selfdrive.modeld.model_manager_helpers import get_active_model_runner
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 LITE = os.getenv("LITE") is not None
@@ -80,6 +81,15 @@ def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Align with FrogPilot behavior: mapd stays running so map data is always ready.
   return True
 
+def is_snpe_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.snpe)
+
+def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.tinygrad)
+
+def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.stock)
+
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -101,7 +111,9 @@ procs = [
   PythonProcess("micd", "system.micd", iscar, enabled=not LITE),
   PythonProcess("timed", "system.timed", always_run, enabled=not PC),
 
-  PythonProcess("modeld", "selfdrive.modeld.modeld", only_onroad),
+  PythonProcess("models_manager", "selfdrive.modeld.model_manager", only_offroad),
+  PythonProcess("modeld", "selfdrive.modeld.modeld", and_(only_onroad, or_(is_stock_model, is_tinygrad_model))),
+  PythonProcess("modeld_snpe", "selfdrive.modeld.modeld_snpe", and_(only_onroad, is_snpe_model)),
   PythonProcess("coned", "selfdrive.modeld.coned", coned),
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC) and not LITE),
 

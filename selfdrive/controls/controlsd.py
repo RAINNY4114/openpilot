@@ -21,6 +21,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.controls.lib.desire_helper import AUTO_LC_BLINKER_DELAY_SEC
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
+from openpilot.selfdrive.livedelay.helpers import get_lat_delay
 from dragonpilot.selfdrive.controls.lib.human_turn_detection import HumanTurnDetection, HTDState
 
 State = log.SelfdriveState.OpenpilotState
@@ -280,7 +281,7 @@ class Controls:
       new_desired_curvature = float(new_desired_curvature) + float(self._road_edge_curv_correction)
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
-    lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
+    lat_delay = get_lat_delay(self.params, self.sm["liveDelay"].lateralDelay, self.CP.steerActuatorDelay) + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature
     steer, steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,

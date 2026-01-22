@@ -7,6 +7,7 @@ from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
 from openpilot.selfdrive.ui.layouts.settings.lincoln import LincolnLayout
+from openpilot.selfdrive.ui.layouts.settings.model_manager import ModelManagerLayout
 from openpilot.selfdrive.ui.layouts.settings.osm_maps import OSMMapsLayout
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos
 from openpilot.system.ui.lib.multilang import tr, tr_noop
@@ -37,6 +38,7 @@ class PanelType(IntEnum):
   NETWORK = 1
   TOGGLES = 2
   SOFTWARE = 3
+  MODEL_MANAGER = 4
   DEVELOPER = 5
   DRAGONPILOT = 6
   LINCOLN = 7
@@ -64,6 +66,7 @@ class SettingsLayout(Widget):
       PanelType.NETWORK: PanelInfo(tr_noop("Network"), NetworkUI(wifi_manager)),
       PanelType.TOGGLES: PanelInfo(tr_noop("Toggles"), TogglesLayout()),
       PanelType.SOFTWARE: PanelInfo(tr_noop("Software"), SoftwareLayout()),
+      PanelType.MODEL_MANAGER: PanelInfo(tr_noop("Models"), ModelManagerLayout()),
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
       PanelType.DRAGONPILOT: PanelInfo("dp", DragonpilotLayout()),
       PanelType.LINCOLN: PanelInfo("Lincoln", LincolnLayout()),

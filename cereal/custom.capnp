@@ -19,7 +19,74 @@ struct ModelExt @0xaedffd8f31e7b55d {
   rightEdgeDetected @1 :Bool;
 }
 
-struct CustomReserved2 @0xf35cc4560bbf6ec2 {
+struct ModelManagerSP @0xf35cc4560bbf6ec2 {
+  activeBundle @0 :ModelBundle;
+  selectedBundle @1 :ModelBundle;
+  availableBundles @2 :List(ModelBundle);
+
+  struct DownloadUri {
+    uri @0 :Text;
+    sha256 @1 :Text;
+  }
+
+  enum DownloadStatus {
+    notDownloading @0;
+    downloading @1;
+    downloaded @2;
+    cached @3;
+    failed @4;
+  }
+
+  struct DownloadProgress {
+    status @0 :DownloadStatus;
+    progress @1 :Float32;
+    eta @2 :UInt32;
+  }
+
+  struct Artifact {
+    fileName @0 :Text;
+    downloadUri @1 :DownloadUri;
+    downloadProgress @2 :DownloadProgress;
+  }
+
+  struct Model {
+    type @0 :Type;
+    artifact @1 :Artifact;
+    metadata @2 :Artifact;
+
+    enum Type {
+      supercombo @0;
+      navigation @1;
+      vision @2;
+      policy @3;
+    }
+  }
+
+  enum Runner {
+    snpe @0;
+    tinygrad @1;
+    stock @2;
+  }
+
+  struct Override {
+    key @0 :Text;
+    value @1 :Text;
+  }
+
+  struct ModelBundle {
+    index @0 :UInt32;
+    internalName @1 :Text;
+    displayName @2 :Text;
+    models @3 :List(Model);
+    status @4 :DownloadStatus;
+    generation @5 :UInt32;
+    environment @6 :Text;
+    runner @7 :Runner;
+    is20hz @8 :Bool;
+    ref @9 :Text;
+    minimumSelectorVersion @10 :UInt32;
+    overrides @11 :List(Override);
+  }
 }
 
 struct CustomReserved3 @0xda96579883444c35 {

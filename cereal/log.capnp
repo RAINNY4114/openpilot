@@ -2638,7 +2638,7 @@ struct Event {
     # DON'T change which struct it points to
     dpControlsState @107 :Custom.DpControlsState;
     modelExt @108 :Custom.ModelExt;
-    customReserved2 @109 :Custom.CustomReserved2;
+    modelManagerSP @109 :Custom.ModelManagerSP;
     customReserved3 @110 :Custom.CustomReserved3;
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;

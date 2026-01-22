@@ -14,6 +14,15 @@ common_src = [
   "transforms/transform.cc",
 ]
 
+thneed_src_common = [
+  "thneed/thneed_common.cc",
+  "thneed/serialize.cc",
+  "thneed/clutil_legacy.cc",
+]
+thneed_src_qcom = thneed_src_common + ["thneed/thneed_qcom2.cc"]
+thneed_src_pc = thneed_src_common + ["thneed/thneed_pc.cc"]
+thneed_src = thneed_src_qcom if arch == "larch64" else thneed_src_pc
+
 # OpenCL is a framework on Mac
 if arch == "Darwin":
   frameworks += ['OpenCL']
@@ -28,6 +37,7 @@ for pathdef, fn in {'TRANSFORM': 'transforms/transform.cl', 'LOADYUV': 'transfor
 # Compile cython
 cython_libs = envCython["LIBS"] + libs
 commonmodel_lib = lenv.Library('commonmodel', common_src)
+lenvCython.Program('runners/runmodel_pyx.so', 'runners/runmodel_pyx.pyx', LIBS=cython_libs, FRAMEWORKS=frameworks)
 lenvCython.Program('models/commonmodel_pyx.so', 'models/commonmodel_pyx.pyx', LIBS=[commonmodel_lib, *cython_libs], FRAMEWORKS=frameworks)
 tinygrad_files = ["#"+x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "/**", recursive=True, root_dir=env.Dir("#").abspath) if 'pycache' not in x]
 
@@ -68,3 +78,10 @@ if "USBGPU" in os.environ:
     lenv.SideEffect('lock', [bp, bv])  # tg doesn't support multi-process so build serially
   else:
     print("USB GPU not detected... skipping")
+
+# Build thneed runner support (only on device or when explicitly requested)
+if arch == "larch64" or GetOption('pc_thneed'):
+  thneed_lib = env.SharedLibrary('thneed', thneed_src, LIBS=[common, 'OpenCL', 'dl'])
+  thneedmodel_lib = env.Library('thneedmodel', ['runners/thneedmodel.cc'])
+  lenvCython.Program('runners/thneedmodel_pyx.so', 'runners/thneedmodel_pyx.pyx',
+                     LIBS=envCython["LIBS"]+[thneedmodel_lib, thneed_lib, common, 'dl', 'OpenCL'])
