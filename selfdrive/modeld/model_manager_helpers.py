@@ -31,8 +31,8 @@ def is_bundle_version_compatible(bundle: dict | custom.ModelManagerSP.ModelBundl
 def _coerce_bundle(bundle: dict | custom.ModelManagerSP.ModelBundle | None) -> custom.ModelManagerSP.ModelBundle | None:
   if bundle is None:
     return None
-  if isinstance(bundle, custom.ModelManagerSP.ModelBundle):
-    return bundle
+  if not isinstance(bundle, dict):
+    return bundle if hasattr(bundle, "to_dict") else None
   try:
     return custom.ModelManagerSP.ModelBundle(**bundle)
   except Exception:
