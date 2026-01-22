@@ -14,6 +14,17 @@ ModelManager = custom.ModelManagerSP
 ModelType = custom.ModelManagerSP.Model.Type
 
 
+def _enum_raw(value: object, default: int = 0) -> int:
+  if hasattr(value, "raw"):
+    return int(value.raw)
+  if isinstance(value, int):
+    return value
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return default
+
+
 def model_root() -> Path:
   root = Path(Paths.model_root())
   root.mkdir(parents=True, exist_ok=True)
@@ -58,9 +69,9 @@ def get_active_model_runner(params: Params | None = None, force_check: bool = Fa
     except (TypeError, ValueError):
       pass
 
-  runner_type = int(custom.ModelManagerSP.Runner.stock)
+  runner_type = _enum_raw(custom.ModelManagerSP.Runner.stock)
   if bundle := get_active_bundle(params):
-    runner_type = int(bundle.runner)
+    runner_type = _enum_raw(bundle.runner, runner_type)
 
   if cached != runner_type:
     params.put("ModelRunnerTypeCache", int(runner_type))
@@ -69,7 +80,7 @@ def get_active_model_runner(params: Params | None = None, force_check: bool = Fa
 
 def _find_model(bundle: custom.ModelManagerSP.ModelBundle, model_type: int) -> custom.ModelManagerSP.Model | None:
   for model in bundle.models:
-    if int(model.type) == int(model_type):
+    if _enum_raw(model.type) == _enum_raw(model_type):
       return model
   return None
 
