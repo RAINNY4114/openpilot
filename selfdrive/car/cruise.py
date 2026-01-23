@@ -3,6 +3,7 @@ import numpy as np
 
 from cereal import car
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
 
 
 # WARNING: this value was determined based on the model's training distribution,
@@ -28,9 +29,18 @@ CRUISE_INTERVAL_SIGN = {
 }
 
 
+def _coerce_int(value: bytes | str | None, default: int, min_val: int, max_val: int) -> int:
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError):
+    return default
+  return max(min_val, min(max_val, parsed))
+
+
 class VCruiseHelper:
   def __init__(self, CP):
     self.CP = CP
+    self.params = Params()
     self.v_cruise_kph = V_CRUISE_UNSET
     self.v_cruise_cluster_kph = V_CRUISE_UNSET
     self.v_cruise_kph_last = 0
@@ -99,7 +109,15 @@ class VCruiseHelper:
     if not self.button_change_states[button_type]["enabled"]:
       return
 
-    v_cruise_delta = v_cruise_delta * (5 if long_press else 1)
+    use_custom_steps = is_metric and self.params.get_bool("dp_lincoln_set_speed_step_enabled")
+    if use_custom_steps:
+      short_step = _coerce_int(self.params.get("dp_lincoln_set_speed_step_short_kph"), 1, 1, 5)
+      long_step = _coerce_int(self.params.get("dp_lincoln_set_speed_step_long_kph"), 5, 5, 30)
+      long_step = int(round(long_step / 5.0)) * 5
+      long_step = max(5, min(30, long_step))
+      v_cruise_delta = long_step if long_press else short_step
+    else:
+      v_cruise_delta = v_cruise_delta * (5 if long_press else 1)
     if long_press and self.v_cruise_kph % v_cruise_delta != 0:  # partial interval
       self.v_cruise_kph = CRUISE_NEAREST_FUNC[button_type](self.v_cruise_kph / v_cruise_delta) * v_cruise_delta
     else:
