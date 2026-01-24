@@ -62,6 +62,8 @@ class FordSafetyFlags(IntFlag):
 class FordFlags(IntFlag):
   # Static flags
   CANFD = 1
+  ALT_STEER_ANGLE = 2
+  ALT_GEAR = 4
 
 
 class RADAR:
@@ -160,6 +162,21 @@ class CAR(Platforms):
       FordCarDocs("Lincoln Aviator 2020-24", "Co-Pilot360 Plus", plug_in_hybrid=True),  # Hybrid: Grand Touring only
     ],
     CarSpecs(mass=2050, wheelbase=3.025, steerRatio=16.8),
+  )
+  FORD_EDGE_MK2 = FordPlatformConfig(
+    [FordCarDocs("Ford Edge 2022", "Co-Pilot360 Assist+")],
+    CarSpecs(mass=2050, wheelbase=3.025, steerRatio=16.8),
+    flags=FordFlags.ALT_STEER_ANGLE | FordFlags.ALT_GEAR,
+  )
+  LINCOLN_NAUTILUS_MK1 = FordPlatformConfig(
+    [FordCarDocs("Lincoln Nautilus 2018-21", "Adaptive Cruise Control with Lane Centering")],
+    CarSpecs(mass=2050, wheelbase=3.025, steerRatio=16.8),
+    flags=FordFlags.ALT_STEER_ANGLE | FordFlags.ALT_GEAR,
+  )
+  FORD_MONDEO_MK5 = FordPlatformConfig(
+    [FordCarDocs("Ford Mondeo 2022-24", "Co-Pilot360 Assist+")],
+    CarSpecs(mass=2050, wheelbase=3.025, steerRatio=16.8),
+    flags=FordFlags.ALT_STEER_ANGLE | FordFlags.ALT_GEAR,
   )
   FORD_EXPEDITION_MK4 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Expedition 2022-24", "Co-Pilot360 Assist 2.0", hybrid=False)],

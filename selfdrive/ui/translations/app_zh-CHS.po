@@ -1631,22 +1631,6 @@ msgstr "触发角度"
 msgid "Driver steering angle that triggers HTD (degrees)."
 msgstr "触发人工转弯检测的方向盘角度（度）。"
 
-# Lincoln SET step adjustment
-msgid "### SET+/SET- Step Adjustment ###"
-msgstr "### SET+/SET- 步进调整 ###"
-
-msgid "Short press step (km/h)"
-msgstr "短按步进（km/h）"
-
-msgid "Speed change per short press of SET+/SET-."
-msgstr "SET+/SET- 短按时的速度变化。"
-
-msgid "Long press step (km/h)"
-msgstr "长按步进（km/h）"
-
-msgid "Speed change per long press of SET+/SET-."
-msgstr "SET+/SET- 长按时的速度变化。"
-
 # Lincoln NAS entries
 msgid "NAS (Synology) configuration"
 msgstr "NAS（群晖）配置"

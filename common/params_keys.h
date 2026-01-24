@@ -194,9 +194,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lincoln_auto_avoid", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_auto_overtake", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_lane_preference", {PERSISTENT, INT, "0"}},
-    {"dp_lincoln_set_speed_step_enabled", {PERSISTENT, BOOL, "1"}},
-    {"dp_lincoln_set_speed_step_short_kph", {PERSISTENT, INT, "1"}},
-    {"dp_lincoln_set_speed_step_long_kph", {PERSISTENT, INT, "5"}},
     {"dp_lincoln_stop_distance_m", {PERSISTENT, INT, "4"}},     // 最终刹停/红灯跟停的期望静止车距（米）
     {"dp_lincoln_hazard_alert", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_hud_enhanced", {PERSISTENT, BOOL, "0"}},
