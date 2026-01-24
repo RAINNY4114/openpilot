@@ -75,9 +75,9 @@ class AutoOvertakeHelper:
     return LaneChangeDirection.none
 
   def _update_need_overtake(self, *, now: float, lead_present: bool, lead_d: float, v_lead: float,
-                            v_ego: float, v_cruise: float) -> bool:
+                            v_ego: float, v_cruise: float, min_cruise_speed: float, min_speed: float) -> bool:
     need_raw = False
-    if lead_present and lead_d > 0.0 and v_cruise >= OVERTAKE_MIN_CRUISE_SPEED and v_ego >= OVERTAKE_MIN_SPEED:
+    if lead_present and lead_d > 0.0 and v_cruise >= min_cruise_speed and v_ego >= min_speed:
       headway = float(lead_d / max(v_ego, 0.1))
       if (v_cruise - v_lead) >= OVERTAKE_SPEED_DELTA and headway <= OVERTAKE_HEADWAY_MAX_S:
         need_raw = True
@@ -93,18 +93,20 @@ class AutoOvertakeHelper:
   def update(self, *, enabled: bool, lc_state: LaneChangeState, v_ego: float, v_cruise: float,
              lead_present: bool, lead_d: float, v_lead: float,
              left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool,
-             lane_preference: int = LANE_PREF_AUTO) -> LaneChangeDirection:
+             lane_preference: int = LANE_PREF_AUTO, min_cruise_speed: float | None = None) -> LaneChangeDirection:
     now = time.monotonic()
     request = LaneChangeDirection.none
 
     lane_preference = lane_preference if lane_preference in (LANE_PREF_AUTO, LANE_PREF_KEEP_LEFT, LANE_PREF_KEEP_RIGHT) else LANE_PREF_AUTO
+    min_cruise_speed = OVERTAKE_MIN_CRUISE_SPEED if min_cruise_speed is None else float(min_cruise_speed)
+    min_speed = min(OVERTAKE_MIN_SPEED, min_cruise_speed)
 
     if (not enabled) or (not bsm_available):
       self.reset()
       self._last_lc_state = lc_state
       return request
 
-    if v_ego < OVERTAKE_MIN_SPEED or v_cruise < OVERTAKE_MIN_CRUISE_SPEED:
+    if v_ego < min_speed or v_cruise < min_cruise_speed:
       self.reset()
       self._last_lc_state = lc_state
       return request
@@ -133,6 +135,8 @@ class AutoOvertakeHelper:
       v_lead=v_lead,
       v_ego=v_ego,
       v_cruise=v_cruise,
+      min_cruise_speed=min_cruise_speed,
+      min_speed=min_speed,
     )
 
     # Detect lane-change completion (finishing -> off)

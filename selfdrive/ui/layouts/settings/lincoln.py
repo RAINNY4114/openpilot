@@ -160,6 +160,16 @@ class LincolnLayout(Widget):
         initial_state=self._params.get_bool("dp_lincoln_auto_overtake"),
         callback=lambda val: self._params.put_bool("dp_lincoln_auto_overtake", val),
       ),
+      spin_button_item(
+        title=lambda: tr("Auto lane-change min speed"),
+        description=lambda: tr("Minimum cruise set speed required for auto overtake (km/h)."),
+        initial_value=self._get_param_int("dp_lincoln_auto_overtake_min_cruise_kph", 90),
+        callback=lambda val: self._params.put("dp_lincoln_auto_overtake_min_cruise_kph", int(val)),
+        min_val=60,
+        max_val=140,
+        step=1,
+        suffix=tr(" km/h"),
+      ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(
         title=lambda: tr("HUD drawing enhancements"),

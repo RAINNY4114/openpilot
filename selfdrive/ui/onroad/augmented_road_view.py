@@ -993,7 +993,16 @@ class AugmentedRoadView(CameraView):
 
     # FrogPilot-style blindspot "wall" (drawn in the adjacent lane polygon)
     if cs.leftBlindspot:
-      self._draw_hud_fp_blindspot_wall(rect=rect, is_left=True)
+      drew = self._draw_hud_fp_blindspot_wall(rect=rect, is_left=True)
+      if not drew and cs.leftBlinker:
+        self._draw_hud_enhanced_side_zone(
+          rect=rect,
+          is_left=True,
+          blinker=True,
+          blindspot=True,
+          show=self._dp_indicator_show_left,
+          color=self._dp_indicator_color_left,
+        )
     elif cs.leftBlinker:
       # Keep the original (simple) blinker intent highlight when no blindspot is present
       self._draw_hud_enhanced_side_zone(
@@ -1006,7 +1015,16 @@ class AugmentedRoadView(CameraView):
       )
 
     if cs.rightBlindspot:
-      self._draw_hud_fp_blindspot_wall(rect=rect, is_left=False)
+      drew = self._draw_hud_fp_blindspot_wall(rect=rect, is_left=False)
+      if not drew and cs.rightBlinker:
+        self._draw_hud_enhanced_side_zone(
+          rect=rect,
+          is_left=False,
+          blinker=True,
+          blindspot=True,
+          show=self._dp_indicator_show_right,
+          color=self._dp_indicator_color_right,
+        )
     elif cs.rightBlinker:
       self._draw_hud_enhanced_side_zone(
         rect=rect,
@@ -1102,10 +1120,10 @@ class AugmentedRoadView(CameraView):
     except Exception:
       return np.empty((0, 2), dtype=np.float32)
 
-  def _draw_hud_fp_blindspot_wall(self, rect: rl.Rectangle, is_left: bool) -> None:
+  def _draw_hud_fp_blindspot_wall(self, rect: rl.Rectangle, is_left: bool) -> bool:
     poly = self._fp_get_adjacent_lane_polygon(rect, is_left=is_left)
     if poly.size == 0:
-      return
+      return False
 
     # 1:1 FrogPilot color: HSL(0°, 0.75, 0.5) with alpha 0.6/0.4/0.2
     r, g, b = 223, 32, 32
@@ -1122,6 +1140,7 @@ class AugmentedRoadView(CameraView):
       stops=[0.0, 0.5, 1.0],
     )
     draw_polygon(rect, poly, gradient=gradient)
+    return True
 
   def _draw_hud_fp_lane_block_wall(self, rect: rl.Rectangle, is_left: bool, *, intensity: float) -> None:
     poly = self._fp_get_adjacent_lane_polygon(rect, is_left=is_left)

@@ -713,6 +713,17 @@ def main(demo=False):
         lane_pref = 0
       lane_pref = lane_pref if lane_pref in (0, 1, 2) else 0
 
+      # Auto overtake min cruise speed (km/h), clamped for safety.
+      try:
+        raw_min_cruise = params.get("dp_lincoln_auto_overtake_min_cruise_kph") or b"90"
+        if isinstance(raw_min_cruise, bytes):
+          raw_min_cruise = raw_min_cruise.decode("utf-8", errors="ignore")
+        min_cruise_kph = int(str(raw_min_cruise).strip() or "90")
+      except Exception:
+        min_cruise_kph = 90
+      min_cruise_kph = max(60, min(140, min_cruise_kph))
+      min_cruise_speed = float(min_cruise_kph) * CV.KPH_TO_MS
+
       overtake_dir = AO.update(
         enabled=params.get_bool("dp_lincoln_auto_overtake") and lat_active and cruise_enabled,
         lc_state=DH.lane_change_state,
@@ -727,6 +738,7 @@ def main(demo=False):
         manual_blinker=bool(one_blinker),
         bsm_available=bsm_available,
         lane_preference=lane_pref,
+        min_cruise_speed=min_cruise_speed,
       )
 
       # Treat "vehicle in path" as an avoidance obstacle only when it's likely stopped/very slow and close enough.

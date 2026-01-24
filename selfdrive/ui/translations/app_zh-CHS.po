@@ -2410,6 +2410,14 @@ msgstr "自动超车"
 msgid "Highway-only: when a slower lead vehicle is detected ahead and the passing lane is clear, automatically initiate a lane change to pass, and return when clear. Experimental and requires blindspot sensors."
 msgstr "仅高速/高速公路：当前方检测到慢车且超车道清空时，自动发起变道超车，超车完成后自动回到原车道。实验性功能，需要盲点传感器（BSM）。"
 
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Auto lane-change min speed"
+msgstr "自动变道最低速度"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Minimum cruise set speed required for auto overtake (km/h)."
+msgstr "自动超车所需的最低巡航设定速度（km/h）。"
+
 #: selfdrive/ui/layouts/settings/model_manager.py:84
 #, python-format
 msgid "### Download Status ###"
