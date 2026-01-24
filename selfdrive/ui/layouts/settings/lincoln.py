@@ -170,6 +170,16 @@ class LincolnLayout(Widget):
         step=1,
         suffix=tr(" km/h"),
       ),
+      spin_button_item(
+        title=lambda: tr("Auto lane-change confirm delay"),
+        description=lambda: tr("Seconds to wait after voice + auto blinker before starting an automatic lane change."),
+        initial_value=self._get_param_int("dp_lincoln_auto_lc_confirm_delay_sec", 3),
+        callback=lambda val: self._params.put("dp_lincoln_auto_lc_confirm_delay_sec", int(val)),
+        min_val=0,
+        max_val=10,
+        step=1,
+        suffix=tr(" sec"),
+      ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(
         title=lambda: tr("HUD drawing enhancements"),

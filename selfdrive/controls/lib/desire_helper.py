@@ -14,7 +14,7 @@ AUTO_LANE_CHANGE_SPEED_MIN = 10 * CV.MPH_TO_MS
 # Auto lane-change: wait for turn-signal lead time before applying the "virtual torque"
 # to start the lane change (see preLaneChange -> laneChangeStarting).
 AUTO_LC_BLINKER_DELAY_SEC = float(os.getenv("DP_AUTO_LC_BLINKER_DELAY_SEC", "0.3"))
-AUTO_LANE_CHANGE_START_DELAY_SEC = 3.0 + AUTO_LC_BLINKER_DELAY_SEC
+AUTO_LC_DEFAULT_CONFIRM_DELAY_SEC = 3.0
 
 DESIRES = {
   LaneChangeDirection.none: {
@@ -61,7 +61,8 @@ class DesireHelper:
     return LaneChangeDirection.left if CS.leftBlinker else LaneChangeDirection.right
 
   def update(self, carstate, lateral_active, lane_change_prob, left_edge_detected, right_edge_detected,
-             auto_lane_change_direction: LaneChangeDirection = LaneChangeDirection.none):
+             auto_lane_change_direction: LaneChangeDirection = LaneChangeDirection.none,
+             auto_confirm_delay_sec: float | None = None):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     self.lane_turn_controller.update_params()
@@ -83,6 +84,11 @@ class DesireHelper:
     below_lane_change_speed = True if self.dp_lat_lca_speed == 0. else v_ego < self.dp_lat_lca_speed
     if auto_request:
       below_lane_change_speed = v_ego < AUTO_LANE_CHANGE_SPEED_MIN
+
+    auto_confirm_delay = AUTO_LC_DEFAULT_CONFIRM_DELAY_SEC if auto_confirm_delay_sec is None else float(auto_confirm_delay_sec)
+    if auto_confirm_delay < 0.0:
+      auto_confirm_delay = 0.0
+    auto_start_delay = auto_confirm_delay + AUTO_LC_BLINKER_DELAY_SEC
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
@@ -117,7 +123,7 @@ class DesireHelper:
         blindspot_detected = (((carstate.leftBlindspot or left_edge_detected) and self.lane_change_direction == LaneChangeDirection.left) or
                               ((carstate.rightBlindspot or right_edge_detected) and self.lane_change_direction == LaneChangeDirection.right))
 
-        if self._auto_requested and not blindspot_detected and (c_time - self._auto_request_start_t) >= AUTO_LANE_CHANGE_START_DELAY_SEC:
+        if self._auto_requested and not blindspot_detected and (c_time - self._auto_request_start_t) >= auto_start_delay:
           torque_applied = True
 
         # reset timer

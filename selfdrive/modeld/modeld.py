@@ -713,6 +713,16 @@ def main(demo=False):
         lane_pref = 0
       lane_pref = lane_pref if lane_pref in (0, 1, 2) else 0
 
+      # Auto lane-change confirm delay (seconds), applied to auto-avoid/overtake requests.
+      try:
+        raw_lc_delay = params.get("dp_lincoln_auto_lc_confirm_delay_sec") or b"3"
+        if isinstance(raw_lc_delay, bytes):
+          raw_lc_delay = raw_lc_delay.decode("utf-8", errors="ignore")
+        auto_lc_confirm_delay_sec = float(str(raw_lc_delay).strip() or "3")
+      except Exception:
+        auto_lc_confirm_delay_sec = 3.0
+      auto_lc_confirm_delay_sec = max(0.0, min(10.0, auto_lc_confirm_delay_sec))
+
       # Auto overtake min cruise speed (km/h), clamped for safety.
       try:
         raw_min_cruise = params.get("dp_lincoln_auto_overtake_min_cruise_kph") or b"90"
@@ -793,7 +803,7 @@ def main(demo=False):
       auto_dir = avoid_dir if avoid_dir != log.LaneChangeDirection.none else overtake_dir
       lc_state_before_update = DH.lane_change_state
       DH.update(cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,
-                auto_lane_change_direction=auto_dir)
+                auto_lane_change_direction=auto_dir, auto_confirm_delay_sec=auto_lc_confirm_delay_sec)
       if AUTO_LC_POST_FINISH_COOLDOWN_SEC > 0.0:
         if lc_state_before_update == log.LaneChangeState.laneChangeFinishing and DH.lane_change_state == log.LaneChangeState.off:
           auto_lc_post_finish_until = max(float(auto_lc_post_finish_until), now_mono + AUTO_LC_POST_FINISH_COOLDOWN_SEC)

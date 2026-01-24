@@ -2418,6 +2418,14 @@ msgstr "自动变道最低速度"
 msgid "Minimum cruise set speed required for auto overtake (km/h)."
 msgstr "自动超车所需的最低巡航设定速度（km/h）。"
 
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Auto lane-change confirm delay"
+msgstr "自动变道确认延迟"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Seconds to wait after voice + auto blinker before starting an automatic lane change."
+msgstr "语音播报与自动打灯后，等待指定秒数才开始自动变道。"
+
 #: selfdrive/ui/layouts/settings/model_manager.py:84
 #, python-format
 msgid "### Download Status ###"
