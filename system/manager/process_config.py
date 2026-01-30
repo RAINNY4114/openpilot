@@ -82,13 +82,14 @@ def mapd(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
 
 def is_snpe_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.snpe)
+  # Always re-check active bundle so runner selection survives onroad reboots.
+  return bool(get_active_model_runner(params, True) == custom.ModelManagerSP.Runner.snpe)
 
 def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.tinygrad)
+  return bool(get_active_model_runner(params, True) == custom.ModelManagerSP.Runner.tinygrad)
 
 def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.stock)
+  return bool(get_active_model_runner(params, True) == custom.ModelManagerSP.Runner.stock)
 
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))

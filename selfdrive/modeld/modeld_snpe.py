@@ -58,7 +58,6 @@ def _resolve_supercombo_paths(params: Params) -> tuple[dict, Path]:
       model_paths[ModelRunner.ONNX] = DEFAULT_ONNX_PATH
     return model_paths, DEFAULT_METADATA_PATH
 
-  params.remove("ModelManager_ActiveBundle")
   raise FileNotFoundError("modeld_snpe: no supercombo model available")
 
 

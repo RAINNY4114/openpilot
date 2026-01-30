@@ -225,7 +225,6 @@ class ModelState:
     except Exception as err:
       if using_bundle:
         cloudlog.warning(f"modeld: failed to load downloaded model, falling back: {err}")
-        params.remove("ModelManager_ActiveBundle")
       vision_meta_path = VISION_METADATA_PATH
       policy_meta_path = POLICY_METADATA_PATH
       vision_pkl_path = VISION_PKL_PATH
