@@ -994,46 +994,11 @@ class AugmentedRoadView(CameraView):
     # FrogPilot-style blindspot "wall" (drawn in the adjacent lane polygon)
     if cs.leftBlindspot:
       drew = self._draw_hud_fp_blindspot_wall(rect=rect, is_left=True)
-      if not drew and cs.leftBlinker:
-        self._draw_hud_enhanced_side_zone(
-          rect=rect,
-          is_left=True,
-          blinker=True,
-          blindspot=True,
-          show=self._dp_indicator_show_left,
-          color=self._dp_indicator_color_left,
-        )
-    elif cs.leftBlinker:
-      # Keep the original (simple) blinker intent highlight when no blindspot is present
-      self._draw_hud_enhanced_side_zone(
-        rect=rect,
-        is_left=True,
-        blinker=True,
-        blindspot=False,
-        show=self._dp_indicator_show_left,
-        color=self._dp_indicator_color_left,
-      )
+      # Removed: internal trapezoid blinker band
 
     if cs.rightBlindspot:
       drew = self._draw_hud_fp_blindspot_wall(rect=rect, is_left=False)
-      if not drew and cs.rightBlinker:
-        self._draw_hud_enhanced_side_zone(
-          rect=rect,
-          is_left=False,
-          blinker=True,
-          blindspot=True,
-          show=self._dp_indicator_show_right,
-          color=self._dp_indicator_color_right,
-        )
-    elif cs.rightBlinker:
-      self._draw_hud_enhanced_side_zone(
-        rect=rect,
-        is_left=False,
-        blinker=True,
-        blindspot=False,
-        show=self._dp_indicator_show_right,
-        color=self._dp_indicator_color_right,
-      )
+      # Removed: internal trapezoid blinker band
 
   @staticmethod
   def _fp_calculate_lane_width(lane: np.ndarray, current_lane: np.ndarray, road_edge: np.ndarray | None = None) -> float:
