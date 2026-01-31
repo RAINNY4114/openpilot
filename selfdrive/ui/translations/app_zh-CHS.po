@@ -2426,6 +2426,14 @@ msgstr "自动变道确认延迟"
 msgid "Seconds to wait after voice + auto blinker before starting an automatic lane change."
 msgstr "语音播报与自动打灯后，等待指定秒数才开始自动变道。"
 
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Auto LC edge clearance"
+msgstr "自动变道路沿安全间距"
+
+#: selfdrive/ui/layouts/settings/lincoln.py
+msgid "Block automatic lane changes when the road-edge is too close to the current lane boundary (manual signal not affected)."
+msgstr "当路沿距当前车道边界过近时，禁止自动变道（手动打灯不受影响）。"
+
 #: selfdrive/ui/layouts/settings/model_manager.py:84
 #, python-format
 msgid "### Download Status ###"

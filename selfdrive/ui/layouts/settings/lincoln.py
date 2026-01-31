@@ -16,6 +16,7 @@ from openpilot.system.ui.widgets.list_view import (
   dual_button_item,
   multiple_button_item,
   simple_item,
+  double_spin_button_item,
   spin_button_item,
   text_item,
   toggle_item,
@@ -179,6 +180,17 @@ class LincolnLayout(Widget):
         max_val=10,
         step=1,
         suffix=tr(" sec"),
+      ),
+      double_spin_button_item(
+        title=lambda: tr("Auto LC edge clearance"),
+        description=lambda: tr("Block automatic lane changes when the road-edge is too close to the current lane boundary (manual signal not affected)."),
+        initial_value=self._get_param_float("dp_lincoln_auto_lc_edge_clearance_m", 0.6),
+        callback=lambda val: self._params.put("dp_lincoln_auto_lc_edge_clearance_m", f"{val:.1f}"),
+        min_val=0.3,
+        max_val=2.0,
+        step=0.1,
+        decimals=1,
+        suffix=tr(" m"),
       ),
       simple_item(title=lambda: tr("### HUD & Visualization ###")),
       toggle_item(
@@ -441,5 +453,19 @@ class LincolnLayout(Widget):
     except (TypeError, ValueError):
       return default
 
+  @staticmethod
+  def _safe_float(val: bytes | str | None, default: float) -> float:
+    if not val:
+      return default
+    try:
+      if isinstance(val, bytes):
+        val = val.decode("utf-8", errors="ignore")
+      return float(val)
+    except (TypeError, ValueError):
+      return default
+
   def _get_param_int(self, key: str, default: int) -> int:
     return self._safe_int(self._params.get(key), default)
+
+  def _get_param_float(self, key: str, default: float) -> float:
+    return self._safe_float(self._params.get(key), default)
