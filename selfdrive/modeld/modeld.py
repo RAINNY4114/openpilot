@@ -40,6 +40,7 @@ from openpilot.selfdrive.modeld.lane_occupancy import compute_lane_occupancy
 from openpilot.selfdrive.livedelay.helpers import get_lat_delay
 from dragonpilot.selfdrive.controls.lib.road_edge_detector import RoadEdgeDetector
 
+LITE = os.getenv("LITE") is not None
 
 PROCESS_NAME = "selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -82,6 +83,7 @@ AUTO_LC_POST_FINISH_COOLDOWN_SEC = float(os.getenv("DP_LINCOLN_AUTO_LC_POST_FINI
 AUTO_LC_LANE_LINE_PROB_MIN = float(os.getenv("DP_LINCOLN_AUTO_LC_LANE_LINE_PROB_MIN", "0.30"))
 AUTO_LC_LANE_MARGIN_M = float(os.getenv("DP_LINCOLN_AUTO_LC_LANE_MARGIN_M", "-0.20"))
 AUTO_LC_SIDE_CLOSE_DIST_M = float(os.getenv("DP_LINCOLN_AUTO_LC_SIDE_CLOSE_DIST_M", "15.0"))
+AUTO_LC_EDGE_PROB_MIN = 0.35
 
 # Auto-avoid trigger tightening: keep slowdown behavior, but avoid starting lane changes on weak/noisy detections.
 AVOID_CONE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_CONE_METRIC_MIN", "0.25"))
@@ -101,48 +103,33 @@ def _min_nonzero(a: float, b: float) -> float:
 
 
 def _safe_float(val: bytes | str | None, default: float) -> float:
-  if not val:
-    return default
+  if val is None:
+    return float(default)
   try:
     if isinstance(val, bytes):
       val = val.decode("utf-8", errors="ignore")
-    return float(val)
-  except (TypeError, ValueError):
-    return default
+    return float(str(val).strip() or default)
+  except Exception:
+    return float(default)
 
 
-def _min_edge_clearance_m(lane_x, lane_y, edge_x, edge_y, *, is_left: bool, max_x_m: float = 45.0) -> float | None:
-  # Estimate road-edge clearance to the current lane boundary using model lines.
-  lane_x = np.asarray(lane_x, dtype=np.float32)
-  lane_y = np.asarray(lane_y, dtype=np.float32)
-  edge_x = np.asarray(edge_x, dtype=np.float32)
-  edge_y = np.asarray(edge_y, dtype=np.float32)
-  if lane_x.size < 2 or edge_x.size < 2:
-    return None
-  if lane_x.size != lane_y.size or edge_x.size != edge_y.size:
-    return None
+def _line_to_np(line) -> np.ndarray:
+  try:
+    return np.array([line.x, line.y, line.z], dtype=np.float32).T
+  except Exception:
+    return np.empty((0, 3), dtype=np.float32)
 
-  if float(lane_x[0]) > float(lane_x[-1]):
-    lane_x = lane_x[::-1]
-    lane_y = lane_y[::-1]
-  if float(edge_x[0]) > float(edge_x[-1]):
-    edge_x = edge_x[::-1]
-    edge_y = edge_y[::-1]
 
-  x_start = max(float(lane_x[0]), float(edge_x[0]), 2.0)
-  x_end = min(float(lane_x[-1]), float(edge_x[-1]), float(max_x_m))
-  if not (x_end > x_start):
-    return None
-
-  xs = np.linspace(x_start, x_end, num=10)
-  lane_y_s = np.interp(xs, lane_x, lane_y)
-  edge_y_s = np.interp(xs, edge_x, edge_y)
-  diff = edge_y_s - lane_y_s if is_left else lane_y_s - edge_y_s
-  diff = diff[np.isfinite(diff)]
-  diff = diff[diff > 0.0]
-  if diff.size == 0:
-    return None
-  return float(np.min(diff))
+def _avg_abs_y_distance(ref: np.ndarray, other: np.ndarray) -> float:
+  if ref.size == 0 or other.size == 0:
+    return 0.0
+  try:
+    x = ref[:, 0]
+    y = ref[:, 1]
+    y_other = np.interp(x, other[:, 0], other[:, 1])
+    return float(np.mean(np.abs(y - y_other)))
+  except Exception:
+    return 0.0
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -413,6 +400,8 @@ def main(demo=False):
   dp_lat_lca_speed = int(params.get("dp_lat_lca_speed"))
   dp_lat_lca_auto_sec = float(params.get("dp_lat_lca_auto_sec"))
   DH = DesireHelper(dp_lat_lca_speed=dp_lat_lca_speed, dp_lat_lca_auto_sec=dp_lat_lca_auto_sec)
+
+  dp_dev_is_rhd = params.get_bool("dp_dev_is_rhd")
   RED = RoadEdgeDetector(params.get_bool("dp_lat_road_edge_detection"))
   AA = AutoAvoidanceHelper()
   AO = AutoOvertakeHelper()
@@ -578,7 +567,7 @@ def main(demo=False):
       det_payload = None
 
     desire = DH.desire
-    is_rhd = sm["driverMonitoringState"].isRHD
+    is_rhd = dp_dev_is_rhd if LITE else sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
     lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay, CP.steerActuatorDelay) + LAT_SMOOTH_SECONDS
@@ -641,10 +630,15 @@ def main(demo=False):
       model_ext_send.modelExt.leftEdgeDetected = RED.left_edge_detected
       model_ext_send.modelExt.rightEdgeDetected = RED.right_edge_detected
 
+      auto_lc_edge_clearance_m = _safe_float(params.get("dp_lincoln_auto_lc_edge_clearance_m"), 0.6)
+      auto_lc_edge_clearance_m = float(max(0.2, min(2.0, auto_lc_edge_clearance_m)))
+
       # Lane-line-based adjacent-lane occupancy (more precise than fixed image ROIs).
       # Uses coned's YOLO bboxes + a pinhole approximation to estimate (x,y) in car space, then classifies objects
       # into left/right adjacent lanes based on model lane lines 1/2 (current lane boundaries).
       lane_lines_ok_for_auto_lc = False
+      left_edge_clearance_m = 0.0
+      right_edge_clearance_m = 0.0
       try:
         if det_payload is not None and (time.monotonic() - cone_last_update_t) <= 1.0:
           img_w = int(det_payload.get("imgW", 0) or 0)
@@ -673,25 +667,20 @@ def main(demo=False):
                 right_lane_haz_dist_m = _min_nonzero(right_lane_haz_dist_m, occ.right_min_dist_m)
                 left_lane_side_close = bool(left_lane_side_close or occ.left_side_close)
                 right_lane_side_close = bool(right_lane_side_close or occ.right_side_close)
-      except Exception:
-        pass
-
-      left_edge_clearance_m = None
-      right_edge_clearance_m = None
-      try:
-        lane_lines = modelv2_send.modelV2.laneLines
-        road_edges = modelv2_send.modelV2.roadEdges
-        if len(lane_lines) >= 3 and len(road_edges) >= 2:
-          left_edge_clearance_m = _min_edge_clearance_m(
-            lane_lines[1].x, lane_lines[1].y,
-            road_edges[0].x, road_edges[0].y,
-            is_left=True,
-          )
-          right_edge_clearance_m = _min_edge_clearance_m(
-            lane_lines[2].x, lane_lines[2].y,
-            road_edges[1].x, road_edges[1].y,
-            is_left=False,
-          )
+            if len(lane_lines) >= 3 and len(lane_probs) >= 3:
+              road_edges = modelv2_send.modelV2.roadEdges
+              road_edge_stds = modelv2_send.modelV2.roadEdgeStds
+              if len(road_edges) >= 2 and len(road_edge_stds) >= 2:
+                left_edge_prob = float(np.clip(1.0 - float(road_edge_stds[0]), 0.0, 1.0))
+                right_edge_prob = float(np.clip(1.0 - float(road_edge_stds[1]), 0.0, 1.0))
+                left_inner = _line_to_np(lane_lines[1]) if float(lane_probs[1]) >= AUTO_LC_LANE_LINE_PROB_MIN else np.empty((0, 3), dtype=np.float32)
+                right_inner = _line_to_np(lane_lines[2]) if float(lane_probs[2]) >= AUTO_LC_LANE_LINE_PROB_MIN else np.empty((0, 3), dtype=np.float32)
+                if left_edge_prob >= AUTO_LC_EDGE_PROB_MIN and left_inner.size:
+                  left_edge = _line_to_np(road_edges[0])
+                  left_edge_clearance_m = _avg_abs_y_distance(left_inner, left_edge)
+                if right_edge_prob >= AUTO_LC_EDGE_PROB_MIN and right_inner.size:
+                  right_edge = _line_to_np(road_edges[1])
+                  right_edge_clearance_m = _avg_abs_y_distance(right_inner, right_edge)
       except Exception:
         pass
 
@@ -701,13 +690,6 @@ def main(demo=False):
       bsm_available = bool(sm.valid.get("carParams", False) and sm["carParams"].enableBsm)
       left_ok = bsm_available and (not cs.leftBlindspot) and (not RED.left_edge_detected)
       right_ok = bsm_available and (not cs.rightBlindspot) and (not RED.right_edge_detected)
-      edge_clearance_req_m = _safe_float(params.get("dp_lincoln_auto_lc_edge_clearance_m"), 0.6)
-      edge_clearance_req_m = max(0.2, min(2.0, edge_clearance_req_m))
-      if DH.lane_change_state == log.LaneChangeState.off:
-        if left_edge_clearance_m is not None and left_edge_clearance_m < edge_clearance_req_m:
-          left_ok = False
-        if right_edge_clearance_m is not None and right_edge_clearance_m < edge_clearance_req_m:
-          right_ok = False
       # Additional forward check: don't auto lane-change into an occupied target lane.
       # This is based on coned's YOLO detections; values are 0.0 when not available.
       now_mono = time.monotonic()
@@ -733,6 +715,12 @@ def main(demo=False):
       if now_mono < float(left_lane_blocked_until):
         left_ok = False
       if now_mono < float(right_lane_blocked_until):
+        right_ok = False
+
+      # Block auto lane changes when road-edge clearance is too small.
+      if left_edge_clearance_m > 0.0 and left_edge_clearance_m < auto_lc_edge_clearance_m:
+        left_ok = False
+      if right_edge_clearance_m > 0.0 and right_edge_clearance_m < auto_lc_edge_clearance_m:
         right_ok = False
 
       # Block *starting* auto lane changes in curves. This does not cancel an in-progress auto lane change.

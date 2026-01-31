@@ -31,11 +31,78 @@ def model_root() -> Path:
   return root
 
 
-def is_bundle_version_compatible(bundle: dict | custom.ModelManagerSP.ModelBundle) -> bool:
+def _normalize_bundle_dict(bundle: dict) -> dict:
+  normalized = dict(bundle)
+  if "short_name" in normalized and "internalName" not in normalized:
+    normalized["internalName"] = normalized.pop("short_name")
+  if "internal_name" in normalized and "internalName" not in normalized:
+    normalized["internalName"] = normalized.pop("internal_name")
+  if "display_name" in normalized and "displayName" not in normalized:
+    normalized["displayName"] = normalized.pop("display_name")
+  if "is_20hz" in normalized and "is20hz" not in normalized:
+    normalized["is20hz"] = normalized.pop("is_20hz")
+  if "minimum_selector_version" in normalized and "minimumSelectorVersion" not in normalized:
+    normalized["minimumSelectorVersion"] = normalized.pop("minimum_selector_version")
+
+  models = normalized.get("models")
+  if isinstance(models, list):
+    normalized_models = []
+    for model in models:
+      if not isinstance(model, dict):
+        normalized_models.append(model)
+        continue
+      model_out = dict(model)
+      for key in ("artifact", "metadata"):
+        artifact = model_out.get(key)
+        if isinstance(artifact, dict):
+          art_out = dict(artifact)
+          if "file_name" in art_out and "fileName" not in art_out:
+            art_out["fileName"] = art_out.pop("file_name")
+          if "download_uri" in art_out and "downloadUri" not in art_out:
+            art_out["downloadUri"] = art_out.pop("download_uri")
+          if "download_progress" in art_out and "downloadProgress" not in art_out:
+            art_out["downloadProgress"] = art_out.pop("download_progress")
+          download_uri = art_out.get("downloadUri")
+          if isinstance(download_uri, dict):
+            uri_out = dict(download_uri)
+            if "url" in uri_out and "uri" not in uri_out:
+              uri_out["uri"] = uri_out.pop("url")
+            art_out["downloadUri"] = uri_out
+          model_out[key] = art_out
+      normalized_models.append(model_out)
+    normalized["models"] = normalized_models
+
+  overrides = normalized.get("overrides")
+  if isinstance(overrides, dict):
+    normalized["overrides"] = [{"key": k, "value": str(v)} for k, v in overrides.items()]
+  elif isinstance(overrides, list):
+    normalized_overrides = []
+    for item in overrides:
+      if isinstance(item, dict):
+        if "key" in item and "value" in item:
+          normalized_overrides.append(item)
+      elif isinstance(item, (list, tuple)) and len(item) == 2:
+        key, value = item
+        normalized_overrides.append({"key": str(key), "value": str(value)})
+    if normalized_overrides:
+      normalized["overrides"] = normalized_overrides
+  return normalized
+
+
+def _min_selector_version(bundle: dict | custom.ModelManagerSP.ModelBundle) -> int:
   if isinstance(bundle, dict):
-    min_version = int(bundle.get("minimumSelectorVersion", 0) or 0)
-  else:
-    min_version = int(bundle.minimumSelectorVersion)
+    if "minimumSelectorVersion" in bundle and bundle["minimumSelectorVersion"] not in (None, ""):
+      return int(bundle["minimumSelectorVersion"] or 0)
+    if "minimum_selector_version" in bundle and bundle["minimum_selector_version"] not in (None, ""):
+      return int(bundle["minimum_selector_version"] or 0)
+    return 0
+  return int(bundle.minimumSelectorVersion)
+
+
+def is_bundle_version_compatible(bundle: dict | custom.ModelManagerSP.ModelBundle) -> bool:
+  min_version = _min_selector_version(bundle)
+  if min_version == 0:
+    return True
   return bool(REQUIRED_MIN_SELECTOR_VERSION <= min_version <= CURRENT_SELECTOR_VERSION)
 
 
@@ -44,6 +111,7 @@ def _coerce_bundle(bundle: dict | custom.ModelManagerSP.ModelBundle | None) -> c
     return None
   if not isinstance(bundle, dict):
     return bundle if hasattr(bundle, "to_dict") else None
+  bundle = _normalize_bundle_dict(bundle)
   try:
     return custom.ModelManagerSP.ModelBundle(**bundle)
   except Exception:
