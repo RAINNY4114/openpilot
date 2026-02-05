@@ -20,14 +20,8 @@
 ---
 
 ## 2. 白名单存放位置（推荐）
-**仓库内置（用于“电脑端推送”）：**  
+**仓库内置（仅此一处）：**  
 `system/athena/serial_whitelist.txt`
-
-**设备持久化（可选，优先级低于仓库内置）：**  
-`/persist/comma/serial_whitelist.txt`
-
-**读取方式（合并）：**  
-同时读取两份白名单并合并，任何一处包含该 SN 即视为授权。
 
 **格式：** 一行一个序列号，例如：
 ```
@@ -36,9 +30,9 @@
 ```
 
 说明：  
-- 仓库内置适合“统一推送授权”。  
-- 设备持久化适合“现场临时追加授权”。  
-- 合并策略避免覆盖/丢失任意一侧的授权。
+- 只读取仓库内置白名单，设备本地 `/persist` 不再参与。  
+- 这样可避免 SSH 用户通过 `/persist` 绕过授权。  
+- 新增授权必须设备更新到最新仓库版本。
 
 ---
 
@@ -100,7 +94,6 @@ startup_conditions["registered_device"] = PC or (params.get("DongleId") != UNREG
 ```
 def _read_serial_whitelist() -> set[str]:
   repo_path = Path(BASEDIR) / "system" / "athena" / "serial_whitelist.txt"
-  persist_path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
 
   def _read(path: Path) -> set[str]:
     if not path.is_file():
@@ -113,9 +106,7 @@ def _read_serial_whitelist() -> set[str]:
           serials.add(s)
     return serials
 
-  serials = _read(repo_path)
-  serials.update(_read(persist_path))
-  return serials
+  return _read(repo_path)
 ```
 
 ### 4.2 在 `register()` 开头插入（在 IMEI 逻辑前）

@@ -22,7 +22,6 @@ LITE = os.getenv("LITE") is not None
 
 def _read_serial_whitelist() -> set[str]:
   repo_path = Path(BASEDIR) / "system" / "athena" / "serial_whitelist.txt"
-  persist_path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
 
   def _read(path: Path) -> set[str]:
     if not path.is_file():
@@ -35,9 +34,7 @@ def _read_serial_whitelist() -> set[str]:
           serials.add(s)
     return serials
 
-  serials = _read(repo_path)
-  serials.update(_read(persist_path))
-  return serials
+  return _read(repo_path)
 
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
