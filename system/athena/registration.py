@@ -6,6 +6,7 @@ from pathlib import Path
 
 from datetime import datetime, timedelta, UTC
 from openpilot.common.api import api_get, get_key_pair
+from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.spinner import Spinner
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
@@ -20,15 +21,22 @@ UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 LITE = os.getenv("LITE") is not None
 
 def _read_serial_whitelist() -> set[str]:
-  path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
-  if not path.is_file():
-    return set()
-  serials: set[str] = set()
-  with open(path) as f:
-    for line in f:
-      s = line.strip()
-      if s:
-        serials.add(s)
+  repo_path = Path(BASEDIR) / "system" / "athena" / "serial_whitelist.txt"
+  persist_path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
+
+  def _read(path: Path) -> set[str]:
+    if not path.is_file():
+      return set()
+    serials: set[str] = set()
+    with open(path) as f:
+      for line in f:
+        s = line.strip()
+        if s:
+          serials.add(s)
+    return serials
+
+  serials = _read(repo_path)
+  serials.update(_read(persist_path))
   return serials
 
 def is_registered_device() -> bool:

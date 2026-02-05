@@ -20,8 +20,14 @@
 ---
 
 ## 2. 白名单存放位置（推荐）
-**文件路径：**  
+**仓库内置（用于“电脑端推送”）：**  
+`system/athena/serial_whitelist.txt`
+
+**设备持久化（可选，优先级低于仓库内置）：**  
 `/persist/comma/serial_whitelist.txt`
+
+**读取方式（合并）：**  
+同时读取两份白名单并合并，任何一处包含该 SN 即视为授权。
 
 **格式：** 一行一个序列号，例如：
 ```
@@ -29,7 +35,10 @@
 536beb8b
 ```
 
-说明：放在 `/persist` 可避免频繁改代码，新增设备只需追加一行。
+说明：  
+- 仓库内置适合“统一推送授权”。  
+- 设备持久化适合“现场临时追加授权”。  
+- 合并策略避免覆盖/丢失任意一侧的授权。
 
 ---
 
@@ -90,15 +99,22 @@ startup_conditions["registered_device"] = PC or (params.get("DongleId") != UNREG
 ### 4.1 `system/athena/registration.py` 新增白名单读取函数
 ```
 def _read_serial_whitelist() -> set[str]:
-  path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
-  if not path.is_file():
-    return set()
-  serials = set()
-  with open(path) as f:
-    for line in f:
-      s = line.strip()
-      if s:
-        serials.add(s)
+  repo_path = Path(BASEDIR) / "system" / "athena" / "serial_whitelist.txt"
+  persist_path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
+
+  def _read(path: Path) -> set[str]:
+    if not path.is_file():
+      return set()
+    serials = set()
+    with open(path) as f:
+      for line in f:
+        s = line.strip()
+        if s:
+          serials.add(s)
+    return serials
+
+  serials = _read(repo_path)
+  serials.update(_read(persist_path))
   return serials
 ```
 
