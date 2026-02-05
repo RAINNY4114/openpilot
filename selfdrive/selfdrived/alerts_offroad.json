@@ -26,7 +26,7 @@
     "severity": 0
   },
   "Offroad_UnregisteredHardware": {
-    "text": "设备未授权（SN: %1）。请联系“林肯飞行家注册”。",
+    "text": "Device not authorized (SN: %1). Please contact \"Lincoln Aviator Registration\".",
     "severity": 1
   },
   "Offroad_CarUnrecognized": {
