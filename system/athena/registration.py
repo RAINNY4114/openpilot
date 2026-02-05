@@ -19,6 +19,18 @@ UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 
 LITE = os.getenv("LITE") is not None
 
+def _read_serial_whitelist() -> set[str]:
+  path = Path(Paths.persist_root() + "/comma/serial_whitelist.txt")
+  if not path.is_file():
+    return set()
+  serials: set[str] = set()
+  with open(path) as f:
+    for line in f:
+      s = line.strip()
+      if s:
+        serials.add(s)
+  return serials
+
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
   return dongle not in (None, UNREGISTERED_DONGLE_ID)
@@ -35,6 +47,17 @@ def register(show_spinner=False) -> str | None:
   entirely.
   """
   params = Params()
+
+  serial = HARDWARE.get_serial()
+  whitelist = _read_serial_whitelist()
+  if serial not in whitelist:
+    params.put("DongleId", UNREGISTERED_DONGLE_ID)
+    set_offroad_alert("Offroad_UnregisteredHardware", True, extra_text=serial)
+    return UNREGISTERED_DONGLE_ID
+
+  params.put("DongleId", serial)
+  set_offroad_alert("Offroad_UnregisteredHardware", False)
+  return serial
 
   dongle_id: str | None = params.get("DongleId")
   if dongle_id is None and Path(Paths.persist_root()+"/comma/dongle_id").is_file():

@@ -335,10 +335,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     set_offroad_alert_if_changed("Offroad_TemperatureTooHigh", show_alert, extra_text=extra_text)
 
     # *** registration check ***
-    # if not PC:
-      # we enforce this for our software, but you are welcome
-      # to make a different decision in your software
-      # startup_conditions["registered_device"] = PC or (params.get("DongleId") != UNREGISTERED_DONGLE_ID)
+    startup_conditions["registered_device"] = PC or (params.get("DongleId") != UNREGISTERED_DONGLE_ID)
 
     # Handle offroad/onroad transition
     if count % 6 == 0:

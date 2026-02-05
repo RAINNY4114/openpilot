@@ -26,7 +26,7 @@
     "severity": 0
   },
   "Offroad_UnregisteredHardware": {
-    "text": "Failed to register with comma.ai backend. It will not connect or upload to comma.ai servers, and receives no support from comma.ai. If this is a device purchased at comma.ai/shop, open a ticket at https://comma.ai/support.",
+    "text": "设备未授权（SN: %1）。请联系“林肯飞行家注册”。",
     "severity": 1
   },
   "Offroad_CarUnrecognized": {
