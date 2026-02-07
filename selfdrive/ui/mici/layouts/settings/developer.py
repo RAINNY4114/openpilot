@@ -10,6 +10,7 @@ from openpilot.system.ui.widgets import NavWidget
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyAction
+from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
 
 
 class DeveloperLayoutMici(NavWidget):
@@ -89,6 +90,10 @@ class DeveloperLayoutMici(NavWidget):
     for item in onroad_blocked_toggles:
       item.set_enabled(lambda: ui_state.is_offroad())
 
+    # Require registration for ADB/SSH
+    self._adb_toggle.set_enabled(lambda: ui_state.is_offroad() and self._is_registered())
+    self._ssh_toggle.set_enabled(self._is_registered)
+
     # Disable toggles that require not engaged
     for item in engaged_blocked_toggles:
       item.set_enabled(lambda: not ui_state.engaged)
@@ -104,6 +109,10 @@ class DeveloperLayoutMici(NavWidget):
     super().show_event()
     self._scroller.show_event()
     self._update_toggles()
+
+  def _is_registered(self) -> bool:
+    dongle_id = ui_state.params.get("DongleId")
+    return dongle_id not in (None, UNREGISTERED_DONGLE_ID)
 
   def _render(self, rect: rl.Rectangle):
     self._scroller.render(rect)

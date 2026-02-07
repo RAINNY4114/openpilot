@@ -4,6 +4,7 @@ from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import toggle_item, button_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
@@ -47,7 +48,7 @@ class DeveloperLayout(Widget):
       description=lambda: tr(DESCRIPTIONS["enable_adb"]),
       initial_state=self._params.get_bool("AdbEnabled"),
       callback=self._on_enable_adb,
-      enabled=ui_state.is_offroad,
+      enabled=lambda: ui_state.is_offroad() and self._is_registered(),
     )
 
     # SSH enable toggle + SSH key management
@@ -56,6 +57,7 @@ class DeveloperLayout(Widget):
       description="",
       initial_state=self._params.get_bool("SshEnabled"),
       callback=self._on_enable_ssh,
+      enabled=self._is_registered,
     )
     self._ssh_keys = ssh_key_item(lambda: tr("SSH Keys"), description=lambda: tr(DESCRIPTIONS["ssh_key"]))
 
@@ -103,6 +105,10 @@ class DeveloperLayout(Widget):
 
     # Toggles should be not available to change in onroad state
     ui_state.add_offroad_transition_callback(self._update_toggles)
+
+  def _is_registered(self) -> bool:
+    dongle_id = self._params.get("DongleId")
+    return dongle_id not in (None, UNREGISTERED_DONGLE_ID)
 
   def _render(self, rect):
     self._scroller.render(rect)
