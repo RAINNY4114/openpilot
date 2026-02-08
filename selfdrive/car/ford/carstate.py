@@ -1,38 +1,34 @@
-from cereal import car
-from opendbc.can.can_define import CANDefine
-from opendbc.can.parser import CANParser
-from openpilot.common.conversions import Conversions as CV
-from openpilot.selfdrive.car.ford.fordcan import CanBus
-from openpilot.selfdrive.car.ford.values import DBC, CarControllerParams, FordFlags, BUTTON_STATES
-from openpilot.selfdrive.car.interfaces import CarStateBase
+from opendbc.can import CANDefine, CANParser
+from opendbc.car import Bus, create_button_events, structs
+from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.ford.fordcan import CanBus
+from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
+from opendbc.car.interfaces import CarStateBase
 
-GearShifter = car.CarState.GearShifter
-TransmissionType = car.CarParams.TransmissionType
+from opendbc.sunnypilot.car.ford.mads import MadsCarState
+
+ButtonType = structs.CarState.ButtonEvent.Type
+GearShifter = structs.CarState.GearShifter
+TransmissionType = structs.CarParams.TransmissionType
 
 
-class CarState(CarStateBase):
-  def __init__(self, CP):
-    super().__init__(CP)
-    can_define = CANDefine(DBC[CP.carFingerprint]["pt"])
+class CarState(CarStateBase, MadsCarState):
+  def __init__(self, CP, CP_SP):
+    CarStateBase.__init__(self, CP, CP_SP)
+    MadsCarState.__init__(self, CP, CP_SP)
+    can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
     if CP.transmissionType == TransmissionType.automatic:
       self.shifter_values = can_define.dv["TransGearData"]["GearLvrPos_D_Actl"]
 
-    self.vehicle_sensors_valid = False
-
-    self.prev_distance_button = 0
     self.distance_button = 0
+    self.lc_button = 0
 
-    self.lkas_enabled = None
-    self.prev_lkas_enabled = None
-    self.buttonStates = BUTTON_STATES.copy()
-    self.buttonStatesPrev = BUTTON_STATES.copy()
+  def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
+    cp = can_parsers[Bus.pt]
+    cp_cam = can_parsers[Bus.cam]
 
-  def update(self, cp, cp_cam):
-    ret = car.CarState.new_message()
-
-    self.prev_mads_enabled = self.mads_enabled
-    self.prev_lkas_enabled = self.lkas_enabled
-    self.buttonStatesPrev = self.buttonStates.copy()
+    ret = structs.CarState()
+    ret_sp = structs.CarStateSP()
 
     # Occasionally on startup, the ABS module recalibrates the steering pinion offset, so we need to block engagement
     # The vehicle usually recovers out of this state within a minute of normal driving
@@ -45,8 +41,7 @@ class CarState(CarStateBase):
     ret.standstill = cp.vl["DesiredTorqBrk"]["VehStop_D_Stat"] == 1
 
     # gas pedal
-    ret.gas = cp.vl["EngVehicleSpThrottle"]["ApedPos_Pc_ActlArb"] / 100.
-    ret.gasPressed = ret.gas > 1e-6
+    ret.gasPressed = cp.vl["EngVehicleSpThrottle"]["ApedPos_Pc_ActlArb"] / 100. > 1e-6
 
     # brake pedal
     ret.brake = cp.vl["BrakeSnData_4"]["BrkTot_Tq_Actl"] / 32756.  # torque in Nm
@@ -76,10 +71,12 @@ class CarState(CarStateBase):
     if not self.CP.openpilotLongitudinalControl:
       ret.accFaulted = ret.accFaulted or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
 
-    # gear
+   # gear
     if self.CP.transmissionType == TransmissionType.automatic:
-      gear = self.shifter_values.get(cp.vl["TransGearData"]["GearLvrPos_D_Actl"])
-      ret.gearShifter = self.parse_gear_shifter(gear)
+        if (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] in (3, 4, 5)):
+         ret.gearShifter = GearShifter.drive
+        elif (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] == 1):
+         ret.gearShifter = GearShifter.reverse
     elif self.CP.transmissionType == TransmissionType.manual:
       ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
       if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
@@ -92,12 +89,14 @@ class CarState(CarStateBase):
     ret.stockAeb = bool(cp_cam.vl["ACCDATA_2"]["CmbbBrkDecel_B_Rq"])
 
     # button presses
-    ret.leftBlinker = ret.leftBlinkerOn = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 1
-    ret.rightBlinker = ret.rightBlinkerOn = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 2
+    ret.leftBlinker = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 1
+    ret.rightBlinker = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 2
     # TODO: block this going to the camera otherwise it will enable stock TJA
     ret.genericToggle = bool(cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"])
-    self.prev_distance_button = self.distance_button
+    prev_distance_button = self.distance_button
+    prev_lc_button = self.lc_button
     self.distance_button = cp.vl["Steering_Data_FD1"]["AccButtnGapTogglePress"]
+    self.lc_button = bool(cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"])
 
     # lock info
     ret.doorOpen = any([cp.vl["BodyInfo_3_FD1"]["DrStatDrv_B_Actl"], cp.vl["BodyInfo_3_FD1"]["DrStatPsngr_B_Actl"],
@@ -110,83 +109,23 @@ class CarState(CarStateBase):
       ret.leftBlindspot = cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
       ret.rightBlindspot = cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
 
-    self.lkas_enabled = bool(cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"])
-
-    self.buttonStates["accelCruise"] = bool(cp.vl["Steering_Data_FD1"]["CcAslButtnSetIncPress"])
-    self.buttonStates["decelCruise"] = bool(cp.vl["Steering_Data_FD1"]["CcAslButtnSetDecPress"])
-    self.buttonStates["cancel"] = bool(cp.vl["Steering_Data_FD1"]["CcAslButtnCnclPress"])
-    self.buttonStates["setCruise"] = bool(cp.vl["Steering_Data_FD1"]["CcAslButtnSetPress"])
-    self.buttonStates["resumeCruise"] = bool(cp.vl["Steering_Data_FD1"]["CcAsllButtnResPress"])
-    self.buttonStates["gapAdjustCruise"] = bool(cp.vl["Steering_Data_FD1"]["AccButtnGapTogglePress"])
-
     # Stock steering buttons so that we can passthru blinkers etc.
     self.buttons_stock_values = cp.vl["Steering_Data_FD1"]
     # Stock values from IPMA so that we can retain some stock functionality
     self.acc_tja_status_stock_values = cp_cam.vl["ACCDATA_3"]
     self.lkas_status_stock_values = cp_cam.vl["IPMA_Data"]
 
-    return ret
+    MadsCarState.update_mads(self, ret, can_parsers)
+
+    ret.buttonEvents = [
+      *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
+      *create_button_events(self.lc_button, prev_lc_button, {1: ButtonType.lkas}),
+    ]
+    return ret, ret_sp
 
   @staticmethod
-  def get_can_parser(CP):
-    messages = [
-      # sig_address, frequency
-      ("VehicleOperatingModes", 100),
-      ("BrakeSysFeatures", 50),
-      ("Yaw_Data_FD1", 100),
-      ("DesiredTorqBrk", 50),
-      ("EngVehicleSpThrottle", 100),
-      ("BrakeSnData_4", 50),
-      ("EngBrakeData", 10),
-      ("Cluster_Info1_FD1", 10),
-      ("ParkAid_Data", 50),
-      ("EPAS_INFO", 50),
-      ("Steering_Data_FD1", 10),
-      ("BodyInfo_3_FD1", 2),
-      ("RCMStatusMessage2_FD1", 10),
-    ]
-
-    if CP.flags & FordFlags.CANFD:
-      messages += [
-        ("Lane_Assist_Data3_FD1", 33),
-      ]
-    else:
-      messages += [
-        ("INSTRUMENT_PANEL", 1),
-      ]
-
-    if CP.transmissionType == TransmissionType.automatic:
-      messages += [
-        ("Gear_Shift_by_Wire_FD1", 10),
-      ]
-    elif CP.transmissionType == TransmissionType.manual:
-      messages += [
-        ("Engine_Clutch_Data", 33),
-        ("BCM_Lamp_Stat_FD1", 1),
-      ]
-
-    if CP.enableBsm and not (CP.flags & FordFlags.CANFD):
-      messages += [
-        ("Side_Detect_L_Stat", 5),
-        ("Side_Detect_R_Stat", 5),
-      ]
-
-    return CANParser(DBC[CP.carFingerprint]["pt"], messages, CanBus(CP).main)
-
-  @staticmethod
-  def get_cam_can_parser(CP):
-    messages = [
-      # sig_address, frequency
-      ("ACCDATA", 50),
-      ("ACCDATA_2", 50),
-      ("ACCDATA_3", 5),
-      ("IPMA_Data", 1),
-    ]
-
-    if CP.enableBsm and CP.flags & FordFlags.CANFD:
-      messages += [
-        ("Side_Detect_L_Stat", 5),
-        ("Side_Detect_R_Stat", 5),
-      ]
-
-    return CANParser(DBC[CP.carFingerprint]["pt"], messages, CanBus(CP).camera)
+  def get_can_parsers(CP, CP_SP):
+    return {
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).main),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
+    }
