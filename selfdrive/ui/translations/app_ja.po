@@ -176,15 +176,6 @@ msgstr "APN設定"
 msgid "Acknowledge Excessive Actuation"
 msgstr "過度な作動を承認"
 
-#: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:160
-#, python-format
-msgid ""
-"Adaptive Coasting Mode (ACM) reduces braking to allow smoother coasting when "
-"appropriate."
-msgstr ""
-"アダプティブコースティングモード（ACM）は、適切な場合にブレーキを減らしてス"
-"ムーズな惰性走行を可能にします。"
-
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:166
 #, python-format
 msgid "Adaptive Experimental Mode (AEM)"
@@ -576,11 +567,6 @@ msgstr "有効化"
 #, python-format
 msgid "Enable ADB"
 msgstr "ADBを有効化"
-
-#: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:159
-#, python-format
-msgid "Enable Adaptive Coasting Mode (ACM)"
-msgstr "アダプティブコースティングモード（ACM）を有効化"
 
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:221
 #, python-format

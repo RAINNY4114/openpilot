@@ -41,7 +41,8 @@ class CarInterface(CarInterfaceBase):
     # Faster stop-and-go starts: use the dedicated starting state to avoid sluggish PID ramp-up at standstill.
     # This is especially noticeable on Ford/Lincoln platforms where the ACC system can be slow to react.
     ret.startingState = True
-    ret.startAccel = 1.0
+    # Reduce low-speed surge in stop-and-go; smoother and safer following.
+    ret.startAccel = 0.5
     ret.vEgoStarting = 0.25
 
     if not ret.radarUnavailable and DBC[candidate][Bus.radar] == RADAR.DELPHI_MRR:

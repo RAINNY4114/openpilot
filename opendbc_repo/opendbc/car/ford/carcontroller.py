@@ -183,7 +183,9 @@ class CarController(CarControllerBase):
         accel_due_to_pitch = math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY
 
       accel_pitch_compensated = accel + accel_due_to_pitch
-      if accel_pitch_compensated > 0.3 or not CC.longActive:
+      # Release brake request as soon as we are no longer asking for decel.
+      # This prevents lingering brake precharge/drag during mild accel.
+      if accel_pitch_compensated >= 0.0 or not CC.longActive:
         self.brake_request = False
       elif accel_pitch_compensated < 0.0:
         self.brake_request = True

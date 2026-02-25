@@ -18,7 +18,6 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
-from dragonpilot.selfdrive.controls.lib.acm import ACM
 from dragonpilot.selfdrive.controls.lib.aem import AEM
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from openpilot.selfdrive.modeld.lane_occupancy import compute_ego_lane_occupancy
@@ -30,6 +29,12 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
+FOLLOW_COAST_MIN_SPEED = 1.0    # m/s
+FOLLOW_COAST_MAX_SPEED = 10.0   # m/s (~36 km/h)
+FOLLOW_COAST_MIN_HEADWAY = 1.5  # seconds
+FOLLOW_COAST_MIN_VREL = 0.0     # m/s (lead pulling away or steady)
+FOLLOW_COAST_MIN_LEAD_ACCEL = -0.2  # m/s^2 (lead not braking)
+FOLLOW_COAST_MIN_DECEL = -0.3   # m/s^2: only suppress very gentle braking
 OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
 OBSTACLE_DET_CONFIRM_S = 1.0
 OBSTACLE_CONFIDENCE_MIN = 0.8
@@ -61,8 +66,7 @@ _FP_CRUISING_SPEED = 5.0
 _FP_MTSCC_CURVATURE_CHECK = True
 
 class DPFlags:
-  ACM = 1
-  AEM = 2
+  AEM = 1
   pass
 
 def get_max_accel(v_ego):
@@ -111,7 +115,6 @@ class LongitudinalPlanner:
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
     self.solverExecutionTime = 0.0
-    self.acm = ACM()
     self.aem = AEM()
     # Curve speed control (FrogPilot-style)
     self.curve_v_target = None
@@ -719,11 +722,35 @@ class LongitudinalPlanner:
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
-    # ACM - Adaptive Coasting Module
-    if dp_flags & DPFlags.ACM:
-      user_control = long_control_off if self.CP.openpilotLongitudinalControl else not sm['selfdriveState'].enabled
-      self.acm.update_states(sm['carControl'], sm['radarState'], user_control, v_ego, v_cruise)
-      self.a_desired_trajectory = self.acm.update_a_desired_trajectory(self.a_desired_trajectory)
+    # Follow-Coast (Traffic): reduce very gentle braking at low speeds when the lead is pulling away.
+    if self._params.get_bool("dp_lincoln_follow_coast"):
+      follow_coast_active = (self.CP.openpilotLongitudinalControl and not long_control_off and mode == 'acc' and
+                             not force_slow_decel and not map_turn_limit_active and not vision_turn_limit_active and
+                             not obstacle_confirmed and
+                             FOLLOW_COAST_MIN_SPEED < v_ego < FOLLOW_COAST_MAX_SPEED and
+                             sm['controlsState'].longControlState != LongCtrlState.stopping)
+      if follow_coast_active:
+        lead_one = sm['radarState'].leadOne
+        if bool(lead_one.status):
+          try:
+            d_rel = float(lead_one.dRel)
+            v_rel = float(lead_one.vRel)
+            lead_a = float(lead_one.aLeadK)
+          except Exception:
+            d_rel = 0.0
+            v_rel = -1.0
+            lead_a = -1.0
+          headway_s = d_rel / max(v_ego, 0.1)
+          if (headway_s >= FOLLOW_COAST_MIN_HEADWAY and
+              v_rel >= FOLLOW_COAST_MIN_VREL and
+              lead_a >= FOLLOW_COAST_MIN_LEAD_ACCEL):
+            min_accel = float(np.min(self.a_desired_trajectory))
+            if min_accel > FOLLOW_COAST_MIN_DECEL:
+              self.a_desired_trajectory = np.where(
+                (self.a_desired_trajectory < 0.0) & (self.a_desired_trajectory > FOLLOW_COAST_MIN_DECEL),
+                0.0,
+                self.a_desired_trajectory,
+              )
     self.j_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC[:-1], self.mpc.j_solution)
 
     # TODO counter is only needed because radar is glitchy, remove once radar is gone

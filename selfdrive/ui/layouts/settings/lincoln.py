@@ -131,6 +131,13 @@ class LincolnLayout(Widget):
         step=5,
         suffix=tr(" %"),
       ),
+      simple_item(title=lambda: tr("### Follow-Coast (Traffic) ###")),
+      toggle_item(
+        title=lambda: tr("Follow-Coast (Traffic)"),
+        description=lambda: tr("At low speeds when following a lead, suppress very gentle braking if the lead is pulling away to smooth stop-and-go."),
+        initial_state=self._params.get_bool("dp_lincoln_follow_coast"),
+        callback=lambda val: self._params.put_bool("dp_lincoln_follow_coast", val),
+      ),
       simple_item(title=lambda: tr("### Following & Stopping ###")),
       spin_button_item(
         title=lambda: tr("Stop distance (standstill)"),

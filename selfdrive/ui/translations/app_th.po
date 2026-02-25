@@ -175,13 +175,6 @@ msgstr "การตั้งค่า APN"
 msgid "Acknowledge Excessive Actuation"
 msgstr "รับทราบการทำงานที่มากเกินไป"
 
-#: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:160
-#, python-format
-msgid ""
-"Adaptive Coasting Mode (ACM) reduces braking to allow smoother coasting when "
-"appropriate."
-msgstr "โหมดการขับขี่แบบปรับตัว (ACM) จะลดการเบรกเพื่อให้การขับขี่ราบรื่นขึ้นเมื่อเหมาะสม"
-
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:166
 #, python-format
 msgid "Adaptive Experimental Mode (AEM)"
@@ -571,11 +564,6 @@ msgstr "เปิดใช้งาน"
 #, python-format
 msgid "Enable ADB"
 msgstr "เปิดใช้งาน ADB"
-
-#: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:159
-#, python-format
-msgid "Enable Adaptive Coasting Mode (ACM)"
-msgstr "เปิดใช้งานโหมดการขับขี่แบบปรับตัว (ACM)"
 
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:221
 #, python-format

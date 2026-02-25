@@ -30,8 +30,6 @@ def main():
   dp_flags = 0
   def refresh_dp_flags() -> int:
     flags = 0
-    if params.get_bool("dp_lon_acm"):
-      flags |= DPFlags.ACM
     if params.get_bool("dp_lon_aem"):
       flags |= DPFlags.AEM
     return flags

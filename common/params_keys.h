@@ -159,7 +159,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lon_ext_radar", {PERSISTENT, BOOL, "0"}},
     {"dp_lat_road_edge_detection", {PERSISTENT, BOOL, "0"}},
     {"dp_ui_rainbow", {PERSISTENT, BOOL, "0"}},
-    {"dp_lon_acm", {PERSISTENT, BOOL, "0"}},
     {"dp_lon_aem", {PERSISTENT, BOOL, "0"}},
     {"CurveSpeedControl", {PERSISTENT, BOOL, "1"}},
     {"CurveSensitivity", {PERSISTENT, INT, "100"}},
@@ -198,6 +197,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lincoln_auto_lc_edge_clearance_m", {PERSISTENT, STRING, "0.6"}},
     {"dp_lincoln_lane_preference", {PERSISTENT, INT, "0"}},
     {"dp_lincoln_stop_distance_m", {PERSISTENT, INT, "4"}},     // 最终刹停/红灯跟停的期望静止车距（米）
+    {"dp_lincoln_follow_coast", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_hazard_alert", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_hud_enhanced", {PERSISTENT, BOOL, "0"}},
     {"dp_lincoln_perf_info_enabled", {PERSISTENT, BOOL, "0"}},

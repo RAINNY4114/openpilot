@@ -24,6 +24,8 @@ V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 
 RADAR_TO_CENTER = 2.7   # (deprecated) RADAR is ~ 2.7m ahead from center of car
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
+LEAD_HOLD_TIME_S = 0.4
+LEAD_HOLD_MAX_SPEED = 12.0  # m/s (~43 km/h), only hold in congestion speeds
 
 
 class KalmanParams:
@@ -228,6 +230,18 @@ class RadarD:
     self.radar_state_valid = False
 
     self.ready = False
+    self._lead_one_last = None
+    self._lead_one_last_t = 0.0
+    self._lead_two_last = None
+    self._lead_two_last_t = 0.0
+
+  def _apply_lead_hold(self, lead_dict, last_lead, last_time):
+    if lead_dict.get('status', False):
+      return lead_dict, lead_dict, self.current_time
+    if (self.v_ego <= LEAD_HOLD_MAX_SPEED and last_lead is not None and last_lead.get('status', False) and
+        (self.current_time - last_time) <= LEAD_HOLD_TIME_S):
+      return last_lead, last_lead, last_time
+    return lead_dict, last_lead, last_time
 
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
@@ -275,12 +289,22 @@ class RadarD:
       vision_prob_min = 0.5
       allow_radar_only = False
 
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
-                                          low_speed_override=True, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
-                                          allow_radar_only=allow_radar_only)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
-                                          low_speed_override=False, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
-                                          allow_radar_only=False)
+      lead_one = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
+                          low_speed_override=True, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
+                          allow_radar_only=allow_radar_only)
+      lead_two = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
+                          low_speed_override=False, match_prob_min=match_prob_min, vision_prob_min=vision_prob_min,
+                          allow_radar_only=False)
+
+      lead_one, self._lead_one_last, self._lead_one_last_t = self._apply_lead_hold(
+        lead_one, self._lead_one_last, self._lead_one_last_t
+      )
+      lead_two, self._lead_two_last, self._lead_two_last_t = self._apply_lead_hold(
+        lead_two, self._lead_two_last, self._lead_two_last_t
+      )
+
+      self.radar_state.leadOne = lead_one
+      self.radar_state.leadTwo = lead_two
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

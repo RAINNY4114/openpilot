@@ -175,13 +175,6 @@ msgstr "APN 设置"
 msgid "Acknowledge Excessive Actuation"
 msgstr "确认过度作动"
 
-#: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:160
-#, python-format
-msgid ""
-"Adaptive Coasting Mode (ACM) reduces braking to allow smoother coasting when "
-"appropriate."
-msgstr "主动巡航模式 (ACM) 可在适当时减少制动，实现更平稳的滑行。"
-
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:166
 #, python-format
 msgid "Adaptive Experimental Mode (AEM)"
@@ -636,6 +629,16 @@ msgid "How aggressive openpilot is when navigating through curves. Higher values
 msgstr "openpilot 过弯的激进程度。数值越高过弯更快但舒适性/稳定性下降；数值越低更慢更平顺但可能偏保守。"
 
 #: selfdrive/ui/layouts/settings/lincoln.py:134
+
+
+msgid "### Follow-Coast (Traffic) ###"
+msgstr "### 拥堵跟随滑行 ###"
+
+msgid "Follow-Coast (Traffic)"
+msgstr "拥堵跟随滑行"
+
+msgid "At low speeds when following a lead, suppress very gentle braking if the lead is pulling away to smooth stop-and-go."
+msgstr "低速跟车时，若前车在拉开则抑制很轻微的制动，使走走停停更平顺。"
 msgid "Show Curve Speed Control Speed"
 msgstr "显示曲线速度控制目标速度"
 
@@ -731,11 +734,6 @@ msgstr "启用"
 #, python-format
 msgid "Enable ADB"
 msgstr "启用 ADB"
-
-#: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:159
-#, python-format
-msgid "Enable Adaptive Coasting Mode (ACM)"
-msgstr "启用主动巡航模式 (ACM)"
 
 #: dragonpilot/selfdrive/ui/layouts/settings/dragonpilot.py:221
 #, python-format

@@ -149,12 +149,6 @@ class DragonpilotLayout(Widget):
       callback=lambda val: self._params.put_bool("dp_lon_ext_radar", val),
     )
 
-    self._toggles["dp_lon_acm"] = toggle_item(
-      title=lambda: tr("Enable Adaptive Coasting Mode (ACM)"),
-      description=tr("Adaptive Coasting Mode (ACM) reduces braking to allow smoother coasting when appropriate."),
-      initial_state=self._params.get_bool("dp_lon_acm"),
-      callback=lambda val: self._params.put_bool("dp_lon_acm", val),
-    )
 
     self._toggles["dp_lon_aem"] = toggle_item(
       title=lambda: tr("Adaptive Experimental Mode (AEM)"),
