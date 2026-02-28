@@ -24,7 +24,9 @@ from openpilot.selfdrive.modeld.lane_occupancy import compute_ego_lane_occupancy
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MAX_VALS_FORD = [1.2, 1.0, 0.8, 0.6]
+# Ford/Lincoln comfort: lower cruise accel to reduce kickdown / high RPM and encourage earlier upshifts.
+# This only limits positive accel; braking authority is unchanged.
+A_CRUISE_MAX_VALS_FORD = [1.0, 0.8, 0.65, 0.55]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4

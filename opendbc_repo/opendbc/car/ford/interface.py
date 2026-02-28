@@ -21,9 +21,19 @@ class CarInterface(CarInterfaceBase):
   def get_pid_accel_limits(CP, current_speed, cruise_speed):
     # PCM doesn't allow acceleration near cruise_speed,
     # so limit limits of pid to prevent windup
-    ACCEL_MAX_VALS = [CarControllerParams.ACCEL_MAX, 0.2]
-    ACCEL_MAX_BP = [cruise_speed - 2., cruise_speed - .4]
-    return CarControllerParams.ACCEL_MIN, np.interp(current_speed, ACCEL_MAX_BP, ACCEL_MAX_VALS)
+    # Additionally, cap positive accel by speed to reduce kickdown/high-RPM behavior on Ford/Lincoln.
+    # This aligns the PID output limits with the planner's Ford cruise accel map.
+    accel_max_speed_bp = [0., 10.0, 25., 40.]              # m/s
+    accel_max_speed_vals = [1.0, 0.8, 0.65, 0.55]          # m/s^2
+    speed_accel_cap = float(np.interp(current_speed, accel_max_speed_bp, accel_max_speed_vals))
+
+    if cruise_speed < 1e-3:
+      return CarControllerParams.ACCEL_MIN, speed_accel_cap
+
+    accel_max_bp = [cruise_speed - 2., cruise_speed - .4]  # m/s
+    accel_max_vals = [speed_accel_cap, 0.2]                # m/s^2
+    accel_max = float(np.interp(current_speed, accel_max_bp, accel_max_vals))
+    return CarControllerParams.ACCEL_MIN, min(speed_accel_cap, accel_max)
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, dp_params, docs) -> structs.CarParams:
