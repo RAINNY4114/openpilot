@@ -24,7 +24,7 @@ class CarInterface(CarInterfaceBase):
     # Additionally, cap positive accel by speed to reduce kickdown/high-RPM behavior on Ford/Lincoln.
     # This aligns the PID output limits with the planner's Ford cruise accel map.
     accel_max_speed_bp = [0., 10.0, 25., 40.]              # m/s
-    accel_max_speed_vals = [1.1, 0.9, 0.65, 0.55]          # m/s^2
+    accel_max_speed_vals = [1.0, 0.8, 0.65, 0.55]          # m/s^2
     speed_accel_cap = float(np.interp(current_speed, accel_max_speed_bp, accel_max_speed_vals))
 
     if cruise_speed < 1e-3:
