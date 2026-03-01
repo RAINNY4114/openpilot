@@ -78,6 +78,8 @@ class HudRenderer(Widget):
     self.is_cruise_available: bool = True
     self.set_speed: float = SET_SPEED_NA
     self.speed: float = 0.0
+    self._a_ego: float = 0.0
+    self._standstill: bool = False
     self.v_ego_cluster_seen: bool = False
     self._set_speed_rect: rl.Rectangle | None = None
 
@@ -94,6 +96,13 @@ class HudRenderer(Widget):
     # NOTE: Prefer explicit L/R assets instead of texture mirroring; some devices/drivers don't render negative src_rect reliably.
     self._curve_speed_icon_l: rl.Texture = gui_app.texture("icons/curve_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
     self._curve_speed_icon_r: rl.Texture = gui_app.texture("icons/curveR_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
+    # Pedal indicator icons (FrogPilot-style). Always shown onroad (no toggle).
+    self._brake_pedal_icon: rl.Texture = gui_app.texture(
+      "icons/brake_pedal.png", UI_CONFIG.button_size, UI_CONFIG.button_size, keep_aspect_ratio=False
+    )
+    self._gas_pedal_icon: rl.Texture = gui_app.texture(
+      "icons/gas_pedal.png", UI_CONFIG.button_size, UI_CONFIG.button_size, keep_aspect_ratio=False
+    )
     self._curve_speed_str: str = ""
     self._curve_dist_str: str = ""
     self._curve_state_str: str = ""
@@ -128,6 +137,9 @@ class HudRenderer(Widget):
 
     controls_state = sm['controlsState']
     car_state = sm['carState']
+
+    self._a_ego = float(car_state.aEgo)
+    self._standstill = bool(car_state.standstill)
 
     v_cruise_cluster = car_state.vCruiseCluster
     self.set_speed = (
@@ -168,6 +180,7 @@ class HudRenderer(Widget):
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     button_y = rect.y + UI_CONFIG.border_size
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+    self._draw_pedal_icons(button_x, button_y)
 
     # Lane preference button: left side, between MAX set-speed box (top-left)
     # and the driver monitoring icon (bottom-left).
@@ -190,6 +203,41 @@ class HudRenderer(Widget):
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed or self._lane_pref_button.is_pressed
+
+  def _draw_pedal_icons(self, exp_button_x: float, exp_button_y: float) -> None:
+    # FrogPilot-style pedals: opacity reflects +/- acceleration (aEgo).
+    # This is a UI hint only; it is not a physical pedal position indicator.
+    sm = ui_state.sm
+    if sm.recv_frame.get("modelV2", 0) < ui_state.started_frame:
+      return
+
+    a_ego = float(self._a_ego)
+    standstill = bool(self._standstill)
+
+    brake_opacity = 0.25
+    gas_opacity = 0.25
+    if standstill:
+      brake_opacity = 1.0
+    else:
+      if a_ego < -0.25:
+        brake_opacity = max(0.25, abs(a_ego))
+      gas_opacity = max(0.25, a_ego)
+
+    brake_opacity = float(max(0.0, min(1.0, brake_opacity)))
+    gas_opacity = float(max(0.0, min(1.0, gas_opacity)))
+
+    start_x = float(exp_button_x)
+    start_y = float(exp_button_y + UI_CONFIG.button_size + UI_CONFIG.border_size)
+
+    src_brake = rl.Rectangle(0, 0, float(self._brake_pedal_icon.width), float(self._brake_pedal_icon.height))
+    dst_brake = rl.Rectangle(start_x, start_y, float(UI_CONFIG.button_size), float(UI_CONFIG.button_size))
+    tint_brake = rl.Color(255, 255, 255, int(round(255 * brake_opacity)))
+    rl.draw_texture_pro(self._brake_pedal_icon, src_brake, dst_brake, rl.Vector2(0, 0), 0.0, tint_brake)
+
+    src_gas = rl.Rectangle(0, 0, float(self._gas_pedal_icon.width), float(self._gas_pedal_icon.height))
+    dst_gas = rl.Rectangle(start_x + UI_CONFIG.button_size / 2.0, start_y, float(UI_CONFIG.button_size), float(UI_CONFIG.button_size))
+    tint_gas = rl.Color(255, 255, 255, int(round(255 * gas_opacity)))
+    rl.draw_texture_pro(self._gas_pedal_icon, src_gas, dst_gas, rl.Vector2(0, 0), 0.0, tint_gas)
 
   def _draw_set_speed(self, rect: rl.Rectangle) -> None:
     """Draw the MAX speed indicator box."""
