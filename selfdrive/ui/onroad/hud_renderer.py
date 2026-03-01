@@ -98,10 +98,10 @@ class HudRenderer(Widget):
     self._curve_speed_icon_r: rl.Texture = gui_app.texture("icons/curveR_speed.png", UI_CONFIG.button_size, UI_CONFIG.button_size)
     # Pedal indicator icons (FrogPilot-style). Always shown onroad (no toggle).
     self._brake_pedal_icon: rl.Texture = gui_app.texture(
-      "icons/brake_pedal.png", UI_CONFIG.button_size, UI_CONFIG.button_size, keep_aspect_ratio=False
+      "icons/brake_pedal.png", UI_CONFIG.button_size, UI_CONFIG.button_size
     )
     self._gas_pedal_icon: rl.Texture = gui_app.texture(
-      "icons/gas_pedal.png", UI_CONFIG.button_size, UI_CONFIG.button_size, keep_aspect_ratio=False
+      "icons/gas_pedal.png", UI_CONFIG.button_size, UI_CONFIG.button_size
     )
     self._curve_speed_str: str = ""
     self._curve_dist_str: str = ""
@@ -180,7 +180,7 @@ class HudRenderer(Widget):
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     button_y = rect.y + UI_CONFIG.border_size
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
-    self._draw_pedal_icons(button_x, button_y)
+    self._draw_pedal_icons(rect, button_x, button_y)
 
     # Lane preference button: left side, between MAX set-speed box (top-left)
     # and the driver monitoring icon (bottom-left).
@@ -204,7 +204,7 @@ class HudRenderer(Widget):
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed or self._lane_pref_button.is_pressed
 
-  def _draw_pedal_icons(self, exp_button_x: float, exp_button_y: float) -> None:
+  def _draw_pedal_icons(self, rect: rl.Rectangle, exp_button_x: float, exp_button_y: float) -> None:
     # FrogPilot-style pedals: opacity reflects +/- acceleration (aEgo).
     # This is a UI hint only; it is not a physical pedal position indicator.
     sm = ui_state.sm
@@ -226,16 +226,36 @@ class HudRenderer(Widget):
     brake_opacity = float(max(0.0, min(1.0, brake_opacity)))
     gas_opacity = float(max(0.0, min(1.0, gas_opacity)))
 
-    start_x = float(exp_button_x)
-    start_y = float(exp_button_y + UI_CONFIG.button_size + UI_CONFIG.border_size)
+    if self._set_speed_rect is not None:
+      start_x = float(self._set_speed_rect.x)
+      start_y = float(self._set_speed_rect.y + self._set_speed_rect.height + UI_CONFIG.border_size / 2)
+    else:
+      set_speed_width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
+      start_x = float(rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - set_speed_width) / 2)
+      start_y = float(rect.y + 45 + UI_CONFIG.set_speed_height + UI_CONFIG.border_size / 2)
 
-    src_brake = rl.Rectangle(0, 0, float(self._brake_pedal_icon.width), float(self._brake_pedal_icon.height))
-    dst_brake = rl.Rectangle(start_x, start_y, float(UI_CONFIG.button_size), float(UI_CONFIG.button_size))
+    # Avoid overlapping the lane-preference button on small screens.
+    max_box_bottom_y = float(rect.y + 45 + UI_CONFIG.set_speed_height)
+    if self._set_speed_rect is not None:
+      max_box_bottom_y = float(self._set_speed_rect.y + self._set_speed_rect.height)
+    dm_box_top_y = float(rect.y + rect.height - (UI_CONFIG.border_size + UI_CONFIG.button_size))
+    pref_center_y = (max_box_bottom_y + dm_box_top_y) / 2.0
+    pref_y = float(pref_center_y - self._lane_pref_button_size / 2.0)
+
+    brake_w = float(self._brake_pedal_icon.width)
+    brake_h = float(self._brake_pedal_icon.height)
+    gas_w = float(self._gas_pedal_icon.width)
+    gas_h = float(self._gas_pedal_icon.height)
+
+    if start_y + max(brake_h, gas_h) > pref_y - UI_CONFIG.border_size / 2:
+      start_y = float(pref_y - max(brake_h, gas_h) - UI_CONFIG.border_size / 2)
+    src_brake = rl.Rectangle(0, 0, brake_w, brake_h)
+    dst_brake = rl.Rectangle(start_x, start_y, brake_w, brake_h)
     tint_brake = rl.Color(255, 255, 255, int(round(255 * brake_opacity)))
     rl.draw_texture_pro(self._brake_pedal_icon, src_brake, dst_brake, rl.Vector2(0, 0), 0.0, tint_brake)
 
-    src_gas = rl.Rectangle(0, 0, float(self._gas_pedal_icon.width), float(self._gas_pedal_icon.height))
-    dst_gas = rl.Rectangle(start_x + UI_CONFIG.button_size / 2.0, start_y, float(UI_CONFIG.button_size), float(UI_CONFIG.button_size))
+    src_gas = rl.Rectangle(0, 0, gas_w, gas_h)
+    dst_gas = rl.Rectangle(start_x + UI_CONFIG.button_size / 2.0, start_y, gas_w, gas_h)
     tint_gas = rl.Color(255, 255, 255, int(round(255 * gas_opacity)))
     rl.draw_texture_pro(self._gas_pedal_icon, src_gas, dst_gas, rl.Vector2(0, 0), 0.0, tint_gas)
 
