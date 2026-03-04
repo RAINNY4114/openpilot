@@ -158,7 +158,7 @@ class ModelRenderer(Widget):
     model = sm['modelV2']
     radar_state = sm['radarState'] if sm.valid['radarState'] else None
     lead_one = radar_state.leadOne if radar_state else None
-    render_lead_indicator = radar_state is not None and (self._longitudinal_control or ui_state.dp_lincoln_hud_enhanced)
+    render_lead_indicator = radar_state is not None
 
     # Update model data when needed
     model_updated = sm.updated['modelV2']
@@ -222,12 +222,6 @@ class ModelRenderer(Widget):
           self._lead_vehicles[i] = self._update_lead_vehicle(d_rel, v_rel, v_lead, point, self._rect)
 
   def _update_lead_box(self, radar_lead_one, model, v_ego: float, path_x_array):
-    if not ui_state.dp_lincoln_hud_enhanced:
-      self._lead_box_valid = False
-      self._lead_box_alpha = 0.0
-      self._lead_box_intensity = 0.0
-      return
-
     lead_available = False
     d_rel = 0.0
     y_rel = 0.0
@@ -333,7 +327,7 @@ class ModelRenderer(Widget):
     self._lead_box_alpha = min(1.0, self._lead_box_alpha + 0.25)
 
   def _draw_lead_box(self):
-    if not (ui_state.dp_lincoln_hud_enhanced and self._lead_box_valid) or self._lead_box_alpha <= 0.01:
+    if not self._lead_box_valid or self._lead_box_alpha <= 0.01:
       return
 
     t = float(np.clip(self._lead_box_intensity, 0.0, 1.0))
@@ -355,17 +349,14 @@ class ModelRenderer(Widget):
 
     # Update lane lines using raw points
     for i, lane_line in enumerate(self._lane_lines):
-      if ui_state.dp_lincoln_hud_enhanced:
-        base = 0.055 if i in (1, 2) else 0.050
-        line_width = base + 0.015 * self._lane_line_probs[i]
-      else:
-        line_width = 0.025 * self._lane_line_probs[i]
+      base = 0.055 if i in (1, 2) else 0.050
+      line_width = base + 0.015 * self._lane_line_probs[i]
       lane_line.projected_points = self._map_line_to_polygon(
         lane_line.raw_points, line_width, 0.0, max_idx, max_distance
       )
 
     # Update road edges using raw points
-    road_edge_width = 0.08 if ui_state.dp_lincoln_hud_enhanced else 0.025
+    road_edge_width = 0.08
     for road_edge in self._road_edges:
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, road_edge_width, 0.0, max_idx, max_distance)
 
@@ -529,25 +520,19 @@ class ModelRenderer(Widget):
         continue
 
       prob = float(self._lane_line_probs[i])
-      if ui_state.dp_lincoln_hud_enhanced:
-        alpha = float(np.clip(prob * 1.35, 0.0, 1.0))
-        if prob < 0.05:
-          alpha = 0.0
-        else:
-          alpha = max(alpha, 0.40)
+      alpha = float(np.clip(prob * 1.35, 0.0, 1.0))
+      if prob < 0.05:
+        alpha = 0.0
       else:
-        alpha = float(np.clip(prob, 0.0, 0.7))
+        alpha = max(alpha, 0.40)
 
       is_primary_lane_boundary = i in (1, 2)
-      if ui_state.dp_lincoln_hud_enhanced:
-        if is_primary_lane_boundary:
-          alpha = max(alpha, 0.80 if ui_state.status == UIStatus.ENGAGED else 0.55)
-          color = rl.Color(0, 255, 80, int(alpha * 255))
-        else:
-          alpha = max(alpha, 0.55 if ui_state.status == UIStatus.ENGAGED else 0.45)
-          color = rl.Color(0, 220, 70, int(alpha * 255))
+      if is_primary_lane_boundary:
+        alpha = max(alpha, 0.80 if ui_state.status == UIStatus.ENGAGED else 0.55)
+        color = rl.Color(0, 255, 80, int(alpha * 255))
       else:
-        color = rl.Color(255, 255, 255, int(alpha * 255))
+        alpha = max(alpha, 0.55 if ui_state.status == UIStatus.ENGAGED else 0.45)
+        color = rl.Color(0, 220, 70, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
 
     for i, road_edge in enumerate(self._road_edges):
@@ -555,12 +540,8 @@ class ModelRenderer(Widget):
         continue
 
       confidence = float(np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0))
-      if ui_state.dp_lincoln_hud_enhanced:
-        alpha = max(0.45, confidence ** 0.5)
-        color = rl.Color(255, 0, 0, int(alpha * 255))
-      else:
-        alpha = confidence
-        color = rl.Color(255, 0, 0, int(alpha * 255))
+      alpha = max(0.45, confidence ** 0.5)
+      color = rl.Color(255, 0, 0, int(alpha * 255))
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):
@@ -612,7 +593,7 @@ class ModelRenderer(Widget):
         draw_polygon(self._rect, self._path.projected_points, gradient=curve_overlay)
 
       # Lincoln HUD enhancements: tint the road band as we approach lead, then restore to green when clear
-      if ui_state.dp_lincoln_hud_enhanced and self._lead_box_intensity > 0.01:
+      if self._lead_box_intensity > 0.01:
         t = float(np.clip(self._lead_box_intensity, 0.0, 1.0))
         r = int(DP_LINCOLN_LEAD_COLOR_FAR.r + t * (DP_LINCOLN_LEAD_COLOR_NEAR.r - DP_LINCOLN_LEAD_COLOR_FAR.r))
         g = int(DP_LINCOLN_LEAD_COLOR_FAR.g + t * (DP_LINCOLN_LEAD_COLOR_NEAR.g - DP_LINCOLN_LEAD_COLOR_FAR.g))
@@ -636,31 +617,13 @@ class ModelRenderer(Widget):
       rl.draw_triangle_fan(lead.glow, len(lead.glow), rl.Color(218, 202, 37, 255))
       rl.draw_triangle_fan(lead.chevron, len(lead.chevron), rl.Color(201, 34, 49, lead.fill_alpha))
 
-      # Lincoln HUD: force-show only distance + lead speed (no TTC, no extra numbers)
-      if ui_state.dp_lincoln_hud_enhanced:
-        start_y = lead.y
-        dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
-        v_lead = max(0.0, float(getattr(lead, "v_lead", 0.0)))
-        speed_str = f"{v_lead * 3.6:.0f}km/h" if ui_state.is_metric else f"{v_lead * 2.23694:.0f}mph"
-        self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
-        self._dp_paint_centered_lead_text(speed_str, 48, lead.x, start_y + lead.sz + 40)
-      else:
-        show_distance = ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
-        show_ttc = ui_state.dp_ui_lead in [DpUiLeadMode.lead, DpUiLeadMode.all]
-
-        if show_distance or show_ttc:
-          start_y = lead.y
-
-          if show_distance:
-            dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
-            self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
-
-          if show_ttc:
-            car_state = ui_state.sm['carState']
-            ttc = (lead.d_rel / car_state.vEgo) if car_state.vEgo > 0 else float("NaN")
-            if ttc < 5.:
-              ttc_str = f"{ttc:.1f}s"
-              self._dp_paint_centered_lead_text(ttc_str, 80, lead.x, start_y + lead.sz + 40)
+      # Show distance + lead speed
+      start_y = lead.y
+      dist_str = f"{lead.d_rel:.1f}m" if ui_state.is_metric else f"{lead.d_rel * 3.28084:.1f}ft"
+      v_lead = max(0.0, float(getattr(lead, "v_lead", 0.0)))
+      speed_str = f"{v_lead * 3.6:.0f}km/h" if ui_state.is_metric else f"{v_lead * 2.23694:.0f}mph"
+      self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
+      self._dp_paint_centered_lead_text(speed_str, 48, lead.x, start_y + lead.sz + 40)
 
   @staticmethod
   def _get_path_length_idx(pos_x_array: np.ndarray, path_distance: float) -> int:

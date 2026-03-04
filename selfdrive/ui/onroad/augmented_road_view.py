@@ -53,8 +53,6 @@ INF_POINT = np.array([1000.0, 0.0, 0.0])
 # dp
 DP_INDICATOR_BLINK_RATE_FAST = int(gui_app.target_fps * 0.25)
 DP_INDICATOR_BLINK_RATE_STD = int(gui_app.target_fps * 0.5)
-DP_INDICATOR_COLOR_BSM = rl.Color(255, 255, 0, 255)
-DP_INDICATOR_COLOR_BLINKER = rl.Color(0, 255, 0, 255)
 DP_INDICATOR_COLOR_BSM_ENHANCED = rl.Color(255, 0, 0, 255)
 DP_INDICATOR_COLOR_BLINKER_ENHANCED = rl.Color(255, 255, 0, 255)
 DP_DECEL_BAR_MIN_MS2 = 0.25
@@ -782,46 +780,45 @@ class AugmentedRoadView(CameraView):
       border_color = BORDER_COLORS[UIStatus.ALKA]
     base_border_color = border_color
 
-    # Lincoln HUD enhancements: brake intensity colors the whole border (FrogPilot-style "whole frame" cue)
-    if ui_state.dp_lincoln_hud_enhanced:
-      sm = ui_state.sm
-      if sm.alive.get("carState", False):
-        cs = sm["carState"]
-        brake_pressed = bool(getattr(cs, "brakePressed", False))
+    # Brake intensity colors the whole border (FrogPilot-style "whole frame" cue)
+    sm = ui_state.sm
+    if sm.alive.get("carState", False):
+      cs = sm["carState"]
+      brake_pressed = bool(getattr(cs, "brakePressed", False))
 
-        # 1) Actual deceleration (covers stock ACC braking too)
-        a_ego = float(getattr(cs, "aEgo", 0.0))
-        decel = max(0.0, -a_ego)  # m/s^2
-        decel_intensity = float(np.interp(decel, [DP_DECEL_BAR_MIN_MS2, DP_DECEL_BAR_MAX_MS2], [0.0, 1.0]))
+      # 1) Actual deceleration (covers stock ACC braking too)
+      a_ego = float(getattr(cs, "aEgo", 0.0))
+      decel = max(0.0, -a_ego)  # m/s^2
+      decel_intensity = float(np.interp(decel, [DP_DECEL_BAR_MIN_MS2, DP_DECEL_BAR_MAX_MS2], [0.0, 1.0]))
 
-        # 2) Commanded brake (covers OP longitudinal brake actuation)
-        brake_cmd = 0.0
-        if sm.valid.get("carOutput", False):
-          brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
-        brake_intensity = float(np.interp(brake_cmd, [0.02, 0.6], [0.0, 1.0]))
+      # 2) Commanded brake (covers OP longitudinal brake actuation)
+      brake_cmd = 0.0
+      if sm.valid.get("carOutput", False):
+        brake_cmd = float(sm["carOutput"].actuatorsOutput.brake)
+      brake_intensity = float(np.interp(brake_cmd, [0.02, 0.6], [0.0, 1.0]))
 
-        intensity_raw = max(decel_intensity, brake_intensity)
-        if brake_pressed:
-          intensity_raw = max(intensity_raw, 0.20)
-        intensity = float(np.clip(self._hud_brake_filter.update(intensity_raw), 0.0, 1.0))
+      intensity_raw = max(decel_intensity, brake_intensity)
+      if brake_pressed:
+        intensity_raw = max(intensity_raw, 0.20)
+      intensity = float(np.clip(self._hud_brake_filter.update(intensity_raw), 0.0, 1.0))
 
-        if intensity > 0.02:
-          hard_brake_pred = False
-          if sm.alive.get("modelV2", False):
-            hard_brake_pred = bool(sm["modelV2"].meta.hardBrakePredicted)
+      if intensity > 0.02:
+        hard_brake_pred = False
+        if sm.alive.get("modelV2", False):
+          hard_brake_pred = bool(sm["modelV2"].meta.hardBrakePredicted)
 
-          hard_brake = hard_brake_pred or (decel >= DP_HARD_BRAKE_DECEL_MS2) or (brake_cmd >= DP_HARD_BRAKE_BRAKE_CMD)
-          if hard_brake:
-            flash_on = (time.monotonic() * DP_HARD_BRAKE_FLASH_HZ) % 1.0 < 0.5
-            border_color = rl.Color(255, 0, 0, 255) if flash_on else base_border_color
-          else:
-            t = intensity
-            border_color = rl.Color(
-              int(base_border_color.r + t * (255 - base_border_color.r)),
-              int(base_border_color.g + t * (0 - base_border_color.g)),
-              int(base_border_color.b + t * (0 - base_border_color.b)),
-              base_border_color.a,
-            )
+        hard_brake = hard_brake_pred or (decel >= DP_HARD_BRAKE_DECEL_MS2) or (brake_cmd >= DP_HARD_BRAKE_BRAKE_CMD)
+        if hard_brake:
+          flash_on = (time.monotonic() * DP_HARD_BRAKE_FLASH_HZ) % 1.0 < 0.5
+          border_color = rl.Color(255, 0, 0, 255) if flash_on else base_border_color
+        else:
+          t = intensity
+          border_color = rl.Color(
+            int(base_border_color.r + t * (255 - base_border_color.r)),
+            int(base_border_color.g + t * (0 - base_border_color.g)),
+            int(base_border_color.b + t * (0 - base_border_color.b)),
+            base_border_color.a,
+          )
 
     border_rect = rl.Rectangle(rect.x + UI_BORDER_SIZE, rect.y + UI_BORDER_SIZE,
                                rect.width - 2 * UI_BORDER_SIZE, rect.height - 2 * UI_BORDER_SIZE)
@@ -941,30 +938,17 @@ class AugmentedRoadView(CameraView):
     show = True
     color = rl.Color(0, 0, 0, 0)
 
-    if ui_state.dp_lincoln_hud_enhanced:
-      # Enhanced logic: blinker = yellow flash, blindspot = red flash, both = red fast flash
-      if bsm_state:
-        blink_rate = DP_INDICATOR_BLINK_RATE_FAST if blinker_state else DP_INDICATOR_BLINK_RATE_STD
-        show = (count // blink_rate) % 2 == 0
-        color = DP_INDICATOR_COLOR_BSM_ENHANCED
-      elif blinker_state:
-        blink_rate = DP_INDICATOR_BLINK_RATE_STD
-        show = (count // blink_rate) % 2 == 0
-        color = DP_INDICATOR_COLOR_BLINKER_ENHANCED
-      else:
-        show = False
+    # blinker = yellow flash, blindspot = red flash, both = red fast flash
+    if bsm_state:
+      blink_rate = DP_INDICATOR_BLINK_RATE_FAST if blinker_state else DP_INDICATOR_BLINK_RATE_STD
+      show = (count // blink_rate) % 2 == 0
+      color = DP_INDICATOR_COLOR_BSM_ENHANCED
+    elif blinker_state:
+      blink_rate = DP_INDICATOR_BLINK_RATE_STD
+      show = (count // blink_rate) % 2 == 0
+      color = DP_INDICATOR_COLOR_BLINKER_ENHANCED
     else:
-      if bsm_state and blinker_state:
-        show = (count // DP_INDICATOR_BLINK_RATE_FAST) % 2 == 0
-        color = DP_INDICATOR_COLOR_BSM
-      elif blinker_state:
-        show = (count // DP_INDICATOR_BLINK_RATE_STD) % 2 == 0
-        color = DP_INDICATOR_COLOR_BLINKER
-      elif bsm_state:
-        show = True
-        color = DP_INDICATOR_COLOR_BSM
-      else:
-        show = False
+      show = False
 
     return show, count, color
 
@@ -978,9 +962,6 @@ class AugmentedRoadView(CameraView):
                                            self._dp_indicator_show_right, self._dp_indicator_count_right)
 
   def _draw_hud_enhancements(self) -> None:
-    if not ui_state.dp_lincoln_hud_enhanced:
-      return
-
     sm = ui_state.sm
     if not sm.alive.get("carState", False):
       return
@@ -1186,9 +1167,6 @@ class AugmentedRoadView(CameraView):
     draw_polygon(rect, np.array(points, dtype=np.float32), gradient=gradient)
 
   def _draw_performance_info(self) -> None:
-    if not ui_state.dp_lincoln_perf_info_enabled:
-      return
-
     rect = self._content_rect
     if rect.width <= 0 or rect.height <= 0:
       return

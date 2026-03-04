@@ -1919,9 +1919,6 @@ msgstr " m"
 msgid " m/s^2"
 msgstr " m/s^2"
 
-#: selfdrive/ui/layouts/settings/lincoln.py:132
-msgid "### HUD & Visualization ###"
-msgstr "### HUD 与可视化 ###"
 
 #: selfdrive/ui/layouts/settings/lincoln.py:147
 msgid "Edit"
@@ -2170,14 +2167,6 @@ msgstr "设置完成"
 #~ msgid_plural ""
 #~ "{0} segments of your driving is in the training dataset so far."
 #~ msgstr[0] "目前已有 {} 个您的驾驶片段被纳入训练数据集。"
-#: selfdrive/ui/layouts/settings/lincoln.py:69
-msgid "Show performance info"
-msgstr "显示性能信息"
-
-#: selfdrive/ui/layouts/settings/lincoln.py:70
-msgid "Display device performance information at the bottom: CPU temperature, memory usage, CPU usage, and FPS. Requires UI restart."
-msgstr "在底部显示设备性能信息：CPU 温度、内存占用、CPU 使用率与帧率。需要重启 UI。"
-
 #: selfdrive/ui/onroad/augmented_road_view.py:270
 msgid "Curvature"
 msgstr "曲率"
@@ -2241,14 +2230,6 @@ msgstr "自动接管"
 #: selfdrive/ui/onroad/augmented_road_view.py:335
 msgid "Manual control"
 msgstr "人工接管"
-
-#: selfdrive/ui/layouts/settings/lincoln.py
-msgid "HUD drawing enhancements"
-msgstr "HUD 显示增强"
-
-#: selfdrive/ui/layouts/settings/lincoln.py
-msgid "Enable enhanced HUD visuals (blindspot zones, clearer lane lines, brake cues)."
-msgstr "启用 HUD 视觉增强（盲点区域、更清晰车道线、制动提示）。"
 
 #: selfdrive/ui/layouts/settings/settings.py
 msgid "Offline Maps"
