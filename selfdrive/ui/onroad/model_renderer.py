@@ -349,14 +349,15 @@ class ModelRenderer(Widget):
 
     # Update lane lines using raw points
     for i, lane_line in enumerate(self._lane_lines):
-      base = 0.055 if i in (1, 2) else 0.050
-      line_width = base + 0.015 * self._lane_line_probs[i]
+      base = 0.052 if i in (1, 2) else 0.050
+      gain = 0.008 if i in (1, 2) else 0.010
+      line_width = base + gain * self._lane_line_probs[i]
       lane_line.projected_points = self._map_line_to_polygon(
         lane_line.raw_points, line_width, 0.0, max_idx, max_distance
       )
 
     # Update road edges using raw points
-    road_edge_width = 0.05
+    road_edge_width = 0.08
     for road_edge in self._road_edges:
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, road_edge_width, 0.0, max_idx, max_distance)
 

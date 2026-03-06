@@ -65,7 +65,6 @@ _FP_CURVE_SENSITIVITY = 1.0
 _FP_CURVE_DETECT_LAT_A = 1.0  # m/s^2, align with FrogPilot's curve detection threshold
 _FP_TURN_AGGRESSIVENESS = 1.0
 _FP_CRUISING_SPEED = 5.0
-_FP_MTSCC_CURVATURE_CHECK = True
 _FP_TACO_LAT_BP = [5.0, 10.0, 20.0]
 _FP_TACO_LAT_VALS = [1.5, 2.0, 3.0]
 _FP_TACO_MIN_V = 0.3
@@ -200,14 +199,12 @@ class LongitudinalPlanner:
 
     map_enabled = _safe_bool("MapTurnControl", True)
     vision_enabled = _safe_bool("VisionTurnControl", True)
-    mtsc_curvature_check = _safe_bool("MTSCCurvatureCheck", True)
 
     self._fp_curve_cfg = {
       "curve_sensitivity": float(curve_sensitivity),
       "turn_aggressiveness": float(turn_aggressiveness),
       "map_enabled": bool(map_enabled),
       "vision_enabled": bool(vision_enabled),
-      "mtsc_curvature_check": bool(mtsc_curvature_check),
     }
     self._fp_curve_param_last = now
     return self._fp_curve_cfg
@@ -546,14 +543,12 @@ class LongitudinalPlanner:
     turn_aggressiveness = float(_FP_TURN_AGGRESSIVENESS)
     fp_map_enabled = False
     fp_vision_enabled = False
-    fp_mtsc_check = bool(_FP_MTSCC_CURVATURE_CHECK)
     if curve_speed_control:
       fp_cfg = self._fp_curve_config()
       curve_sensitivity = float(fp_cfg.get("curve_sensitivity", curve_sensitivity))
       turn_aggressiveness = float(fp_cfg.get("turn_aggressiveness", turn_aggressiveness))
       fp_map_enabled = bool(fp_cfg.get("map_enabled", False))
       fp_vision_enabled = bool(fp_cfg.get("vision_enabled", False))
-      fp_mtsc_check = bool(fp_cfg.get("mtsc_curvature_check", fp_mtsc_check))
 
     road_curvature = 0.0
     road_curvature_detected = False
@@ -595,8 +590,6 @@ class LongitudinalPlanner:
       mtsc_active = self._fp_map_target < v_cruise
       if road_curvature_detected and mtsc_active:
         self._fp_map_target = float(self._fp_map_target)
-      elif not road_curvature_detected and fp_mtsc_check:
-        self._fp_map_target = float(v_cruise)
       else:
         map_speed = math.sqrt((_FP_TARGET_LAT_A * turn_aggressiveness) / (map_curv * curve_sensitivity))
         self._fp_map_target = max(_FP_CRUISING_SPEED, float(map_speed))

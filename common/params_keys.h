@@ -165,7 +165,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TurnAggressiveness", {PERSISTENT, INT, "100"}},
     {"MapTurnControl", {PERSISTENT, BOOL, "1"}},
     {"VisionTurnControl", {PERSISTENT, BOOL, "1"}},
-    {"MTSCCurvatureCheck", {PERSISTENT, BOOL, "1"}},
     {"ShowCSCStatus", {PERSISTENT, BOOL, "1"}},
     {"dp_dev_audible_alert_mode", {PERSISTENT, INT, "0"}},
     {"dp_dev_auto_shutdown_in", {PERSISTENT, INT, "-5"}},
