@@ -99,7 +99,7 @@ def _road_edge_lane_offset_curvature(model_v2: log.ModelDataV2, v_ego: float, le
     left_prob = float(lane_probs[1])
     right_prob = float(lane_probs[2])
     prob = min(left_prob, right_prob)
-    if prob < 0.55:
+    if prob < 0.65:
       return 0.0
 
     left = lane_lines[1]
@@ -121,17 +121,19 @@ def _road_edge_lane_offset_curvature(model_v2: log.ModelDataV2, v_ego: float, le
 
     y_center = 0.5 * (float(y_left) + float(y_right))
 
-    # Bias away from the road edge (guardrail) while staying safely within the lane.
-    base_offset_m = 0.18
+    # Conservative edge bias: reduce lateral authority consumption on winding roads.
+    base_offset_m = 0.12
     y_target = base_offset_m if left_edge else (-base_offset_m if right_edge else 0.0)
     max_off = max(0.0, 0.5 * lane_width - 0.25)
     y_target = _clamp(float(y_target), -max_off, max_off)
 
     y_err = float(y_center - y_target)
     correction = -2.0 * y_err / (lookahead_m ** 2)
-    scale = _clamp((prob - 0.55) / 0.45, 0.0, 1.0)
+    scale = _clamp((prob - 0.65) / 0.35, 0.0, 1.0)
     correction *= scale
-    return _clamp(correction, -0.002, 0.002)
+    speed_scale = _clamp(_interp(float(v_ego), [8.0, 20.0, 35.0], [1.0, 0.75, 0.55]), 0.55, 1.0)
+    correction *= speed_scale
+    return _clamp(correction, -0.0012, 0.0012)
   except Exception:
     return 0.0
 
@@ -276,7 +278,7 @@ class Controls:
         left_edge, right_edge = _road_edge_detected(model_v2)
         raw_corr = _road_edge_lane_offset_curvature(model_v2, CS.vEgo, left_edge, right_edge)
 
-      alpha = 0.03  # ~0.3s time constant @100Hz
+      alpha = 0.02  # ~0.5s time constant @100Hz
       self._road_edge_curv_correction = (1.0 - alpha) * float(self._road_edge_curv_correction) + alpha * float(raw_corr)
       new_desired_curvature = float(new_desired_curvature) + float(self._road_edge_curv_correction)
 

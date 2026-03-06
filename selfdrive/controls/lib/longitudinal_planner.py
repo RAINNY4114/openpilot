@@ -66,6 +66,19 @@ _FP_CURVE_DETECT_LAT_A = 1.0  # m/s^2, align with FrogPilot's curve detection th
 _FP_TURN_AGGRESSIVENESS = 1.0
 _FP_CRUISING_SPEED = 5.0
 _FP_MTSCC_CURVATURE_CHECK = True
+_FP_TACO_LAT_BP = [5.0, 10.0, 20.0]
+_FP_TACO_LAT_VALS = [1.5, 2.0, 3.0]
+_FP_TACO_MIN_V = 0.3
+_FP_TACO_MAX_V = 100.0
+_FP_TACO_CURV_EPS = 1e-3
+_FP_TACO_MARGIN = 2.0
+_FP_TACO_CLIP_EPS = 0.05
+_FP_TACO_HUD_MIN_DV_ON = 0.20
+_FP_TACO_HUD_MIN_DV_OFF = 0.10
+_FP_TACO_HUD_MIN_GAP_ON = 0.10
+_FP_TACO_HUD_MIN_GAP_OFF = 0.03
+_FP_CURVE_SRC_HYST = 0.25
+_FP_CURVE_SRC_MIN_HOLD_S = 0.6
 
 class DPFlags:
   AEM = 1
@@ -122,6 +135,8 @@ class LongitudinalPlanner:
     self.curve_v_target = None
     self._curve_speed_source = 0  # 0:none, 1:vision, 2:map (published to longitudinalPlan for HUD)
     self._curve_speed_target = float("nan")
+    self._curve_speed_source_last_switch_t = 0.0
+    self._taco_hud_active = False
     self._fp_map_target = float("nan")
     self._fp_vision_target = float("nan")
     self._fp_road_curvature = 0.0
@@ -259,7 +274,7 @@ class LongitudinalPlanner:
     return float(max_pred_lat_acc / max(v_ego, 1.0) ** 2)
 
   @staticmethod
-  def parse_model(model_msg):
+  def parse_model(model_msg, v_ego: float, taco_tune_enabled: bool):
     if (len(model_msg.position.x) == ModelConstants.IDX_N and
       len(model_msg.velocity.x) == ModelConstants.IDX_N and
       len(model_msg.acceleration.x) == ModelConstants.IDX_N):
@@ -288,7 +303,34 @@ class LongitudinalPlanner:
         throttle_prob = 1.0
     except Exception:
       throttle_prob = 1.0
-    return x, v, a, j, float(throttle_prob)
+
+    taco_curve_target = float("nan")
+    taco_clip_max_reduction = 0.0
+    if taco_tune_enabled and v_ego > 0.1:
+      try:
+        orientation_rate = getattr(model_msg, "orientationRate", None)
+        orientation_z = getattr(orientation_rate, "z", [])
+        if len(orientation_z) == ModelConstants.IDX_N:
+          v_orig = np.array(v, copy=True)
+          max_lat_accel = float(np.interp(v_ego, _FP_TACO_LAT_BP, _FP_TACO_LAT_VALS))
+          curvatures = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, orientation_z) / np.clip(v, _FP_TACO_MIN_V, _FP_TACO_MAX_V)
+          max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + _FP_TACO_CURV_EPS)) - _FP_TACO_MARGIN
+          max_v = np.clip(max_v, 0.0, _FP_TACO_MAX_V)
+          v_clipped = np.minimum(max_v, v)
+
+          reduction = np.array(v_orig - v_clipped)
+          clip_mask = np.isfinite(reduction) & (reduction > _FP_TACO_CLIP_EPS)
+          if np.any(clip_mask):
+            v = v_clipped
+            taco_clip_max_reduction = float(np.max(reduction[clip_mask]))
+            valid_v = v_clipped[clip_mask & np.isfinite(v_clipped) & (v_clipped > 0.0)]
+            if valid_v.size > 0:
+              taco_curve_target = float(np.min(valid_v))
+      except Exception:
+        taco_curve_target = float("nan")
+        taco_clip_max_reduction = 0.0
+
+    return x, v, a, j, float(throttle_prob), taco_curve_target, float(taco_clip_max_reduction)
 
   def _fp_calc_curvature(self, p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> float:
     side_a = self._map_distance_to_point(p2[0], p2[1], p3[0], p3[1])
@@ -623,7 +665,11 @@ class LongitudinalPlanner:
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
-    x, v, a, j, throttle_prob = self.parse_model(sm['modelV2'])
+    x, v, a, j, throttle_prob, taco_curve_target, taco_clip_max_reduction = self.parse_model(
+      sm['modelV2'],
+      v_ego=float(v_ego),
+      taco_tune_enabled=bool(curve_speed_control),
+    )
     # Don't clip at low speeds since throttle_prob doesn't account for creep
     self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED
 
@@ -683,26 +729,6 @@ class LongitudinalPlanner:
       # Reset limiter state when disabled or no obstacle (prevents stale cap when toggling quickly).
       self._obstacle_v_cap = float("nan")
 
-    # HUD source label: report which limiter is actively tightening the cruise target.
-    # NOTE: Don't gate on `long_control_off`/`longActive` since Ford often runs stock ACC; users still want to know
-    # whether the limiting comes from map or vision.
-    if map_turn_limit_active and vision_turn_limit_active:
-      self._curve_speed_source = 2 if self._fp_map_target <= self._fp_vision_target else 1
-    elif map_turn_limit_active:
-      self._curve_speed_source = 2  # map
-    elif self.curve_v_target is not None:
-      self._curve_speed_source = 1  # vision
-    else:
-      self._curve_speed_source = 0
-
-    if map_turn_limit_active or vision_turn_limit_active:
-      try:
-        self._curve_speed_target = float(min(self._fp_map_target, self._fp_vision_target))
-      except Exception:
-        self._curve_speed_target = float("nan")
-    else:
-      self._curve_speed_target = float("nan")
-
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
 
@@ -724,6 +750,69 @@ class LongitudinalPlanner:
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
+
+    # HUD source label: report which limiter is actively tightening the currently effective speed target.
+    # Source values are published in longitudinalPlan for hud_renderer.
+    curve_candidates: list[tuple[int, float]] = []
+    if map_turn_limit_active and math.isfinite(float(self._fp_map_target)) and float(self._fp_map_target) > 0.0:
+      curve_candidates.append((2, float(self._fp_map_target)))  # map
+    if vision_turn_limit_active and math.isfinite(float(self._fp_vision_target)) and float(self._fp_vision_target) > 0.0:
+      curve_candidates.append((1, float(self._fp_vision_target)))  # vision
+
+    taco_hud_active = False
+    try:
+      if curve_speed_control and math.isfinite(float(taco_curve_target)) and float(taco_curve_target) > 0.0:
+        target_gap = float(v_cruise_pre_curve + v_cruise_diff - taco_curve_target)
+        if bool(self._taco_hud_active):
+          min_dv = float(_FP_TACO_HUD_MIN_DV_OFF)
+          min_gap = float(_FP_TACO_HUD_MIN_GAP_OFF)
+        else:
+          min_dv = float(_FP_TACO_HUD_MIN_DV_ON)
+          min_gap = float(_FP_TACO_HUD_MIN_GAP_ON)
+        taco_hud_active = bool(float(taco_clip_max_reduction) >= min_dv and float(target_gap) >= min_gap)
+    except Exception:
+      taco_hud_active = False
+    self._taco_hud_active = bool(taco_hud_active)
+    if taco_hud_active:
+      curve_candidates.append((1, float(taco_curve_target)))  # taco is model/vision-derived
+
+    if curve_candidates:
+      curve_candidates_sorted = sorted(curve_candidates, key=lambda it: float(it[1]))
+      src, target = curve_candidates_sorted[0]
+      prev_src = int(getattr(self, "_curve_speed_source", 0))
+      prev_target = float(getattr(self, "_curve_speed_target", float("nan")))
+
+      # Keep previous source when candidates are near-equal to prevent source label jitter.
+      if len(curve_candidates_sorted) > 1:
+        top0 = float(curve_candidates_sorted[0][1])
+        top1 = float(curve_candidates_sorted[1][1])
+        if prev_src in (1, 2) and (top1 - top0) < _FP_CURVE_SRC_HYST:
+          for s, t in curve_candidates_sorted:
+            if int(s) == prev_src and math.isfinite(float(t)):
+              src, target = int(s), float(t)
+              break
+
+      # Enforce minimum hold time on source switching if the previous source is still valid.
+      if prev_src in (1, 2) and int(src) != prev_src:
+        elapsed = float(now - float(getattr(self, "_curve_speed_source_last_switch_t", 0.0)))
+        if elapsed < float(_FP_CURVE_SRC_MIN_HOLD_S):
+          for s, t in curve_candidates_sorted:
+            if int(s) == prev_src and math.isfinite(float(t)):
+              src, target = int(s), float(t)
+              break
+
+      if math.isfinite(prev_target):
+        target = min(float(target), float(prev_target + _FP_CURVE_SRC_HYST))
+
+      self._curve_speed_source = int(src)
+      self._curve_speed_target = float(target)
+      if prev_src != int(src):
+        self._curve_speed_source_last_switch_t = float(now)
+    else:
+      self._curve_speed_source = 0
+      self._curve_speed_target = float("nan")
+      self._taco_hud_active = False
+
     # Follow-Coast (Traffic): reduce very gentle braking at low speeds when the lead is pulling away.
     if self._params.get_bool("dp_lincoln_follow_coast"):
       follow_coast_active = (self.CP.openpilotLongitudinalControl and not long_control_off and mode == 'acc' and

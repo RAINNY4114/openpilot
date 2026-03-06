@@ -116,6 +116,7 @@ class SelfdriveD:
     self.mismatch_counter = 0
     self.cruise_mismatch_counter = 0
     self.last_steering_pressed_frame = 0
+    self._last_steer_saturated_log_t = 0.0
     self.distance_traveled = 0
     self.last_functional_fan_frame = 0
     self.events_prev = []
@@ -378,11 +379,26 @@ class SelfdriveD:
       clipped_speed = max(CS.vEgo, 0.3)
       actual_lateral_accel = controlstate.curvature * (clipped_speed**2)
       desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
-      undershooting = abs(desired_lateral_accel) / abs(1e-3 + actual_lateral_accel) > 1.2
+      undershoot_ratio = abs(desired_lateral_accel) / abs(1e-3 + actual_lateral_accel)
+      undershooting = undershoot_ratio > 1.2
       turning = abs(desired_lateral_accel) > 1.0
       # TODO: lac.saturated includes speed and other checks, should be pulled out
       if undershooting and turning and lac.saturated:
         self.events.add(EventName.steerSaturated)
+        now = time.monotonic()
+        if now - self._last_steer_saturated_log_t > 1.0:
+          cloudlog.warning("steerSaturated_triggered",
+                           vEgo=float(CS.vEgo),
+                           clippedSpeed=float(clipped_speed),
+                           desiredLateralAccel=float(desired_lateral_accel),
+                           actualLateralAccel=float(actual_lateral_accel),
+                           undershootRatio=float(undershoot_ratio),
+                           modelDesiredCurvature=float(self.sm['modelV2'].action.desiredCurvature),
+                           controlsCurvature=float(controlstate.curvature),
+                           latState=controlstate.lateralControlState.which(),
+                           lacSaturated=bool(lac.saturated),
+                           steeringPressed=bool(CS.steeringPressed))
+          self._last_steer_saturated_log_t = now
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25

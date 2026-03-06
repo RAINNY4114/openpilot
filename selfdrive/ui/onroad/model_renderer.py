@@ -356,7 +356,7 @@ class ModelRenderer(Widget):
       )
 
     # Update road edges using raw points
-    road_edge_width = 0.08
+    road_edge_width = 0.05
     for road_edge in self._road_edges:
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, road_edge_width, 0.0, max_idx, max_distance)
 

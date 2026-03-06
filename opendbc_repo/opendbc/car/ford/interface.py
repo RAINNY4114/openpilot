@@ -42,7 +42,7 @@ class CarInterface(CarInterfaceBase):
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
     ret.steerControlType = structs.CarParams.SteerControlType.angle
     ret.steerActuatorDelay = 0.2
-    ret.steerLimitTimer = 1.0
+    ret.steerLimitTimer = 5.0
     ret.steerAtStandstill = True
 
     ret.longitudinalTuning.kiBP = [0.]
