@@ -26,7 +26,7 @@
     "severity": 0
   },
   "Offroad_UnregisteredHardware": {
-    "text": "Device not authorized (SN: %1). Please contact \"Lincoln Aviator Registration\".",
+    "text": "Device not authorized (SN: %1). Please contact \"ZH\".",
     "severity": 1
   },
   "Offroad_CarUnrecognized": {

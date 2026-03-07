@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import hashlib
+import time
 
 import requests
 
@@ -22,6 +23,8 @@ ACTIVATION_BASE_URL = os.getenv(
   os.getenv("REMOTE_AGENT_BASE_URL", "https://cp.zh182.cn"),
 ).rstrip("/")
 ACTIVATION_TIMEOUT_SEC = max(float(os.getenv("ACTIVATION_TIMEOUT_SEC", "8")), 1.0)
+ACTIVATION_SERVER_RETRY_WINDOW_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETRY_WINDOW_SEC", "45")), 0.0)
+ACTIVATION_SERVER_RETRY_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETRY_INTERVAL_SEC", "2")), 0.2)
 
 _VALID_LICENSE_STATUS = {"authorized", "blocked", "expired", "pending"}
 
@@ -143,10 +146,31 @@ def register(show_spinner: bool = False) -> str:
 
   try:
     # 1) Primary path: server authorization decides activation directly.
-    server_status = _check_server_license_status(serial, sw_version, spinner)
+    server_status: str | None = None
+    if ACTIVATION_USE_SERVER and ACTIVATION_BASE_URL:
+      deadline = time.monotonic() + ACTIVATION_SERVER_RETRY_WINDOW_SEC
+      while True:
+        server_status = _check_server_license_status(serial, sw_version, spinner)
+        if server_status is not None:
+          break
+
+        now = time.monotonic()
+        if now >= deadline:
+          break
+
+        if spinner is not None:
+          remaining_sec = int(max(deadline - now, 0))
+          spinner.update(f"registering device - serial: {serial}, waiting auth server ({remaining_sec}s)")
+
+        sleep_sec = min(ACTIVATION_SERVER_RETRY_INTERVAL_SEC, max(deadline - now, 0))
+        if sleep_sec > 0:
+          time.sleep(sleep_sec)
+
     if server_status is not None:
       if server_status == "authorized":
         return _set_authorized(params, serial)
+      if spinner is not None:
+        spinner.update(f"registering device - serial: {serial}, contact ZH")
       return _set_unregistered(params, serial)
 
     # 2) Fallback path: server unreachable -> local whitelist fallback.
@@ -156,6 +180,8 @@ def register(show_spinner: bool = False) -> str:
     if serial in whitelist:
       return _set_authorized(params, serial)
 
+    if spinner is not None:
+      spinner.update(f"registering device - serial: {serial}, contact ZH")
     return _set_unregistered(params, serial)
   finally:
     if spinner is not None:

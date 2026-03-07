@@ -108,7 +108,12 @@ class RemoteAgent:
 
   def _get_str_param(self, key: str) -> str:
     try:
-      return self.params.get(key) or ""
+      value = self.params.get(key)
+      if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+      if value is None:
+        return ""
+      return str(value)
     except Exception:
       return ""
 
@@ -131,7 +136,6 @@ class RemoteAgent:
     self.token = data.get("token") or self.token
     self.license_status = data.get("license_status", self.license_status)
     self.next_poll_sec = int(data.get("heartbeat_interval_sec", self.cfg.heartbeat_sec))
-    cloudlog.info("remote_agent.register.ok", serial=self.serial, license_status=self.license_status)
 
   def heartbeat(self) -> None:
     payload = {
@@ -209,8 +213,6 @@ class RemoteAgent:
     try:
       ws = create_connection(ws_url, timeout=max(self.cfg.request_timeout_sec, 3))
       ws.settimeout(self.cfg.terminal_recv_timeout_sec)
-      cloudlog.info("remote_agent.terminal.attach.ok", session_id=session_id)
-
       proc = subprocess.Popen(  # pylint: disable=consider-using-with
         [self.cfg.terminal_shell],
         stdin=subprocess.PIPE,
@@ -301,11 +303,11 @@ class RemoteAgent:
         elif msg_type == "pong":
           continue
 
-      cloudlog.info("remote_agent.terminal.session.done", session_id=session_id, exit_code=exit_code)
+      cloudlog.info(f"remote_agent.terminal.session.done session_id={session_id} exit_code={exit_code}")
     except WebSocketException as e:
-      cloudlog.exception("remote_agent.terminal.ws_error", session_id=session_id, error=str(e))
+      cloudlog.exception(f"remote_agent.terminal.ws_error session_id={session_id} error={e}")
     except Exception:
-      cloudlog.exception("remote_agent.terminal.loop_exception", session_id=session_id)
+      cloudlog.exception(f"remote_agent.terminal.loop_exception session_id={session_id}")
     finally:
       done_event.set()
       if proc is not None and proc.poll() is None:
@@ -451,7 +453,7 @@ class RemoteAgent:
       try:
         self.report_result(command_id, result)
       except Exception:
-        cloudlog.exception("remote_agent.command.report_failed", command_id=command_id)
+        cloudlog.exception(f"remote_agent.command.report_failed command_id={command_id}")
 
   def run_forever(self) -> None:
     if not self.cfg.base_url:
@@ -459,7 +461,7 @@ class RemoteAgent:
       while True:
         time.sleep(60)
 
-    cloudlog.info("remote_agent.start", serial=self.serial, base_url=self.cfg.base_url)
+    cloudlog.info(f"remote_agent.start serial={self.serial} base_url={self.cfg.base_url}")
     while True:
       try:
         if not self.token:
@@ -473,7 +475,7 @@ class RemoteAgent:
         status_code = getattr(e.response, "status_code", 0)
         if status_code in (401, 403):
           self.token = None
-        cloudlog.exception("remote_agent.http_error", status_code=status_code)
+        cloudlog.exception(f"remote_agent.http_error status_code={status_code}")
       except Exception:
         cloudlog.exception("remote_agent.loop_exception")
 
