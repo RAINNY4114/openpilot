@@ -10,6 +10,9 @@ from openpilot.selfdrive.modeld.model_manager_helpers import get_active_model_ru
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 LITE = os.getenv("LITE") is not None
+# Default ON so devices auto-connect after update.
+# Emergency switch: set REMOTE_AGENT_ENABLED=0 to stop remote_agent immediately.
+REMOTE_AGENT_ENABLED = os.getenv("REMOTE_AGENT_ENABLED", "1") == "1"
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
@@ -99,6 +102,7 @@ def and_(*fns):
 
 procs = [
   DaemonProcess("manage_athenad", "system.athena.manage_athenad", "AthenadPid"),
+  PythonProcess("remote_agent", "system.athena.remote_agent", always_run, enabled=REMOTE_AGENT_ENABLED),
 
   NativeProcess("loggerd", "system/loggerd", ["./loggerd"], logging),
   NativeProcess("encoderd", "system/loggerd", ["./encoderd"], only_onroad),

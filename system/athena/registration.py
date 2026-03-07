@@ -1,143 +1,165 @@
 #!/usr/bin/env python3
-import time
-import json
-import jwt
 from pathlib import Path
+import os
+import hashlib
 
-from datetime import datetime, timedelta, UTC
-from openpilot.common.api import api_get, get_key_pair
+import requests
+
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.spinner import Spinner
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
-from openpilot.system.hardware import HARDWARE, PC
+from openpilot.system.hardware import HARDWARE
 from openpilot.system.hardware.hw import Paths
-from openpilot.common.swaglog import cloudlog
-import os
 
 
 UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 
-LITE = os.getenv("LITE") is not None
+# Activation auth source (server-first): if server is unreachable, fallback to local SN whitelist.
+ACTIVATION_USE_SERVER = os.getenv("ACTIVATION_USE_SERVER", "1") == "1"
+ACTIVATION_BASE_URL = os.getenv(
+  "ACTIVATION_BASE_URL",
+  os.getenv("REMOTE_AGENT_BASE_URL", "https://cp.zh182.cn"),
+).rstrip("/")
+ACTIVATION_TIMEOUT_SEC = max(float(os.getenv("ACTIVATION_TIMEOUT_SEC", "8")), 1.0)
+
+_VALID_LICENSE_STATUS = {"authorized", "blocked", "expired", "pending"}
+
 
 def _read_serial_whitelist() -> set[str]:
   repo_path = Path(BASEDIR) / "system" / "athena" / "serial_whitelist.txt"
 
-  def _read(path: Path) -> set[str]:
-    if not path.is_file():
-      return set()
-    serials: set[str] = set()
-    with open(path) as f:
-      for line in f:
-        s = line.strip()
-        if s:
-          serials.add(s)
-    return serials
+  if not repo_path.is_file():
+    return set()
 
-  return _read(repo_path)
+  serials: set[str] = set()
+  with open(repo_path) as f:
+    for line in f:
+      serial = line.strip()
+      if serial:
+        serials.add(serial)
+  return serials
+
+
+def _read_persist_dongle_id() -> str:
+  dongle_id_path = Path(Paths.persist_root()) / "comma" / "dongle_id"
+  if not dongle_id_path.is_file():
+    return ""
+  try:
+    return dongle_id_path.read_text().strip()
+  except Exception:
+    return ""
+
+
+def _build_local_dongle_id(serial: str) -> str:
+  # Keep it stable and non-reversible from UI perspective (avoid exposing raw serial as DongleId).
+  digest = hashlib.sha256(serial.encode("utf-8", errors="ignore")).hexdigest()[:16]
+  return f"local_{digest}"
+
+
+def _resolve_authorized_dongle_id(params: Params, serial: str) -> str:
+  existing = params.get("DongleId")
+  if isinstance(existing, bytes):
+    existing = existing.decode("utf-8", errors="ignore")
+  elif existing is None:
+    existing = ""
+  else:
+    existing = str(existing)
+
+  # Preserve existing non-empty, non-unregistered, non-raw-serial DongleId.
+  if existing and existing != UNREGISTERED_DONGLE_ID and existing != serial:
+    return existing
+
+  persist_dongle_id = _read_persist_dongle_id()
+  if persist_dongle_id:
+    return persist_dongle_id
+
+  return _build_local_dongle_id(serial)
+
+
+def _set_authorized(params: Params, serial: str) -> str:
+  dongle_id = _resolve_authorized_dongle_id(params, serial)
+  params.put("DongleId", dongle_id)
+  set_offroad_alert("Offroad_UnregisteredHardware", False)
+  return dongle_id
+
+
+def _set_unregistered(params: Params, serial: str) -> str:
+  params.put("DongleId", UNREGISTERED_DONGLE_ID)
+  set_offroad_alert("Offroad_UnregisteredHardware", True, extra_text=serial)
+  return UNREGISTERED_DONGLE_ID
+
+
+def _check_server_license_status(serial: str, sw_version: str, spinner: Spinner | None) -> str | None:
+  if not ACTIVATION_USE_SERVER or not ACTIVATION_BASE_URL:
+    return None
+
+  endpoint = f"{ACTIVATION_BASE_URL}/api/v1/device/register"
+  payload = {
+    "serial": serial,
+    "device_fingerprint": serial,
+    "sw_version": sw_version,
+  }
+
+  try:
+    if spinner is not None:
+      spinner.update(f"registering device - serial: {serial}, server auth check")
+
+    resp = requests.post(endpoint, json=payload, timeout=ACTIVATION_TIMEOUT_SEC)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+      raise ValueError(f"invalid response payload: {type(data)}")
+
+    status = str(data.get("license_status", "pending")).strip().lower()
+    if status not in _VALID_LICENSE_STATUS:
+      status = "pending"
+
+    return status
+  except Exception:
+    return None
+
 
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
   return dongle not in (None, UNREGISTERED_DONGLE_ID)
 
 
-def register(show_spinner=False) -> str | None:
-  """
-  All devices built since March 2024 come with all
-  info stored in /persist/. This is kept around
-  only for devices built before then.
-
-  With a backend update to take serial number instead
-  of dongle ID to some endpoints, this can be removed
-  entirely.
-  """
+def register(show_spinner: bool = False) -> str:
   params = Params()
-
   serial = HARDWARE.get_serial()
+  sw_version_raw = params.get("Version")
+  if isinstance(sw_version_raw, bytes):
+    sw_version = sw_version_raw.decode("utf-8", errors="ignore")
+  elif sw_version_raw is None:
+    sw_version = ""
+  else:
+    sw_version = str(sw_version_raw)
   whitelist = _read_serial_whitelist()
-  if serial not in whitelist:
-    params.put("DongleId", UNREGISTERED_DONGLE_ID)
-    set_offroad_alert("Offroad_UnregisteredHardware", True, extra_text=serial)
-    return UNREGISTERED_DONGLE_ID
 
-  params.put("DongleId", serial)
-  set_offroad_alert("Offroad_UnregisteredHardware", False)
-  return serial
+  spinner: Spinner | None = Spinner() if show_spinner else None
+  if spinner is not None:
+    spinner.update(f"registering device - serial: {serial}")
 
-  dongle_id: str | None = params.get("DongleId")
-  if dongle_id is None and Path(Paths.persist_root()+"/comma/dongle_id").is_file():
-    # not all devices will have this; added early in comma 3X production (2/28/24)
-    with open(Paths.persist_root()+"/comma/dongle_id") as f:
-      dongle_id = f.read().strip()
+  try:
+    # 1) Primary path: server authorization decides activation directly.
+    server_status = _check_server_license_status(serial, sw_version, spinner)
+    if server_status is not None:
+      if server_status == "authorized":
+        return _set_authorized(params, serial)
+      return _set_unregistered(params, serial)
 
-  # Create registration token, in the future, this key will make JWTs directly
-  jwt_algo, private_key, public_key = get_key_pair()
+    # 2) Fallback path: server unreachable -> local whitelist fallback.
+    if spinner is not None:
+      spinner.update(f"registering device - serial: {serial}, server unavailable, fallback whitelist")
 
-  if not public_key:
-    dongle_id = UNREGISTERED_DONGLE_ID
-    cloudlog.warning("missing public key")
-  elif dongle_id is None:
-    if show_spinner:
-      spinner = Spinner()
-      spinner.update("registering device")
+    if serial in whitelist:
+      return _set_authorized(params, serial)
 
-    if LITE:
-      params.put("DongleId", UNREGISTERED_DONGLE_ID)
-      return UNREGISTERED_DONGLE_ID
-
-    # Block until we get the imei
-    serial = HARDWARE.get_serial()
-    start_time = time.monotonic()
-    imei1: str | None = None
-    imei2: str | None = None
-    skip_imei_count = 0
-    while imei1 is None and imei2 is None:
-      try:
-        imei1, imei2 = HARDWARE.get_imei(0), HARDWARE.get_imei(1)
-      except Exception:
-        cloudlog.exception("Error getting imei, trying again...")
-        spinner.update(f"registering device - serial: {serial}, Error getting IMEI, trying {skip_imei_count}/30")
-        # rick - no imei = can't register = skip everything
-        if skip_imei_count > 30:
-          params.put("DongleId", UNREGISTERED_DONGLE_ID)
-          return UNREGISTERED_DONGLE_ID
-        skip_imei_count += 1
-        time.sleep(1)
-
-      if time.monotonic() - start_time > 60 and show_spinner:
-        spinner.update(f"registering device - serial: {serial}, IMEI: ({imei1}, {imei2})")
-
-    backoff = 0
-    start_time = time.monotonic()
-    while True:
-      try:
-        register_token = jwt.encode({'register': True, 'exp': datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)}, private_key, algorithm=jwt_algo)
-        cloudlog.info("getting pilotauth")
-        resp = api_get("v2/pilotauth/", method='POST', timeout=15,
-                       imei=imei1, imei2=imei2, serial=serial, public_key=public_key, register_token=register_token)
-
-        if resp.status_code in (402, 403):
-          cloudlog.info(f"Unable to register device, got {resp.status_code}")
-          dongle_id = UNREGISTERED_DONGLE_ID
-        else:
-          dongleauth = json.loads(resp.text)
-          dongle_id = dongleauth["dongle_id"]
-        break
-      except Exception:
-        cloudlog.exception("failed to authenticate")
-        backoff = min(backoff + 1, 15)
-        time.sleep(backoff)
-
-      if time.monotonic() - start_time > 60 and show_spinner:
-        spinner.update(f"registering device - serial: {serial}, IMEI: ({imei1}, {imei2})")
-
-    if show_spinner:
+    return _set_unregistered(params, serial)
+  finally:
+    if spinner is not None:
       spinner.close()
-
-  if dongle_id:
-    params.put("DongleId", dongle_id)
-    set_offroad_alert("Offroad_UnregisteredHardware", (dongle_id == UNREGISTERED_DONGLE_ID) and not PC and not os.getenv("LITE"))
-  return dongle_id
 
 
 if __name__ == "__main__":
