@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import queue
+import select
 import subprocess
 import threading
 import time
@@ -202,40 +204,28 @@ class RemoteAgent:
 
     ws = None
     proc = None
-    done_event = threading.Event()
-    out_q: queue.Queue[dict[str, str]] = queue.Queue()
-    stdout_thread = None
-    stderr_thread = None
-    stream_closed = {"stdout": False, "stderr": False}
+    master_fd: int | None = None
     exit_code: int | None = None
+    exit_sent = False
     last_ping_ts = time.monotonic()
 
     try:
       ws = create_connection(ws_url, timeout=max(self.cfg.request_timeout_sec, 3))
       ws.settimeout(self.cfg.terminal_recv_timeout_sec)
-      proc = subprocess.Popen(  # pylint: disable=consider-using-with
-        [self.cfg.terminal_shell],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0,
-      )
 
-      if proc.stdout is None or proc.stderr is None or proc.stdin is None:
-        raise RuntimeError("terminal subprocess streams not available")
-
-      stdout_thread = threading.Thread(
-        target=self._read_stream,
-        args=(proc.stdout, "stdout", out_q, done_event),
-        daemon=True,
-      )
-      stderr_thread = threading.Thread(
-        target=self._read_stream,
-        args=(proc.stderr, "stderr", out_q, done_event),
-        daemon=True,
-      )
-      stdout_thread.start()
-      stderr_thread.start()
+      master_fd, slave_fd = pty.openpty()
+      try:
+        proc = subprocess.Popen(  # pylint: disable=consider-using-with
+          [self.cfg.terminal_shell],
+          stdin=slave_fd,
+          stdout=slave_fd,
+          stderr=slave_fd,
+          bufsize=0,
+          close_fds=True,
+          start_new_session=True,
+        )
+      finally:
+        os.close(slave_fd)
 
       ws.send(json.dumps({"type": "status", "status": "attached", "session_id": session_id}))
 
@@ -249,26 +239,43 @@ class RemoteAgent:
           ws.send(json.dumps({"type": "ping", "ts": _now_iso()}))
           last_ping_ts = now_monotonic
 
-        if proc.poll() is not None and exit_code is None:
+        if proc.poll() is not None and not exit_sent:
           exit_code = int(proc.returncode)
-          out_q.put({"type": "exit", "exit_code": str(exit_code)})
+          ws.send(json.dumps({"type": "exit", "exit_code": str(exit_code)}))
+          exit_sent = True
 
-        while True:
-          try:
-            event = out_q.get_nowait()
-          except queue.Empty:
+        if master_fd is not None:
+          while True:
+            try:
+              readable, _, _ = select.select([master_fd], [], [], 0)
+            except Exception:
+              readable = []
+            if not readable:
+              break
+
+            try:
+              chunk = os.read(master_fd, 4096)
+            except OSError:
+              chunk = b""
+
+            if not chunk:
+              break
+
+            ws.send(json.dumps({
+              "type": "output",
+              "stream": "pty",
+              "data": _clip_text(chunk.decode("utf-8", errors="replace"), self.cfg.max_output_chars),
+            }))
+
+        if exit_sent and proc.poll() is not None:
+          if master_fd is None:
             break
-
-          if event.get("type") == "stream_closed":
-            stream_name = event.get("stream", "")
-            if stream_name in stream_closed:
-              stream_closed[stream_name] = True
-            continue
-
-          ws.send(json.dumps(event))
-
-        if exit_code is not None and all(stream_closed.values()):
-          break
+          try:
+            readable, _, _ = select.select([master_fd], [], [], 0)
+          except Exception:
+            readable = []
+          if not readable:
+            break
 
         try:
           raw_msg = ws.recv()
@@ -290,11 +297,10 @@ class RemoteAgent:
         msg_type = str(message.get("type", "")).strip().lower()
         if msg_type == "input":
           data = str(message.get("data", ""))
-          if proc.stdin is not None:
+          if master_fd is not None:
             try:
-              proc.stdin.write(data.encode("utf-8", errors="ignore"))
-              proc.stdin.flush()
-            except Exception:
+              os.write(master_fd, data.encode("utf-8", errors="ignore"))
+            except OSError:
               break
         elif msg_type == "close":
           break
@@ -309,7 +315,6 @@ class RemoteAgent:
     except Exception:
       cloudlog.exception(f"remote_agent.terminal.loop_exception session_id={session_id}")
     finally:
-      done_event.set()
       if proc is not None and proc.poll() is None:
         try:
           proc.terminate()
@@ -320,9 +325,11 @@ class RemoteAgent:
           except Exception:
             pass
 
-      for t in (stdout_thread, stderr_thread):
-        if t is not None and t.is_alive():
-          t.join(timeout=1)
+      if master_fd is not None:
+        try:
+          os.close(master_fd)
+        except OSError:
+          pass
 
       if ws is not None:
         try:

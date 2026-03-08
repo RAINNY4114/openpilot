@@ -197,7 +197,13 @@ def register(show_spinner: bool = False) -> str:
         spinner.update(f"registering device - serial: {serial}, whitelist bypass")
       return _set_authorized(params, serial)
 
-    # 2) Non-whitelisted devices must be authorized by server.
+    # 2) Offline grace: previously authorized device can boot directly.
+    if _read_cached_authorized_serial() == serial:
+      if spinner is not None:
+        spinner.update(f"registering device - serial: {serial}, offline authorized cache")
+      return _set_authorized(params, serial)
+
+    # 3) Non-whitelisted devices must be authorized by server.
     server_status: str | None = None
     if ACTIVATION_USE_SERVER and ACTIVATION_BASE_URL:
       deadline = time.monotonic() + ACTIVATION_SERVER_RETRY_WINDOW_SEC
@@ -222,12 +228,7 @@ def register(show_spinner: bool = False) -> str:
       _write_cached_authorized_serial(serial)
       return _set_authorized(params, serial)
 
-    # Offline grace: device that was previously server-authorized can continue to boot while server is unreachable.
-    if server_status is None and _read_cached_authorized_serial() == serial:
-      if spinner is not None:
-        spinner.update(f"registering device - serial: {serial}, offline authorized cache")
-      return _set_authorized(params, serial)
-
+    # Server returned non-authorized status, clear cache.
     if server_status is not None:
       _clear_cached_authorized_serial()
 
