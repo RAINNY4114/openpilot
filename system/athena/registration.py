@@ -28,7 +28,7 @@ ACTIVATION_SERVER_RETRY_WINDOW_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETR
 ACTIVATION_SERVER_RETRY_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETRY_INTERVAL_SEC", "2")), 0.2)
 ACTIVATION_LOCK_UNREGISTERED = os.getenv("ACTIVATION_LOCK_UNREGISTERED", "1") == "1"
 ACTIVATION_RECHECK_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_RECHECK_INTERVAL_SEC", "5")), 1.0)
-ACTIVATION_CACHE_FILE = Path(Paths.persist_root()) / "comma" / "activation_authorized_serial"
+ACTIVATION_CACHE_FILE = Path("/data/openpilot_cache/activation_authorized_serial")
 
 _VALID_LICENSE_STATUS = {"authorized", "blocked", "expired", "pending"}
 
@@ -191,19 +191,19 @@ def register(show_spinner: bool = False) -> str:
     spinner.update(f"registering device - serial: {serial}")
 
   try:
-    # 1) Local bypass path: if SN is whitelisted on device, authorize immediately.
-    if serial in whitelist:
-      if spinner is not None:
-        spinner.update(f"registering device - serial: {serial}, whitelist bypass")
-      return _set_authorized(params, serial)
-
-    # 2) Offline grace: previously authorized device can boot directly.
+    # 1) Offline cache first: previously authorized device can boot directly.
     if _read_cached_authorized_serial() == serial:
       if spinner is not None:
         spinner.update(f"registering device - serial: {serial}, offline authorized cache")
       return _set_authorized(params, serial)
 
-    # 3) Non-whitelisted devices must be authorized by server.
+    # 2) Local bypass path: if SN is whitelisted on device, authorize immediately.
+    if serial in whitelist:
+      if spinner is not None:
+        spinner.update(f"registering device - serial: {serial}, whitelist bypass")
+      return _set_authorized(params, serial)
+
+    # 3) Non-whitelisted and cache-miss devices must be authorized by server.
     server_status: str | None = None
     if ACTIVATION_USE_SERVER and ACTIVATION_BASE_URL:
       deadline = time.monotonic() + ACTIVATION_SERVER_RETRY_WINDOW_SEC

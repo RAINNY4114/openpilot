@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import pty
 import queue
 import select
@@ -20,6 +21,8 @@ from websocket import WebSocketException, WebSocketTimeoutException, create_conn
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware import HARDWARE
+
+ACTIVATION_CACHE_FILE = Path(os.getenv("ACTIVATION_CACHE_FILE_PATH", "/data/openpilot_cache/activation_authorized_serial"))
 
 
 def _now_iso() -> str:
@@ -128,6 +131,17 @@ class RemoteAgent:
     normalized = command.strip().lower()
     return any(normalized.startswith(prefix.lower()) for prefix in self.cfg.readonly_prefixes)
 
+  def _sync_activation_cache_with_license(self) -> None:
+    # If server no longer authorizes this device, remove local activation cache so next boot must re-check.
+    if self.license_status == "authorized":
+      return
+    try:
+      if ACTIVATION_CACHE_FILE.is_file():
+        ACTIVATION_CACHE_FILE.unlink()
+        cloudlog.info(f"remote_agent.activation_cache.cleared serial={self.serial} status={self.license_status}")
+    except Exception:
+      cloudlog.exception("remote_agent.activation_cache.clear_failed")
+
   def register(self) -> None:
     payload = {
       "serial": self.serial,
@@ -136,7 +150,8 @@ class RemoteAgent:
     }
     data = self._post("/api/v1/device/register", payload)
     self.token = data.get("token") or self.token
-    self.license_status = data.get("license_status", self.license_status)
+    self.license_status = str(data.get("license_status", self.license_status)).strip().lower()
+    self._sync_activation_cache_with_license()
     self.next_poll_sec = int(data.get("heartbeat_interval_sec", self.cfg.heartbeat_sec))
 
   def heartbeat(self) -> None:
@@ -149,7 +164,8 @@ class RemoteAgent:
       "ts": _now_iso(),
     }
     data = self._post("/api/v1/device/heartbeat", payload)
-    self.license_status = data.get("license_status", self.license_status)
+    self.license_status = str(data.get("license_status", self.license_status)).strip().lower()
+    self._sync_activation_cache_with_license()
     self.next_poll_sec = int(data.get("next_poll_sec", self.cfg.heartbeat_sec))
 
   def pull_commands(self) -> list[dict[str, Any]]:
