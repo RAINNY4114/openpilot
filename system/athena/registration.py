@@ -28,6 +28,7 @@ ACTIVATION_SERVER_RETRY_WINDOW_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETR
 ACTIVATION_SERVER_RETRY_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETRY_INTERVAL_SEC", "2")), 0.2)
 ACTIVATION_LOCK_UNREGISTERED = os.getenv("ACTIVATION_LOCK_UNREGISTERED", "1") == "1"
 ACTIVATION_RECHECK_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_RECHECK_INTERVAL_SEC", "5")), 1.0)
+ACTIVATION_CACHE_FILE = Path(Paths.persist_root()) / "comma" / "activation_authorized_serial"
 
 _VALID_LICENSE_STATUS = {"authorized", "blocked", "expired", "pending"}
 
@@ -55,6 +56,31 @@ def _read_persist_dongle_id() -> str:
     return dongle_id_path.read_text().strip()
   except Exception:
     return ""
+
+
+def _read_cached_authorized_serial() -> str:
+  if not ACTIVATION_CACHE_FILE.is_file():
+    return ""
+  try:
+    return ACTIVATION_CACHE_FILE.read_text().strip()
+  except Exception:
+    return ""
+
+
+def _write_cached_authorized_serial(serial: str) -> None:
+  try:
+    ACTIVATION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVATION_CACHE_FILE.write_text(serial + "\n")
+  except Exception:
+    pass
+
+
+def _clear_cached_authorized_serial() -> None:
+  try:
+    if ACTIVATION_CACHE_FILE.is_file():
+      ACTIVATION_CACHE_FILE.unlink()
+  except Exception:
+    pass
 
 
 def _build_local_dongle_id(serial: str) -> str:
@@ -133,7 +159,11 @@ def _wait_until_authorized(params: Params, serial: str, sw_version: str, spinner
 
     server_status = _check_server_license_status(serial, sw_version, spinner)
     if server_status == "authorized":
+      _write_cached_authorized_serial(serial)
       return _set_authorized(params, serial)
+
+    if server_status is not None:
+      _clear_cached_authorized_serial()
 
     spinner.update(f"registering device - serial: {serial}, contact ZH")
     time.sleep(ACTIVATION_RECHECK_INTERVAL_SEC)
@@ -189,7 +219,17 @@ def register(show_spinner: bool = False) -> str:
           time.sleep(sleep_sec)
 
     if server_status == "authorized":
+      _write_cached_authorized_serial(serial)
       return _set_authorized(params, serial)
+
+    # Offline grace: device that was previously server-authorized can continue to boot while server is unreachable.
+    if server_status is None and _read_cached_authorized_serial() == serial:
+      if spinner is not None:
+        spinner.update(f"registering device - serial: {serial}, offline authorized cache")
+      return _set_authorized(params, serial)
+
+    if server_status is not None:
+      _clear_cached_authorized_serial()
 
     if spinner is not None:
       spinner.update(f"registering device - serial: {serial}, contact ZH")
