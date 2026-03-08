@@ -451,6 +451,8 @@ class TestFordLongitudinalSafetyBase(TestFordSafetyBase):
 
 class TestFordLongitudinalSafety(TestFordLongitudinalSafetyBase):
   STEER_MESSAGE = MSG_LateralMotionControl
+  ANGLE_RATE_UP = [0.0005, 0.00011, 0.00011]  # non-CANFD tuned windup rate
+  ANGLE_RATE_DOWN = [0.00055, 0.0002, 0.0002]  # non-CANFD tuned unwind rate
 
   TX_MSGS = [
     [MSG_Steering_Data_FD1, 0], [MSG_Steering_Data_FD1, 2], [MSG_ACCDATA, 0], [MSG_ACCDATA_3, 0], [MSG_Lane_Assist_Data1, 0],

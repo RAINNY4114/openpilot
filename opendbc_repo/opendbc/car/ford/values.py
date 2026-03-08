@@ -1,6 +1,5 @@
 import copy
 import re
-import time
 from dataclasses import dataclass, field, replace
 from enum import Enum, IntFlag
 
@@ -30,9 +29,10 @@ class CarControllerParams:
     # Max curvature is limited by the EPS to an equivalent of ~2.0 m/s^2 at all speeds,
     #  however max curvature rate linearly decreases as speed increases:
     #  ~0.009 m^-1/sec at 7 m/s, ~0.002 m^-1/sec at 35 m/s
-    # Limit to ~2 m/s^3 up, ~3.3 m/s^3 down at 75 mph and match EPS limit at low speed
-    ([5, 25], [0.00045, 0.0001]),
-    ([5, 25], [0.00045, 0.00015])
+    # Non-CANFD tuned windup: +11% low-speed, +10% high-speed
+    ([5, 25], [0.0005, 0.00011]),
+    # Non-CANFD tuned unwind: +22% low-speed, +33% high-speed
+    ([5, 25], [0.00055, 0.0002])
   )
   CURVATURE_ERROR = 0.002  # ~6 degrees at 10 m/s, ~10 degrees at 35 m/s
 
@@ -42,12 +42,15 @@ class CarControllerParams:
   INACTIVE_GAS = -5.0
 
   @classmethod
-  def get_angle_limits(cls, params=None) -> AngleSteeringLimits:
-    # 固定默认速率，不再读取可调参数
+  def get_angle_limits(cls, CP=None) -> AngleSteeringLimits:
+    # Keep CAN FD stock behavior; apply windup/unwind tuning to non-CANFD only.
+    is_canfd = bool(CP is not None and (CP.flags & FordFlags.CANFD))
+    up = [0.00045, 0.0001] if is_canfd else [0.0005, 0.00011]
+    down = [0.00045, 0.00015] if is_canfd else [0.00055, 0.0002]
     return AngleSteeringLimits(
       0.02,
-      ([5, 25], [0.00045, 0.0001]),
-      ([5, 25], [0.00045, 0.00015]),
+      ([5, 25], up),
+      ([5, 25], down),
     )
 
   def __init__(self, CP):

@@ -378,7 +378,8 @@ class SelfdriveD:
     if lac.active and not recent_steer_pressed and not self.CP.notCar:
       clipped_speed = max(CS.vEgo, 0.3)
       actual_lateral_accel = controlstate.curvature * (clipped_speed**2)
-      desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
+      # Use controller-clipped desired curvature to reduce false saturation alerts.
+      desired_lateral_accel = controlstate.desiredCurvature * (clipped_speed**2)
       undershoot_ratio = abs(desired_lateral_accel) / abs(1e-3 + actual_lateral_accel)
       undershooting = undershoot_ratio > 1.2
       turning = abs(desired_lateral_accel) > 1.0

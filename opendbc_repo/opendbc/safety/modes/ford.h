@@ -87,28 +87,29 @@ static bool ford_get_quality_flag_valid(const CANPacket_t *msg) {
 #define FORD_CANFD_INACTIVE_CURVATURE_RATE 1024U
 
 // Curvature rate limits
-#define FORD_LIMITS(limit_lateral_acceleration) {                                               \
+#define FORD_LIMITS(limit_lateral_acceleration, up_low, up_high, down_low, down_high) {         \
   .max_angle = 1000,          /* 0.02 curvature */                                              \
   .angle_deg_to_can = 50000,  /* 1 / (2e-5) rad to can */                                       \
   .max_angle_error = 100,     /* 0.002 * FORD_STEERING_LIMITS.angle_deg_to_can */               \
   .angle_rate_up_lookup = {                                                                     \
     {5., 25., 25.},                                                                             \
-    {0.00045, 0.0001, 0.0001}                                                                   \
+    {up_low, up_high, up_high}                                                                  \
   },                                                                                            \
   .angle_rate_down_lookup = {                                                                   \
     {5., 25., 25.},                                                                             \
-    {0.00045, 0.00015, 0.00015}                                                                 \
+    {down_low, down_high, down_high}                                                            \
   },                                                                                            \
-                                                                                                \
+                                                                                                 \
   /* no blending at low speed due to lack of torque wind-up and inaccurate current curvature */ \
   .angle_error_min_speed = 10.0,    /* m/s */                                                   \
-                                                                                                \
+                                                                                                 \
   .angle_is_curvature = (limit_lateral_acceleration),                                           \
   .enforce_angle_error = true,                                                                  \
   .inactive_angle_is_zero = true,                                                               \
 }
 
-static const AngleSteeringLimits FORD_STEERING_LIMITS = FORD_LIMITS(false);
+static const AngleSteeringLimits FORD_STEERING_LIMITS = FORD_LIMITS(false, 0.0005, 0.00011, 0.00055, 0.0002);
+static const AngleSteeringLimits FORD_CANFD_STEERING_LIMITS = FORD_LIMITS(true, 0.00045, 0.0001, 0.00045, 0.00015);
 
 static void ford_rx_hook(const CANPacket_t *msg) {
   if (msg->bus == FORD_MAIN_BUS) {
@@ -259,8 +260,6 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
 
   // Safety check for LateralMotionControl2 action
   if (msg->addr == FORD_LateralMotionControl2) {
-    static const AngleSteeringLimits FORD_CANFD_STEERING_LIMITS = FORD_LIMITS(true);
-
     // Signal: LatCtl_D2_Rq
     bool steer_control_enabled = ((msg->data[0] >> 4) & 0x7U) != 0U;
     unsigned int raw_curvature = (msg->data[2] << 3) | (msg->data[3] >> 5);
