@@ -26,6 +26,8 @@ ACTIVATION_BASE_URL = os.getenv(
 ACTIVATION_TIMEOUT_SEC = max(float(os.getenv("ACTIVATION_TIMEOUT_SEC", "8")), 1.0)
 ACTIVATION_SERVER_RETRY_WINDOW_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETRY_WINDOW_SEC", "45")), 0.0)
 ACTIVATION_SERVER_RETRY_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_SERVER_RETRY_INTERVAL_SEC", "2")), 0.2)
+ACTIVATION_LOCK_UNREGISTERED = os.getenv("ACTIVATION_LOCK_UNREGISTERED", "1") == "1"
+ACTIVATION_RECHECK_INTERVAL_SEC = max(float(os.getenv("ACTIVATION_RECHECK_INTERVAL_SEC", "5")), 1.0)
 
 _VALID_LICENSE_STATUS = {"authorized", "blocked", "expired", "pending"}
 
@@ -124,6 +126,19 @@ def _check_server_license_status(serial: str, sw_version: str, spinner: Spinner 
     return None
 
 
+def _wait_until_authorized(params: Params, serial: str, sw_version: str, spinner: Spinner) -> str:
+  while True:
+    if serial in _read_serial_whitelist():
+      return _set_authorized(params, serial)
+
+    server_status = _check_server_license_status(serial, sw_version, spinner)
+    if server_status == "authorized":
+      return _set_authorized(params, serial)
+
+    spinner.update(f"registering device - serial: {serial}, contact ZH")
+    time.sleep(ACTIVATION_RECHECK_INTERVAL_SEC)
+
+
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
   return dongle not in (None, UNREGISTERED_DONGLE_ID)
@@ -178,7 +193,12 @@ def register(show_spinner: bool = False) -> str:
 
     if spinner is not None:
       spinner.update(f"registering device - serial: {serial}, contact ZH")
-    return _set_unregistered(params, serial)
+    _set_unregistered(params, serial)
+
+    if spinner is not None and ACTIVATION_LOCK_UNREGISTERED:
+      return _wait_until_authorized(params, serial, sw_version, spinner)
+
+    return UNREGISTERED_DONGLE_ID
   finally:
     if spinner is not None:
       spinner.close()
