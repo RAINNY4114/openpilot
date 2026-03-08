@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from pathlib import Path
 import pty
 import queue
@@ -23,6 +24,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware import HARDWARE
 
 ACTIVATION_CACHE_FILE = Path(os.getenv("ACTIVATION_CACHE_FILE_PATH", "/data/openpilot_cache/activation_authorized_serial"))
+ERROR_LOG_STATE_FILE = Path(os.getenv("REMOTE_AGENT_ERROR_LOG_STATE_FILE", "/data/openpilot_cache/remote_agent_error_log.sha256"))
 
 
 def _now_iso() -> str:
@@ -41,6 +43,10 @@ class AgentConfig:
   heartbeat_sec: int
   request_timeout_sec: int
   max_output_chars: int
+  error_log_enabled: bool
+  error_log_path: str
+  error_log_max_chars: int
+  error_log_sync_interval_sec: float
   allow_custom_commands: bool
   terminal_enabled: bool
   terminal_max_sessions: int
@@ -63,6 +69,10 @@ class AgentConfig:
       heartbeat_sec=max(int(os.getenv("REMOTE_AGENT_HEARTBEAT_SEC", "20")), 5),
       request_timeout_sec=max(int(os.getenv("REMOTE_AGENT_REQUEST_TIMEOUT_SEC", "10")), 3),
       max_output_chars=max(int(os.getenv("REMOTE_AGENT_MAX_OUTPUT_CHARS", "65536")), 1024),
+      error_log_enabled=os.getenv("REMOTE_AGENT_ERROR_LOG_ENABLED", "1") == "1",
+      error_log_path=os.getenv("REMOTE_AGENT_ERROR_LOG_PATH", "/data/community/crashes/error.log"),
+      error_log_max_chars=max(int(os.getenv("REMOTE_AGENT_ERROR_LOG_MAX_CHARS", "65536")), 1024),
+      error_log_sync_interval_sec=max(float(os.getenv("REMOTE_AGENT_ERROR_LOG_SYNC_INTERVAL_SEC", "20")), 1.0),
       allow_custom_commands=os.getenv("REMOTE_AGENT_ALLOW_CUSTOM_CMDS", "0") == "1",
       terminal_enabled=os.getenv("REMOTE_AGENT_TERMINAL_ENABLED", "1") == "1",
       terminal_max_sessions=max(int(os.getenv("REMOTE_AGENT_TERMINAL_MAX_SESSIONS", "1")), 1),
@@ -83,6 +93,10 @@ class RemoteAgent:
     self.token: str | None = None
     self.license_status = "unknown"
     self.next_poll_sec = self.cfg.heartbeat_sec
+    self.last_uploaded_error_log_sha256 = self._read_last_uploaded_error_log_hash()
+    self.server_error_log_sha256 = ""
+    self.server_error_log_sha_known = False
+    self.last_error_log_sync_monotonic = 0.0
     self.terminal_workers: dict[str, threading.Thread] = {}
     self.terminal_workers_lock = threading.Lock()
 
@@ -142,6 +156,90 @@ class RemoteAgent:
     except Exception:
       cloudlog.exception("remote_agent.activation_cache.clear_failed")
 
+  def _read_last_uploaded_error_log_hash(self) -> str:
+    try:
+      if ERROR_LOG_STATE_FILE.is_file():
+        return ERROR_LOG_STATE_FILE.read_text().strip()
+    except Exception:
+      cloudlog.exception("remote_agent.error_log.state_read_failed")
+    return ""
+
+  def _write_last_uploaded_error_log_hash(self, sha256: str) -> None:
+    try:
+      ERROR_LOG_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+      ERROR_LOG_STATE_FILE.write_text(sha256 + "\n")
+    except Exception:
+      cloudlog.exception("remote_agent.error_log.state_write_failed")
+
+  def _read_error_log_snapshot(self) -> dict[str, Any] | None:
+    log_path = Path(self.cfg.error_log_path)
+    if not log_path.is_file():
+      return None
+    try:
+      content = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+      cloudlog.exception("remote_agent.error_log.read_failed")
+      return None
+
+    if not content.strip():
+      return None
+
+    try:
+      stat = log_path.stat()
+      size_bytes = int(stat.st_size)
+      mtime_ns = int(stat.st_mtime_ns)
+    except Exception:
+      size_bytes = len(content.encode("utf-8", errors="replace"))
+      mtime_ns = 0
+
+    sha256 = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+    return {
+      "log_name": "error.log",
+      "log_path": str(log_path),
+      "sha256": sha256,
+      "size_bytes": size_bytes,
+      "mtime_ns": mtime_ns,
+      "content": _clip_text(content, self.cfg.error_log_max_chars),
+      "captured_at": _now_iso(),
+    }
+
+  def sync_error_log(self) -> None:
+    if not self.cfg.error_log_enabled:
+      return
+    now = time.monotonic()
+    if now - self.last_error_log_sync_monotonic < self.cfg.error_log_sync_interval_sec:
+      return
+    self.last_error_log_sync_monotonic = now
+
+    snapshot = self._read_error_log_snapshot()
+    if snapshot is None:
+      return
+
+    sha256 = str(snapshot.get("sha256", "")).strip()
+    if not sha256:
+      return
+    if self.server_error_log_sha_known:
+      if sha256 == self.last_uploaded_error_log_sha256 and sha256 == self.server_error_log_sha256:
+        return
+    elif sha256 == self.last_uploaded_error_log_sha256:
+      return
+
+    payload = {"serial": self.serial, **snapshot}
+    try:
+      self._post("/api/v1/device/error-log", payload)
+      self.last_uploaded_error_log_sha256 = sha256
+      self.server_error_log_sha256 = sha256
+      self.server_error_log_sha_known = True
+      self._write_last_uploaded_error_log_hash(sha256)
+      cloudlog.info(f"remote_agent.error_log.uploaded serial={self.serial} sha256={sha256[:12]}")
+    except requests.HTTPError as e:
+      status_code = getattr(e.response, "status_code", 0)
+      if status_code in (401, 403):
+        self.token = None
+      cloudlog.exception(f"remote_agent.error_log.upload_failed status_code={status_code}")
+    except Exception:
+      cloudlog.exception("remote_agent.error_log.upload_exception")
+
   def register(self) -> None:
     payload = {
       "serial": self.serial,
@@ -165,6 +263,11 @@ class RemoteAgent:
     }
     data = self._post("/api/v1/device/heartbeat", payload)
     self.license_status = str(data.get("license_status", self.license_status)).strip().lower()
+    if "error_log_sha256" in data:
+      self.server_error_log_sha_known = True
+      self.server_error_log_sha256 = str(data.get("error_log_sha256", "")).strip()
+    else:
+      self.server_error_log_sha_known = False
     self._sync_activation_cache_with_license()
     self.next_poll_sec = int(data.get("next_poll_sec", self.cfg.heartbeat_sec))
 
@@ -491,6 +594,7 @@ class RemoteAgent:
           self.register()
 
         self.heartbeat()
+        self.sync_error_log()
         self.sync_commands()
         self.sync_terminal_sessions()
       except requests.HTTPError as e:
