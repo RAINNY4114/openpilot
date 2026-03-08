@@ -86,11 +86,9 @@ def manager_init() -> None:
 
   # set dongle id
   reg_res = register(show_spinner=True)
-  if reg_res:
-    dongle_id = reg_res
-  else:
-    dongle_id = "UnregisteredDevice"
-    # raise Exception(f"Registration failed for device {serial}")
+  if reg_res == UNREGISTERED_DONGLE_ID:
+    raise Exception(f"Device not authorized (SN: {serial}). Please contact ZH for activation.")
+  dongle_id = reg_res
   os.environ['DONGLE_ID'] = dongle_id  # Needed for swaglog
   os.environ['GIT_ORIGIN'] = build_metadata.openpilot.git_normalized_origin # Needed for swaglog
   os.environ['GIT_BRANCH'] = build_metadata.channel # Needed for swaglog

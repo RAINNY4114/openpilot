@@ -16,7 +16,8 @@ from openpilot.system.hardware.hw import Paths
 
 UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 
-# Activation auth source (server-first): if server is unreachable, fallback to local SN whitelist.
+# Activation auth source (whitelist-first): local SN whitelist bypasses server;
+# non-whitelisted devices must be authorized by server.
 ACTIVATION_USE_SERVER = os.getenv("ACTIVATION_USE_SERVER", "1") == "1"
 ACTIVATION_BASE_URL = os.getenv(
   "ACTIVATION_BASE_URL",
@@ -145,7 +146,13 @@ def register(show_spinner: bool = False) -> str:
     spinner.update(f"registering device - serial: {serial}")
 
   try:
-    # 1) Primary path: server authorization decides activation directly.
+    # 1) Local bypass path: if SN is whitelisted on device, authorize immediately.
+    if serial in whitelist:
+      if spinner is not None:
+        spinner.update(f"registering device - serial: {serial}, whitelist bypass")
+      return _set_authorized(params, serial)
+
+    # 2) Non-whitelisted devices must be authorized by server.
     server_status: str | None = None
     if ACTIVATION_USE_SERVER and ACTIVATION_BASE_URL:
       deadline = time.monotonic() + ACTIVATION_SERVER_RETRY_WINDOW_SEC
@@ -166,18 +173,7 @@ def register(show_spinner: bool = False) -> str:
         if sleep_sec > 0:
           time.sleep(sleep_sec)
 
-    if server_status is not None:
-      if server_status == "authorized":
-        return _set_authorized(params, serial)
-      if spinner is not None:
-        spinner.update(f"registering device - serial: {serial}, contact ZH")
-      return _set_unregistered(params, serial)
-
-    # 2) Fallback path: server unreachable -> local whitelist fallback.
-    if spinner is not None:
-      spinner.update(f"registering device - serial: {serial}, server unavailable, fallback whitelist")
-
-    if serial in whitelist:
+    if server_status == "authorized":
       return _set_authorized(params, serial)
 
     if spinner is not None:
