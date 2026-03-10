@@ -198,8 +198,7 @@ class HudRenderer(Widget):
 
     self._lane_pref_button.render(rl.Rectangle(pref_x, pref_y, self._lane_pref_button_size, self._lane_pref_button_size))
 
-    if ui_state.sm['controlsState'].lateralControlState.which() != 'angleState':
-      self._torque_bar.render(rect)
+    self._torque_bar.render(rect)
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed or self._lane_pref_button.is_pressed
@@ -233,6 +232,8 @@ class HudRenderer(Widget):
       set_speed_width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
       start_x = float(rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - set_speed_width) / 2)
       start_y = float(rect.y + 45 + UI_CONFIG.set_speed_height + UI_CONFIG.border_size / 2)
+    pedal_down_nudge = 12.0
+    start_y += pedal_down_nudge
 
     # Avoid overlapping the lane-preference button on small screens.
     max_box_bottom_y = float(rect.y + 45 + UI_CONFIG.set_speed_height)
@@ -247,15 +248,36 @@ class HudRenderer(Widget):
     gas_w = float(self._gas_pedal_icon.width)
     gas_h = float(self._gas_pedal_icon.height)
 
-    if start_y + max(brake_h, gas_h) > pref_y - UI_CONFIG.border_size / 2:
-      start_y = float(pref_y - max(brake_h, gas_h) - UI_CONFIG.border_size / 2)
+    lane_pref_clearance = max(0.0, UI_CONFIG.border_size / 2 - pedal_down_nudge)
+    if start_y + max(brake_h, gas_h) > pref_y - lane_pref_clearance:
+      start_y = float(pref_y - max(brake_h, gas_h) - lane_pref_clearance)
     src_brake = rl.Rectangle(0, 0, brake_w, brake_h)
     dst_brake = rl.Rectangle(start_x, start_y, brake_w, brake_h)
+    # Subtle glow to help the pedals read as "highlighted".
+    glow_scale = 1.12
+    glow_alpha_brake = int(round(255 * brake_opacity * 0.35))
+    if glow_alpha_brake > 0:
+      glow_w = brake_w * glow_scale
+      glow_h = brake_h * glow_scale
+      glow_x = dst_brake.x - (glow_w - brake_w) / 2.0
+      glow_y = dst_brake.y - (glow_h - brake_h) / 2.0
+      dst_brake_glow = rl.Rectangle(glow_x, glow_y, glow_w, glow_h)
+      rl.draw_texture_pro(self._brake_pedal_icon, src_brake, dst_brake_glow, rl.Vector2(0, 0), 0.0,
+                          rl.Color(255, 255, 255, glow_alpha_brake))
     tint_brake = rl.Color(255, 255, 255, int(round(255 * brake_opacity)))
     rl.draw_texture_pro(self._brake_pedal_icon, src_brake, dst_brake, rl.Vector2(0, 0), 0.0, tint_brake)
 
     src_gas = rl.Rectangle(0, 0, gas_w, gas_h)
     dst_gas = rl.Rectangle(start_x + UI_CONFIG.button_size / 2.0, start_y, gas_w, gas_h)
+    glow_alpha_gas = int(round(255 * gas_opacity * 0.35))
+    if glow_alpha_gas > 0:
+      glow_w = gas_w * glow_scale
+      glow_h = gas_h * glow_scale
+      glow_x = dst_gas.x - (glow_w - gas_w) / 2.0
+      glow_y = dst_gas.y - (glow_h - gas_h) / 2.0
+      dst_gas_glow = rl.Rectangle(glow_x, glow_y, glow_w, glow_h)
+      rl.draw_texture_pro(self._gas_pedal_icon, src_gas, dst_gas_glow, rl.Vector2(0, 0), 0.0,
+                          rl.Color(255, 255, 255, glow_alpha_gas))
     tint_gas = rl.Color(255, 255, 255, int(round(255 * gas_opacity)))
     rl.draw_texture_pro(self._gas_pedal_icon, src_gas, dst_gas, rl.Vector2(0, 0), 0.0, tint_gas)
 
