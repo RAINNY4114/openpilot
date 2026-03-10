@@ -25,7 +25,7 @@ class CarInterface(CarInterfaceBase):
     # This aligns the PID output limits with the planner's Ford cruise accel map.
     accel_max_speed_bp = [0., 10.0, 25., 40.]              # m/s
     # Keep in sync with A_CRUISE_MAX_VALS_FORD in longitudinal_planner.py
-    accel_max_speed_vals = [1.0, 0.8, 0.60, 0.50]          # m/s^2
+    accel_max_speed_vals = [1.1, 0.9, 0.60, 0.50]          # m/s^2
     speed_accel_cap = float(np.interp(current_speed, accel_max_speed_bp, accel_max_speed_vals))
 
     if cruise_speed < 1e-3:

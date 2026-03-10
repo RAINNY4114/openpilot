@@ -27,7 +27,8 @@ A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 # Ford/Lincoln comfort: limit positive accel to reduce kickdown / high RPM and encourage earlier upshifts.
 # Slightly higher in 0-30 km/h for better launch, while keeping mid/high speed conservative.
 # "Comfort but still punchy": soften 25-40 m/s a bit while keeping low-speed response.
-A_CRUISE_MAX_VALS_FORD = [1.0, 0.8, 0.60, 0.50]
+# Slightly quicker launch: raise 0-10 m/s caps.
+A_CRUISE_MAX_VALS_FORD = [1.1, 0.9, 0.60, 0.50]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
