@@ -7,7 +7,7 @@ from cereal import custom
 from openpilot.common.params import Params
 from openpilot.system.hardware.hw import Paths
 
-CURRENT_SELECTOR_VERSION = 13
+CURRENT_SELECTOR_VERSION = 15
 REQUIRED_MIN_SELECTOR_VERSION = 12
 
 ModelManager = custom.ModelManagerSP

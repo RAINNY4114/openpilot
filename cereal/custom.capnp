@@ -59,6 +59,7 @@ struct ModelManagerSP @0xf35cc4560bbf6ec2 {
       navigation @1;
       vision @2;
       policy @3;
+      offPolicy @4;
     }
   }
 

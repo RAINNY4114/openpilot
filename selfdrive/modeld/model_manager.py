@@ -21,7 +21,7 @@ from openpilot.selfdrive.modeld.model_manager_helpers import (
   is_bundle_version_compatible,
 )
 
-MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v10.json"
+MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v15.json"
 CACHE_TIMEOUT_NS = int(3600 * 1e9)
 CHUNK_SIZE = 128 * 1024
 
@@ -37,6 +37,7 @@ class ModelParser:
   @staticmethod
   def _parse_download_uri(download_uri_data) -> custom.ModelManagerSP.DownloadUri:
     download_uri = custom.ModelManagerSP.DownloadUri()
+    download_uri_data = download_uri_data or {}
     download_uri.uri = download_uri_data.get("url", "")
     download_uri.sha256 = download_uri_data.get("sha256", "")
     return download_uri
@@ -44,14 +45,24 @@ class ModelParser:
   @staticmethod
   def _parse_artifact(artifact_data) -> custom.ModelManagerSP.Artifact:
     artifact = custom.ModelManagerSP.Artifact()
+    artifact_data = artifact_data or {}
     artifact.fileName = artifact_data.get("file_name", "")
-    artifact.downloadUri = ModelParser._parse_download_uri(artifact_data.get("download_uri", {}))
+    artifact.downloadUri = ModelParser._parse_download_uri(artifact_data.get("download_uri"))
     return artifact
 
   @staticmethod
-  def _parse_model(model_data) -> custom.ModelManagerSP.Model:
+  def _parse_model(model_data) -> custom.ModelManagerSP.Model | None:
+    if not isinstance(model_data, dict):
+      return None
+    model_type = model_data.get("type")
+    if not model_type:
+      return None
     model = custom.ModelManagerSP.Model()
-    model.type = model_data.get("type")
+    try:
+      model.type = model_type
+    except Exception as err:
+      cloudlog.warning(f"model_manager: unknown model type '{model_type}': {err}")
+      return None
     model.artifact = ModelParser._parse_artifact(model_data.get("artifact", {}))
     if metadata := model_data.get("metadata"):
       model.metadata = ModelParser._parse_artifact(metadata)
@@ -68,25 +79,54 @@ class ModelParser:
     return overrides
 
   @staticmethod
-  def _parse_bundle(bundle) -> custom.ModelManagerSP.ModelBundle:
+  def _parse_bundle(bundle) -> custom.ModelManagerSP.ModelBundle | None:
+    if not isinstance(bundle, dict):
+      return None
     model_bundle = custom.ModelManagerSP.ModelBundle()
-    model_bundle.index = int(bundle["index"])
+    try:
+      model_bundle.index = int(bundle["index"])
+    except Exception as err:
+      cloudlog.warning(f"model_manager: invalid bundle index '{bundle.get('index', '')}': {err}")
+      return None
     model_bundle.internalName = bundle.get("short_name", "")
     model_bundle.displayName = bundle.get("display_name", "")
-    model_bundle.models = [ModelParser._parse_model(model) for model in bundle.get("models", [])]
+    models = []
+    for model in bundle.get("models", []):
+      parsed = ModelParser._parse_model(model)
+      if parsed is not None:
+        models.append(parsed)
+    if not models:
+      cloudlog.warning(f"model_manager: bundle '{model_bundle.index}' has no valid models")
+      return None
+    model_bundle.models = models
     model_bundle.status = custom.ModelManagerSP.DownloadStatus.notDownloading
-    model_bundle.generation = int(bundle.get("generation", 0))
+    try:
+      model_bundle.generation = int(bundle.get("generation", 0))
+    except Exception:
+      model_bundle.generation = 0
     model_bundle.environment = bundle.get("environment", "")
-    model_bundle.runner = bundle.get("runner", custom.ModelManagerSP.Runner.snpe)
+    runner = bundle.get("runner", custom.ModelManagerSP.Runner.snpe)
+    try:
+      model_bundle.runner = runner
+    except Exception as err:
+      cloudlog.warning(f"model_manager: unknown runner '{runner}': {err}")
+      model_bundle.runner = custom.ModelManagerSP.Runner.snpe
     model_bundle.is20hz = bundle.get("is_20hz", False)
-    model_bundle.minimumSelectorVersion = int(bundle.get("minimum_selector_version", 0))
+    try:
+      model_bundle.minimumSelectorVersion = int(bundle.get("minimum_selector_version", 0))
+    except Exception:
+      model_bundle.minimumSelectorVersion = 0
     model_bundle.overrides = ModelParser._parse_overrides(bundle.get("overrides", {}))
     model_bundle.ref = bundle.get("ref", "")
     return model_bundle
 
   @staticmethod
   def parse_models(json_data: dict) -> list[custom.ModelManagerSP.ModelBundle]:
-    found = [ModelParser._parse_bundle(bundle) for bundle in json_data.get("bundles", [])]
+    found = []
+    for bundle in json_data.get("bundles", []):
+      parsed = ModelParser._parse_bundle(bundle)
+      if parsed is not None:
+        found.append(parsed)
     return [bundle for bundle in found if is_bundle_version_compatible(bundle.to_dict())]
 
 
@@ -95,10 +135,21 @@ class ModelCache:
     self.params = params
     self.cache_timeout_ns = cache_timeout_ns
 
+  @staticmethod
+  def _now_ns() -> int:
+    # Persisted cache timestamps should use wall time, not monotonic.
+    return int(time.time() * 1e9)
+
   def _is_expired(self) -> bool:
-    last_sync = self.params.get(PARAM_LAST_SYNC) or 0
-    current_time = int(time.monotonic() * 1e9)
-    return bool(last_sync == 0 or (current_time - last_sync) >= self.cache_timeout_ns)
+    raw_last_sync = self.params.get(PARAM_LAST_SYNC) or 0
+    try:
+      last_sync = int(raw_last_sync)
+    except (TypeError, ValueError):
+      last_sync = 0
+    current_time = self._now_ns()
+    if last_sync == 0 or current_time < last_sync:
+      return True
+    return bool((current_time - last_sync) >= self.cache_timeout_ns)
 
   def get(self) -> tuple[dict, bool]:
     try:
@@ -110,7 +161,7 @@ class ModelCache:
 
   def set(self, data: dict) -> None:
     self.params.put(PARAM_CACHE, data)
-    self.params.put(PARAM_LAST_SYNC, int(time.monotonic() * 1e9))
+    self.params.put(PARAM_LAST_SYNC, self._now_ns())
 
 
 class ModelFetcher:
@@ -216,7 +267,7 @@ class ModelManagerSP:
 
         with full_path.open("wb") as f:
           for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-            if not self.params.get(PARAM_DOWNLOAD_INDEX):
+            if self.params.get(PARAM_DOWNLOAD_INDEX) is None:
               raise InterruptedError("download cancelled")
             if not chunk:
               continue
@@ -322,15 +373,23 @@ class ModelManagerSP:
         self.available_models = self.model_fetcher.get_available_bundles()
         self.active_bundle = get_active_bundle(self.params)
 
-        if index_to_download := self.params.get(PARAM_DOWNLOAD_INDEX):
-          model_to_download = next((m for m in self.available_models if m.index == index_to_download), None)
-          if model_to_download is not None:
-            try:
-              self.download(model_to_download)
-            except Exception as err:
-              cloudlog.exception(f"model_manager: download error: {err}")
-          self.params.remove(PARAM_DOWNLOAD_INDEX)
-          self.selected_bundle = None
+        index_to_download = self.params.get(PARAM_DOWNLOAD_INDEX)
+        if index_to_download is not None:
+          try:
+            index_to_download = int(index_to_download)
+          except (TypeError, ValueError) as err:
+            cloudlog.warning(f"model_manager: invalid download index '{index_to_download}': {err}")
+            self.params.remove(PARAM_DOWNLOAD_INDEX)
+            index_to_download = None
+          if index_to_download is not None:
+            model_to_download = next((m for m in self.available_models if m.index == index_to_download), None)
+            if model_to_download is not None:
+              try:
+                self.download(model_to_download)
+              except Exception as err:
+                cloudlog.exception(f"model_manager: download error: {err}")
+            self.params.remove(PARAM_DOWNLOAD_INDEX)
+            self.selected_bundle = None
 
         if self.params.get_bool(PARAM_CLEAR_CACHE):
           self.clear_model_cache()
