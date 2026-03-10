@@ -26,7 +26,8 @@ LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 # Ford/Lincoln comfort: limit positive accel to reduce kickdown / high RPM and encourage earlier upshifts.
 # Slightly higher in 0-30 km/h for better launch, while keeping mid/high speed conservative.
-A_CRUISE_MAX_VALS_FORD = [1.0, 0.8, 0.65, 0.55]
+# "Comfort but still punchy": soften 25-40 m/s a bit while keeping low-speed response.
+A_CRUISE_MAX_VALS_FORD = [1.0, 0.8, 0.60, 0.50]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
@@ -873,7 +874,8 @@ class LongitudinalPlanner:
     # while keeping decel response unmodified for safety.
     if getattr(self.CP, "brand", "") == "ford" and (not reset_state) and (not long_control_off):
       if math.isfinite(self.output_a_target) and output_a_target_clipped > self.output_a_target:
-        max_jerk_up = float(np.interp(v_ego, [0.0, 5.0, 15.0, 30.0], [2.0, 1.5, 1.0, 0.8]))
+        # "Comfort but still punchy": keep low-speed jerk, soften mid/high speed a touch.
+        max_jerk_up = float(np.interp(v_ego, [0.0, 5.0, 15.0, 30.0], [2.0, 1.5, 0.9, 0.7]))
         max_step = max_jerk_up * float(self.dt)
         output_a_target_clipped = float(min(output_a_target_clipped, self.output_a_target + max_step))
 
