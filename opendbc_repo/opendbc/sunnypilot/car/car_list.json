@@ -2070,16 +2070,6 @@
     ],
     "package": "Smart Cruise Control (SCC)"
   },
-  "Kia K7 2017": {
-    "platform": "KIA_K7_2017",
-    "make": "Kia",
-    "brand": "hyundai",
-    "model": "K7",
-    "year": [
-      "2017"
-    ],
-    "package": "Smart Cruise Control (SCC)"
-  },
   "Kia K8 Hybrid (with HDA II) 2023": {
     "platform": "KIA_K8_HEV_1ST_GEN",
     "make": "Kia",
@@ -2654,7 +2644,20 @@
     ],
     "package": "All"
   },
-  "Lincoln Aviator 2020-24": {
+  "Lincoln Nautilutus 2018-21": {
+    "platform": "FORD_EXPLORER_MK6",
+    "make": "Lincoln",
+    "brand": "ford",
+    "model": "Nautilutus",
+    "year": [
+      "2018",
+      "2019",
+      "2020",
+      "2021"     
+    ],
+    "package": "Adaptive Cruise Control with Lane Centering"
+   },
+    "Lincoln Aviator 2020-24": {
     "platform": "FORD_EXPLORER_MK6",
     "make": "Lincoln",
     "brand": "ford",
