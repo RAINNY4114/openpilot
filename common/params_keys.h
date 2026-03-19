@@ -161,7 +161,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_ui_rainbow", {PERSISTENT, BOOL, "0"}},
     {"dp_lon_aem", {PERSISTENT, BOOL, "0"}},
     {"CurveSpeedControl", {PERSISTENT, BOOL, "1"}},
-    {"CurveSensitivity", {PERSISTENT, INT, "100"}},
+    {"CurveSensitivity", {PERSISTENT, INT, "200"}},
     {"TurnAggressiveness", {PERSISTENT, INT, "100"}},
     {"MapTurnControl", {PERSISTENT, BOOL, "1"}},
     {"VisionTurnControl", {PERSISTENT, BOOL, "1"}},

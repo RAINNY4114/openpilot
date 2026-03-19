@@ -63,7 +63,7 @@ _MAP_TO_RADIANS = math.pi / 180.0
 
 # FrogPilot-style curve speed control defaults
 _FP_TARGET_LAT_A = 2.0
-_FP_CURVE_SENSITIVITY = 1.0
+_FP_CURVE_SENSITIVITY = 2.0
 _FP_CURVE_DETECT_LAT_A = 1.0  # m/s^2, align with FrogPilot's curve detection threshold
 _FP_TURN_AGGRESSIVENESS = 1.0
 _FP_CRUISING_SPEED = 5.0

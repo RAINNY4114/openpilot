@@ -108,7 +108,7 @@ class LincolnLayout(Widget):
       spin_button_item(
         title=lambda: tr("Curve Detection Sensitivity"),
         description=lambda: tr("How sensitive openpilot is when detecting curves. Higher values trigger earlier responses at the risk of triggering too often, while lower values increase confidence at the risk of triggering too infrequently."),
-        initial_value=self._get_param_int("CurveSensitivity", 100),
+        initial_value=self._get_param_int("CurveSensitivity", 200),
         callback=lambda val: self._params.put("CurveSensitivity", int(val)),
         min_val=50,
         max_val=200,
