@@ -2690,3 +2690,39 @@ msgstr "总延迟："
 #, python-format
 msgid "Only available when vehicle is off, or always offroad mode is on"
 msgstr "仅在车辆熄火或始终离线模式开启时可用"
+
+#: selfdrive/ui/layouts/settings/settings.py
+msgid "Branding"
+msgstr "外观"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "### Startup Logo ###"
+msgstr "### 启动 Logo ###"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "Ford logo index"
+msgstr "Ford Logo 编号"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "0 = spinner_comma.png. >0 = fordX.png. When Ford is set above 0, Lincoln is automatically reset to 0."
+msgstr "0 = spinner_comma.png；大于 0 = fordX.png。当 Ford 编号大于 0 时，Lincoln 会自动重置为 0。"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "Lincoln logo index"
+msgstr "Lincoln Logo 编号"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "0 = spinner_comma.png. >0 = lincolnX.png. When Lincoln is set above 0, Ford is automatically reset to 0."
+msgstr "0 = spinner_comma.png；大于 0 = lincolnX.png。当 Lincoln 编号大于 0 时，Ford 会自动重置为 0。"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "### Spinner Animation ###"
+msgstr "### 旋转动画 ###"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "Spinner animation"
+msgstr "旋转动画"
+
+#: selfdrive/ui/layouts/settings/branding.py
+msgid "0 = spinner_track.png. 1 = 1spinner_track.png. Put custom files in selfdrive/assets/images/."
+msgstr "0 = spinner_track.png；1 = 1spinner_track.png。自定义图片请放到 selfdrive/assets/images/ 目录。"
