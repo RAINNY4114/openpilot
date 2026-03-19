@@ -6,6 +6,7 @@ from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
 from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
+from openpilot.selfdrive.ui.layouts.settings.branding import BrandingLayout
 from openpilot.selfdrive.ui.layouts.settings.lincoln import LincolnLayout
 from openpilot.selfdrive.ui.layouts.settings.model_manager import ModelManagerLayout
 from openpilot.selfdrive.ui.layouts.settings.osm_maps import OSMMapsLayout
@@ -41,8 +42,9 @@ class PanelType(IntEnum):
   MODEL_MANAGER = 4
   DEVELOPER = 5
   DRAGONPILOT = 6
-  LINCOLN = 7
-  OSM_MAPS = 8
+  BRANDING = 7
+  LINCOLN = 8
+  OSM_MAPS = 9
 
 
 @dataclass
@@ -69,6 +71,7 @@ class SettingsLayout(Widget):
       PanelType.MODEL_MANAGER: PanelInfo(tr_noop("Models"), ModelManagerLayout()),
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
       PanelType.DRAGONPILOT: PanelInfo("dp", DragonpilotLayout()),
+      PanelType.BRANDING: PanelInfo("Branding", BrandingLayout()),
       PanelType.LINCOLN: PanelInfo("Lincoln", LincolnLayout()),
       PanelType.OSM_MAPS: PanelInfo(tr_noop("Offline Maps"), OSMMapsLayout()),
     }

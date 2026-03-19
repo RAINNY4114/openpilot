@@ -3,6 +3,7 @@ import pyray as rl
 import select
 import sys
 
+from dragonpilot.selfdrive.ui.startup_logo import resolve_spinner_track_asset, resolve_startup_logo_asset
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.text import wrap_text
@@ -12,7 +13,7 @@ from openpilot.system.ui.widgets import Widget
 if gui_app.big_ui():
   PROGRESS_BAR_WIDTH = 1000
   PROGRESS_BAR_HEIGHT = 20
-  TEXTURE_SIZE = 360
+  TEXTURE_SIZE = 480
   WRAPPED_SPACING = 50
   CENTERED_SPACING = 150
 else:
@@ -35,8 +36,8 @@ def clamp(value, min_value, max_value):
 class Spinner(Widget):
   def __init__(self):
     super().__init__()
-    self._comma_texture = gui_app.texture("../../dragonpilot/selfdrive/assets/images/spinner_comma.png", TEXTURE_SIZE, TEXTURE_SIZE)
-    self._spinner_texture = gui_app.texture("images/spinner_track.png", TEXTURE_SIZE, TEXTURE_SIZE, alpha_premultiply=True)
+    self._comma_texture = gui_app.texture(resolve_startup_logo_asset(), TEXTURE_SIZE, TEXTURE_SIZE)
+    self._spinner_texture = gui_app.texture(resolve_spinner_track_asset(), TEXTURE_SIZE, TEXTURE_SIZE, alpha_premultiply=True)
     self._rotation = 0.0
     self._progress: int | None = None
     self._wrapped_lines: list[str] = []
