@@ -180,7 +180,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_vag_pq_steering_patch", {PERSISTENT, BOOL, "0"}},
     {"dp_vag_avoid_eps_lockout", {PERSISTENT, BOOL, "0"}},
     {"dp_ui_four", {PERSISTENT, BOOL, "0"}},
-    {"dp_lincoln_bsm_voice_enabled", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_bsm_voice_enabled", {PERSISTENT, BOOL, "1"}},
     {"dp_lincoln_bsm_voice_interval_sec", {PERSISTENT, INT, "3"}},
     {"dp_lincoln_bsm_voice_volume_pct", {PERSISTENT, INT, "100"}},
     {"dp_htd_enabled", {PERSISTENT, BOOL, "1"}},
@@ -195,8 +195,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lincoln_auto_lc_confirm_delay_sec", {PERSISTENT, INT, "3"}},
     {"dp_lincoln_auto_lc_edge_clearance_m", {PERSISTENT, STRING, "0.6"}},
     {"dp_lincoln_lane_preference", {PERSISTENT, INT, "0"}},
-    {"dp_lincoln_stop_distance_m", {PERSISTENT, INT, "4"}},     // 最终刹停/红灯跟停的期望静止车距（米）
-    {"dp_lincoln_follow_coast", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_stop_distance_m", {PERSISTENT, FLOAT, "4.0"}},     // 最终刹停/红灯跟停的期望静止车距（米）
+    {"dp_lincoln_follow_coast", {PERSISTENT, BOOL, "1"}},
     {"dp_lincoln_hazard_alert", {PERSISTENT, BOOL, "0"}},
     {"MapAcceleration", {PERSISTENT, FLOAT}},
     {"MapDeceleration", {PERSISTENT, FLOAT}},
