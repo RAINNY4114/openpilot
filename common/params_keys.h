@@ -212,11 +212,4 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapAdvisoryLimit", {PERSISTENT, STRING}},
-    {"LincolnNASAddress", {PERSISTENT, STRING}},
-    {"LincolnNASUsername", {PERSISTENT, STRING}},
-    {"LincolnNASPassword", {PERSISTENT, STRING}},
-    {"LincolnNASLastResult", {PERSISTENT, STRING}},
-    {"NasSshDest", {PERSISTENT, STRING}},
-    {"NasSshPort", {PERSISTENT, STRING}},
-    {"NasSshKey", {PERSISTENT, STRING}},
 };
