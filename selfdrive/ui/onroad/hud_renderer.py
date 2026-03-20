@@ -28,7 +28,7 @@ class UIConfig:
   set_speed_width_metric: int = 200
   set_speed_width_imperial: int = 172
   set_speed_height: int = 204
-  wheel_icon_size: int = 144
+  wheel_icon_size: int = 176
 
 
 @dataclass(frozen=True)

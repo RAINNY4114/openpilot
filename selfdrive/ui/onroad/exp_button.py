@@ -48,9 +48,19 @@ class ExpButton(Widget):
 
     self._white_color.a = 180 if self.is_pressed or not self._engageable else 255
 
-    texture = self._txt_exp if self._held_or_actual_mode() else self._txt_wheel
+    show_exp_icon = self._held_or_actual_mode()
+    texture = self._txt_exp if show_exp_icon else self._txt_wheel
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
-    rl.draw_texture(texture, center_x - texture.width // 2, center_y - texture.height // 2, self._white_color)
+
+    src_rect = rl.Rectangle(0, 0, float(texture.width), float(texture.height))
+    dest_rect = rl.Rectangle(float(center_x), float(center_y), float(texture.width), float(texture.height))
+    origin = rl.Vector2(texture.width / 2, texture.height / 2)
+
+    rotation = 0.0
+    if not show_exp_icon:
+      rotation = -float(ui_state.sm["carState"].steeringAngleDeg)
+
+    rl.draw_texture_pro(texture, src_rect, dest_rect, origin, rotation, self._white_color)
 
   def _held_or_actual_mode(self):
     now = time.monotonic()
