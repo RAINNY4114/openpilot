@@ -55,6 +55,9 @@ DP_INDICATOR_BLINK_RATE_FAST = int(gui_app.target_fps * 0.25)
 DP_INDICATOR_BLINK_RATE_STD = int(gui_app.target_fps * 0.5)
 DP_INDICATOR_COLOR_BSM_ENHANCED = rl.Color(255, 0, 0, 255)
 DP_INDICATOR_COLOR_BLINKER_ENHANCED = rl.Color(255, 255, 0, 255)
+DP_BSD_ICON_TEXTURE_SIZE = 256
+DP_BSD_ICON_WIDTH = 88.0
+DP_BSD_ICON_HEIGHT = 90.0
 DP_DECEL_BAR_MIN_MS2 = 0.25
 DP_DECEL_BAR_MAX_MS2 = 3.0
 DP_HARD_BRAKE_DECEL_MS2 = 3.5
@@ -255,6 +258,8 @@ class AugmentedRoadView(CameraView):
     self._dp_indicator_count_right = 0
     self._dp_indicator_color_left = rl.Color(0, 0, 0, 0)
     self._dp_indicator_color_right = rl.Color(0, 0, 0, 0)
+    self._txt_bsd_left: rl.Texture = gui_app.texture("icons/bsd_l.png", DP_BSD_ICON_TEXTURE_SIZE, DP_BSD_ICON_TEXTURE_SIZE)
+    self._txt_bsd_right: rl.Texture = gui_app.texture("icons/bsd_r.png", DP_BSD_ICON_TEXTURE_SIZE, DP_BSD_ICON_TEXTURE_SIZE)
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
@@ -827,10 +832,46 @@ class AugmentedRoadView(CameraView):
     # dp - Side indicators
     indicator_y = int(rect.y+4*UI_BORDER_SIZE)
     indicator_height = int(rect.height-8*UI_BORDER_SIZE)
+    left_blindspot = False
+    right_blindspot = False
+    if sm.alive.get("carState", False):
+      left_blindspot = bool(getattr(sm["carState"], "leftBlindspot", False))
+      right_blindspot = bool(getattr(sm["carState"], "rightBlindspot", False))
+
     if self._dp_indicator_show_left:
       rl.draw_rectangle(int(rect.x), indicator_y, UI_BORDER_SIZE, indicator_height, self._dp_indicator_color_left)
+      if left_blindspot:
+        self._draw_dp_bsd_icon(rect, is_left=True)
     if self._dp_indicator_show_right:
       rl.draw_rectangle(int(rect.x + rect.width-UI_BORDER_SIZE), indicator_y, UI_BORDER_SIZE, indicator_height, self._dp_indicator_color_right)
+      if right_blindspot:
+        self._draw_dp_bsd_icon(rect, is_left=False)
+
+  def _draw_dp_bsd_icon(self, rect: rl.Rectangle, *, is_left: bool) -> None:
+    texture = self._txt_bsd_left if is_left else self._txt_bsd_right
+    if getattr(texture, "id", 0) == 0:
+      return
+
+    # Use the actual non-transparent icon bounds so left/right assets align visually
+    # at the inner side of each vertical blindspot bar.
+    src_x = 1.0 if is_left else 184.0
+    src_y = 17.0
+    src_w = 71.0
+    src_h = 73.0
+
+    icon_w = DP_BSD_ICON_WIDTH
+    icon_h = DP_BSD_ICON_HEIGHT
+    inset_x = float(UI_BORDER_SIZE) + 8.0
+    icon_y = float(rect.y + rect.height * 0.5 - icon_h * 0.5)
+
+    if is_left:
+      icon_x = float(rect.x + inset_x)
+    else:
+      icon_x = float(rect.x + rect.width - inset_x - icon_w)
+
+    src_rect = rl.Rectangle(src_x, src_y, src_w, src_h)
+    dst_rect = rl.Rectangle(icon_x, icon_y, icon_w, icon_h)
+    rl.draw_texture_pro(texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
 
   def _switch_stream_if_needed(self, sm):
     if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
