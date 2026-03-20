@@ -19,13 +19,20 @@ class ExpButton(Widget):
     self._hold_end_time: float | None = None
 
     self._white_color: rl.Color = rl.Color(255, 255, 255, 255)
-    self._black_bg: rl.Color = rl.Color(0, 0, 0, 166)
+    self._black_bg: rl.Color = rl.Color(0, 0, 0, 0)
+    self._button_size: int = button_size
     self._txt_wheel: rl.Texture = gui_app.texture('../../dragonpilot/selfdrive/assets/icons/chffr_wheel.png', icon_size, icon_size)
     self._txt_exp: rl.Texture = gui_app.texture('icons/experimental.png', icon_size, icon_size)
-    self._rect = rl.Rectangle(0, 0, button_size, button_size)
+    self._display_size: int = max(button_size, self._txt_wheel.width, self._txt_wheel.height, self._txt_exp.width, self._txt_exp.height)
+    self._rect = rl.Rectangle(0, 0, self._display_size, self._display_size)
 
   def set_rect(self, rect: rl.Rectangle) -> None:
-    self._rect.x, self._rect.y = rect.x, rect.y
+    self._rect = rl.Rectangle(
+      rect.x + rect.width - self._display_size,
+      rect.y,
+      self._display_size,
+      self._display_size,
+    )
 
   def _update_state(self) -> None:
     selfdrive_state = ui_state.sm["selfdriveState"]

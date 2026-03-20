@@ -51,13 +51,14 @@ ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
 INF_POINT = np.array([1000.0, 0.0, 0.0])
 
 # dp
-DP_INDICATOR_BLINK_RATE_FAST = int(gui_app.target_fps * 0.25)
-DP_INDICATOR_BLINK_RATE_STD = int(gui_app.target_fps * 0.5)
+DP_INDICATOR_BLINKER_ONLY_HZ = 1.0
+DP_INDICATOR_BSM_ONLY_HZ = 3.3
+DP_INDICATOR_BSM_WITH_BLINKER_HZ = 5.0
 DP_INDICATOR_COLOR_BSM_ENHANCED = rl.Color(255, 0, 0, 255)
 DP_INDICATOR_COLOR_BLINKER_ENHANCED = rl.Color(255, 255, 0, 255)
 DP_BSD_ICON_TEXTURE_SIZE = 256
-DP_BSD_ICON_WIDTH = 88.0
-DP_BSD_ICON_HEIGHT = 90.0
+DP_BSD_ICON_WIDTH = 256.0
+DP_BSD_ICON_HEIGHT = 256.0
 DP_DECEL_BAR_MIN_MS2 = 0.25
 DP_DECEL_BAR_MAX_MS2 = 3.0
 DP_HARD_BRAKE_DECEL_MS2 = 3.5
@@ -258,6 +259,8 @@ class AugmentedRoadView(CameraView):
     self._dp_indicator_count_right = 0
     self._dp_indicator_color_left = rl.Color(0, 0, 0, 0)
     self._dp_indicator_color_right = rl.Color(0, 0, 0, 0)
+    self._dp_indicator_started_at_left: float | None = None
+    self._dp_indicator_started_at_right: float | None = None
     self._txt_bsd_left: rl.Texture = gui_app.texture("icons/bsd_l.png", DP_BSD_ICON_TEXTURE_SIZE, DP_BSD_ICON_TEXTURE_SIZE)
     self._txt_bsd_right: rl.Texture = gui_app.texture("icons/bsd_r.png", DP_BSD_ICON_TEXTURE_SIZE, DP_BSD_ICON_TEXTURE_SIZE)
 
@@ -852,24 +855,28 @@ class AugmentedRoadView(CameraView):
     if getattr(texture, "id", 0) == 0:
       return
 
-    # Use the actual non-transparent icon bounds so left/right assets align visually
-    # at the inner side of each vertical blindspot bar.
-    src_x = 1.0 if is_left else 184.0
-    src_y = 17.0
-    src_w = 71.0
-    src_h = 73.0
-
     icon_w = DP_BSD_ICON_WIDTH
     icon_h = DP_BSD_ICON_HEIGHT
     inset_x = float(UI_BORDER_SIZE) + 8.0
-    icon_y = float(rect.y + rect.height * 0.5 - icon_h * 0.5)
+    # These two assets are 256x256, but the visible car/waves occupy only a small inner-side region.
+    # Keep the display at original 256x256 size while offsetting the full texture so the visible icon
+    # still sits at the inner side of each blindspot bar and stays vertically centered.
+    visible_x = 1.0 if is_left else 184.0
+    visible_y = 17.0
+    visible_w = 71.0
+    visible_h = 73.0
 
     if is_left:
-      icon_x = float(rect.x + inset_x)
+      visible_left = float(rect.x + inset_x)
+      icon_x = visible_left - visible_x
     else:
-      icon_x = float(rect.x + rect.width - inset_x - icon_w)
+      visible_right = float(rect.x + rect.width - inset_x)
+      icon_x = visible_right - (visible_x + visible_w)
 
-    src_rect = rl.Rectangle(src_x, src_y, src_w, src_h)
+    visible_center_y = float(rect.y + rect.height * 0.5)
+    icon_y = visible_center_y - (visible_y + visible_h * 0.5)
+
+    src_rect = rl.Rectangle(0.0, 0.0, float(texture.width), float(texture.height))
     dst_rect = rl.Rectangle(icon_x, icon_y, icon_w, icon_h)
     rl.draw_texture_pro(texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
 
@@ -971,36 +978,49 @@ class AugmentedRoadView(CameraView):
 
     return self._cached_matrix
 
-  def _update_dp_indicator_side_state(self, blinker_state, bsm_state, show_prev, count_prev):
-    if not blinker_state and not bsm_state:
-      return False, 0, rl.Color(0, 0, 0, 0)
+  @staticmethod
+  def _indicator_phase_show(elapsed_s: float, hz: float) -> bool:
+    if hz <= 0.0:
+      return True
 
+    half_period_s = 0.5 / hz
+    if half_period_s <= 0.0:
+      return True
+
+    return int(elapsed_s / half_period_s) % 2 == 0
+
+  def _update_dp_indicator_side_state(self, blinker_state, bsm_state, show_prev, count_prev, started_at_prev):
+    if not blinker_state and not bsm_state:
+      return False, 0, rl.Color(0, 0, 0, 0), None
+
+    now = time.monotonic()
+    started_at = now if started_at_prev is None else started_at_prev
+    elapsed_s = max(0.0, now - started_at)
     count = count_prev + 1
     show = True
     color = rl.Color(0, 0, 0, 0)
 
     # blinker = yellow flash, blindspot = red flash, both = red fast flash
     if bsm_state:
-      blink_rate = DP_INDICATOR_BLINK_RATE_FAST if blinker_state else DP_INDICATOR_BLINK_RATE_STD
-      show = (count // blink_rate) % 2 == 0
+      hz = DP_INDICATOR_BSM_WITH_BLINKER_HZ if blinker_state else DP_INDICATOR_BSM_ONLY_HZ
+      show = self._indicator_phase_show(elapsed_s, hz)
       color = DP_INDICATOR_COLOR_BSM_ENHANCED
     elif blinker_state:
-      blink_rate = DP_INDICATOR_BLINK_RATE_STD
-      show = (count // blink_rate) % 2 == 0
+      show = self._indicator_phase_show(elapsed_s, DP_INDICATOR_BLINKER_ONLY_HZ)
       color = DP_INDICATOR_COLOR_BLINKER_ENHANCED
     else:
       show = False
 
-    return show, count, color
+    return show, count, color, started_at
 
   def _update_dp_indicator_states(self, sm):
     cs = sm['carState']
-    self._dp_indicator_show_left, self._dp_indicator_count_left, self._dp_indicator_color_left = \
+    self._dp_indicator_show_left, self._dp_indicator_count_left, self._dp_indicator_color_left, self._dp_indicator_started_at_left = \
       self._update_dp_indicator_side_state(cs.leftBlinker, cs.leftBlindspot,
-                                           self._dp_indicator_show_left, self._dp_indicator_count_left)
-    self._dp_indicator_show_right, self._dp_indicator_count_right, self._dp_indicator_color_right = \
+                                           self._dp_indicator_show_left, self._dp_indicator_count_left, self._dp_indicator_started_at_left)
+    self._dp_indicator_show_right, self._dp_indicator_count_right, self._dp_indicator_color_right, self._dp_indicator_started_at_right = \
       self._update_dp_indicator_side_state(cs.rightBlinker, cs.rightBlindspot,
-                                           self._dp_indicator_show_right, self._dp_indicator_count_right)
+                                           self._dp_indicator_show_right, self._dp_indicator_count_right, self._dp_indicator_started_at_right)
 
   def _draw_hud_enhancements(self) -> None:
     sm = ui_state.sm
