@@ -7,6 +7,8 @@ from openpilot.system.ui.widgets import Widget
 
 
 class ExpButton(Widget):
+  _WHEEL_CROP_INSET_RATIO = 32.0 / 256.0
+
   def __init__(self, button_size: int, icon_size: int):
     super().__init__()
     self._params = Params()
@@ -59,7 +61,12 @@ class ExpButton(Widget):
     texture = self._txt_exp if show_exp_icon else self._txt_wheel
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
 
-    src_rect = rl.Rectangle(0, 0, float(texture.width), float(texture.height))
+    if show_exp_icon:
+      src_rect = rl.Rectangle(0, 0, float(texture.width), float(texture.height))
+    else:
+      inset = float(texture.width) * self._WHEEL_CROP_INSET_RATIO
+      src_rect = rl.Rectangle(inset, inset, float(texture.width) - 2 * inset, float(texture.height) - 2 * inset)
+
     dest_rect = rl.Rectangle(float(center_x), float(center_y), float(texture.width), float(texture.height))
     origin = rl.Vector2(texture.width / 2, texture.height / 2)
 
