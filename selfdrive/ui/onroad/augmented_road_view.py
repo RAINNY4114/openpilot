@@ -858,25 +858,32 @@ class AugmentedRoadView(CameraView):
     icon_w = DP_BSD_ICON_WIDTH
     icon_h = DP_BSD_ICON_HEIGHT
     inset_x = float(UI_BORDER_SIZE) + 8.0
-    # These two assets are 256x256, but the visible car/waves occupy only a small inner-side region.
-    # Keep the display at original 256x256 size while offsetting the full texture so the visible icon
-    # still sits at the inner side of each blindspot bar and stays vertically centered.
-    visible_x = 1.0 if is_left else 184.0
-    visible_y = 17.0
+    # These icons have a very small opaque region inside a 256x256 canvas.
+    # Crop to a side-aligned 128x128 region so the visible car/waves render larger
+    # without changing the established inner-edge placement.
+    crop_x = 0.0 if is_left else 128.0
+    crop_y = 0.0
+    crop_w = 128.0
+    crop_h = 128.0
+
+    visible_x = 1.0 if is_left else 184.0 - crop_x
+    visible_y = 17.0 - crop_y
     visible_w = 71.0
     visible_h = 73.0
+    scale_x = icon_w / crop_w
+    scale_y = icon_h / crop_h
 
     if is_left:
       visible_left = float(rect.x + inset_x)
-      icon_x = visible_left - visible_x
+      icon_x = visible_left - visible_x * scale_x
     else:
       visible_right = float(rect.x + rect.width - inset_x)
-      icon_x = visible_right - (visible_x + visible_w)
+      icon_x = visible_right - (visible_x + visible_w) * scale_x
 
     visible_center_y = float(rect.y + rect.height * 0.5)
-    icon_y = visible_center_y - (visible_y + visible_h * 0.5)
+    icon_y = visible_center_y - (visible_y + visible_h * 0.5) * scale_y
 
-    src_rect = rl.Rectangle(0.0, 0.0, float(texture.width), float(texture.height))
+    src_rect = rl.Rectangle(crop_x, crop_y, crop_w, crop_h)
     dst_rect = rl.Rectangle(icon_x, icon_y, icon_w, icon_h)
     rl.draw_texture_pro(texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
 
