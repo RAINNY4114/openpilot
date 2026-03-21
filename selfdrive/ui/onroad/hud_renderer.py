@@ -178,16 +178,16 @@ class HudRenderer(Widget):
     exp_button_rect_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     exp_button_y = rect.y + UI_CONFIG.border_size - 14
     exp_display_size = float(self._exp_button.rect.width if self._exp_button.rect.width > 0 else UI_CONFIG.button_size)
-    exp_actual_x = exp_button_rect_x + UI_CONFIG.button_size - exp_display_size
 
     if self.is_cruise_available:
-      right_set_speed_x = exp_actual_x + (exp_display_size - set_speed_width) / 2.0
+      right_set_speed_x = rect.x + rect.width - UI_CONFIG.border_size - set_speed_width
       self._draw_set_speed(rect, x_override=right_set_speed_x, anchor_x=set_speed_left_x, anchor_y=set_speed_y)
       self._draw_curve_speed_control()
 
     self._draw_current_speed(rect)
 
-    left_button_x = set_speed_left_x + exp_display_size - UI_CONFIG.button_size
+    left_exp_display_x = rect.x + UI_CONFIG.border_size
+    left_button_x = left_exp_display_x + exp_display_size - UI_CONFIG.button_size
     self._exp_button.render(rl.Rectangle(left_button_x, exp_button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
     self._draw_pedal_icons(rect, exp_button_rect_x, exp_button_y)
 
