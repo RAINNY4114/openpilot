@@ -24,6 +24,7 @@ class TorqueBar(Widget):
     self._demo = demo
     self._torque_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
     self._curve_intensity_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._confidence_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._torque_line_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._angle_mode = False
     self._scale = 1.0
@@ -75,10 +76,15 @@ class TorqueBar(Widget):
       except Exception:
         bar_mag = 0.0
 
-      self._torque_filter.update(curv_sign * confidence)
+      # For angle-mode platforms like Ford/Lincoln, the bar should read like
+      # lateral control intent, not lane confidence. Use desired curvature
+      # magnitude for the left/right span, and keep confidence for color/alpha.
+      self._torque_filter.update(curv_sign * bar_mag)
       self._curve_intensity_filter.update(bar_mag)
+      self._confidence_filter.update(confidence)
     else:
       self._angle_mode = False
+      self._confidence_filter.update(0.0)
       self._torque_filter.update(-sm['carOutput'].actuatorsOutput.torque)
       self._curve_intensity_filter.update(abs(self._torque_filter.x))
 
@@ -127,7 +133,7 @@ class TorqueBar(Widget):
     sl_pts = arc_bar_pts(cx, cy, mid_r, torque_line_height, a0s, a1s,
                          cap_radius=scaled_cap_radius)
     if self._angle_mode:
-      confidence = abs(float(self._torque_filter.x))
+      confidence = float(np.clip(self._confidence_filter.x, 0.0, 1.0))
       if confidence >= 0.7:
         base_color = rl.Color(0, 255, 120, 255)
       elif confidence >= 0.4:
@@ -135,7 +141,9 @@ class TorqueBar(Widget):
       else:
         base_color = rl.Color(255, 80, 80, 255)
 
-      alpha_scale = (0.35 + 0.65 * bar_mag) * self._torque_line_alpha_filter.x
+      confidence_alpha = np.interp(confidence, [0.0, 1.0], [0.35, 1.0])
+      magnitude_alpha = np.interp(bar_mag, [0.0, 1.0], [0.30, 1.0])
+      alpha_scale = confidence_alpha * magnitude_alpha * self._torque_line_alpha_filter.x
       bg_alpha = int(255 * alpha_scale * 0.35)
       fg_alpha = int(255 * alpha_scale)
 
