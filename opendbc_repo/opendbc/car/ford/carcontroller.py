@@ -6,6 +6,7 @@ from opendbc.car.lateral import ISO_LATERAL_ACCEL, apply_std_steer_angle_limits
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
+from openpilot.common.params import Params
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
@@ -14,6 +15,7 @@ VisualAlert = structs.CarControl.HUDControl.VisualAlert
 # Limit to average banked road since safety doesn't have the roll
 AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation. higher actual roll raises lateral acceleration
 MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL - (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~2.4 m/s^2
+HUMAN_TURN_STEERING_ANGLE_DEG = 45.0
 
 
 def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
@@ -62,6 +64,7 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
     super().__init__(dbc_names, CP)
+    self.params = Params()
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.CAN = fordcan.CanBus(CP)
 
@@ -75,13 +78,30 @@ class CarController(CarControllerBase):
     self.steer_alert_last = False
     self.lead_distance_bars_last = None
     self.distance_bar_frame = 0
+    self.enable_human_turn_detection = True
+    self.human_turn = False
 
     # Auto-turn-signal latch (for auto-requested lane changes)
     self._auto_blinker_dir = 0  # 0=off, 1=left, 2=right
     self._prev_cc_blinker_dir = 0
 
+  def _update_human_turn_detection_enabled(self) -> None:
+    enabled = self.params.get("enable_human_turn_detection")
+    if enabled is not None:
+      self.enable_human_turn_detection = enabled != b"0"
+      return
+
+    legacy_enabled = self.params.get("dp_htd_enabled")
+    if legacy_enabled is not None:
+      self.enable_human_turn_detection = legacy_enabled != b"0"
+      self.params.put_bool("enable_human_turn_detection", self.enable_human_turn_detection)
+      return
+
+    self.enable_human_turn_detection = True
+
   def update(self, CC, CS, now_nanos):
     can_sends = []
+    self._update_human_turn_detection_enabled()
 
     actuators = CC.actuators
     hud_control = CC.hudControl
@@ -124,19 +144,27 @@ class CarController(CarControllerBase):
     ### lateral control ###
     # send steer msg at 20Hz
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
+      self.human_turn = self.enable_human_turn_detection and CS.out.steeringPressed and \
+                        abs(CS.out.steeringAngleDeg) > HUMAN_TURN_STEERING_ANGLE_DEG
+      reset_steering = self.human_turn or CS.out.vEgoRaw < 0.1
+
       # Bronco and some other cars consistently overshoot curv requests
       # Apply some deadzone + smoothing convergence to avoid oscillations
-      if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14):
+      if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14) and not reset_steering:
         self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
         apply_curvature = self.anti_overshoot_curvature_last
       else:
+        if reset_steering:
+          self.anti_overshoot_curvature_last = 0.0
         apply_curvature = actuators.curvature
 
       # apply rate limits, curvature error limit, and clip to signal range
-      current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-
-      self.apply_curvature_last = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature,
-                                                              CS.out.vEgoRaw, 0., CC.latActive, self.CP)
+      if reset_steering:
+        self.apply_curvature_last = 0.0
+      else:
+        current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
+        self.apply_curvature_last = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature,
+                                                                CS.out.vEgoRaw, 0., CC.latActive, self.CP)
 
       if self.CP.flags & FordFlags.CANFD:
         # TODO: extended mode

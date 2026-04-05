@@ -22,6 +22,7 @@ class LincolnLayout(Widget):
     super().__init__()
     self._params = Params()
 
+    self._migrate_human_turn_detection_param()
     self._normalize_curve_method()
 
     self._curve_method_setting = multiple_button_item(
@@ -65,20 +66,9 @@ class LincolnLayout(Widget):
       toggle_item(
         title=lambda: tr("Enable Human Turn Detection"),
         description=lambda: tr("Automatically pause steering when the driver applies large manual steering input, then smoothly resume."),
-        initial_state=self._params.get_bool("dp_htd_enabled"),
-        callback=lambda val: self._params.put_bool("dp_htd_enabled", val),
+        initial_state=self._params.get_bool("enable_human_turn_detection"),
+        callback=lambda val: self._params.put_bool("enable_human_turn_detection", val),
       ),
-      spin_button_item(
-        title=lambda: tr("Trigger angle"),
-        description=lambda: tr("Driver steering angle that triggers HTD (degrees)."),
-        initial_value=self._get_param_int("dp_htd_turn_angle_threshold", 90),
-        callback=lambda val: self._params.put("dp_htd_turn_angle_threshold", int(val)),
-        min_val=30,
-        max_val=120,
-        step=1,
-        suffix=tr(" °"),
-      ),
-      
       simple_item(title=lambda: tr("### Curve Speed Control ###")),
       toggle_item(
         title=lambda: tr("Curve Speed Control"),
@@ -215,6 +205,14 @@ class LincolnLayout(Widget):
       else:
         self._params.put_bool("MapTurnControl", False)
         self._params.put_bool("VisionTurnControl", True)
+
+  def _migrate_human_turn_detection_param(self) -> None:
+    if self._params.get("enable_human_turn_detection") is not None:
+      return
+    legacy_enabled = self._params.get("dp_htd_enabled")
+    if legacy_enabled is None:
+      return
+    self._params.put_bool("enable_human_turn_detection", legacy_enabled != b"0")
 
   def _curve_method_index(self) -> int:
     map_enabled = bool(self._params.get_bool("MapTurnControl"))
