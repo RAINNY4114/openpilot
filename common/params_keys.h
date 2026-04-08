@@ -197,6 +197,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"dp_lincoln_stop_distance_m", {PERSISTENT, FLOAT, "4.0"}},     // 最终刹停/红灯跟停的期望静止车距（米）
     {"dp_lincoln_follow_coast", {PERSISTENT, BOOL, "1"}},
     {"dp_lincoln_hazard_alert", {PERSISTENT, BOOL, "0"}},
+    {"custom_path_offset", {PERSISTENT, FLOAT, "0.0"}},
+    {"pc_blend_ratio_low_C_UI", {PERSISTENT, FLOAT, "0.4"}},
+    {"pc_blend_ratio_high_C_UI", {PERSISTENT, FLOAT, "0.4"}},
+    {"LC_PID_gain_UI", {PERSISTENT, FLOAT, "3.0"}},
+    {"lane_change_factor_high", {PERSISTENT, FLOAT, "0.85"}},
     {"MapAcceleration", {PERSISTENT, FLOAT}},
     {"MapDeceleration", {PERSISTENT, FLOAT}},
     {"MapTargetLatA", {PERSISTENT, FLOAT}},

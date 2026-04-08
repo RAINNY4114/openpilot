@@ -1623,6 +1623,39 @@ msgstr "启用人工转弯检测"
 msgid "Automatically pause steering when the driver applies large manual steering input, then smoothly resume."
 msgstr "驾驶员大角度手动打方向时自动暂停横向控制，松手后平滑恢复。"
 
+msgid "### Ford / Lincoln Lateral Tuning ###"
+msgstr "### Ford / Lincoln 横向调校 ###"
+
+msgid "In-Lane Offset"
+msgstr "车道内偏置"
+
+msgid "Adjust the lane-centering offset. Negative values bias left, positive values bias right."
+msgstr "调整车道居中偏置。负值偏左，正值偏右。"
+
+msgid "Predicted Curvature Blend Ratio Low"
+msgstr "低曲率预测曲率混合比"
+
+msgid "Blend ratio for predicted curvature on straights and gentle curves."
+msgstr "直道和缓弯时预测曲率的混合比例。"
+
+msgid "Predicted Curvature Blend Ratio High"
+msgstr "高曲率预测曲率混合比"
+
+msgid "Blend ratio for predicted curvature on medium and larger curves."
+msgstr "中等和较大弯道时预测曲率的混合比例。"
+
+msgid "Low Curvature PID Gain"
+msgstr "低曲率 PID 增益"
+
+msgid "Strength of low-curvature lane-centering correction."
+msgstr "低曲率场景下车道居中修正的力度。"
+
+msgid "Lane Change Factor High"
+msgstr "高速变道平滑系数"
+
+msgid "High-speed lane-change smoothing factor. Lower values soften the lane change more."
+msgstr "高速变道平滑系数。数值越低，变道动作越柔和。"
+
 msgid "Trigger angle"
 msgstr "触发角度"
 
