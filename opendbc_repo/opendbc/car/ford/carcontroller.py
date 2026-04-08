@@ -80,6 +80,8 @@ class CarController(CarControllerBase):
     self.distance_bar_frame = 0
     self.enable_human_turn_detection = True
     self.human_turn = False
+    self.post_reset_ramp_active = False
+    self.reset_steering_last = False
 
     # Auto-turn-signal latch (for auto-requested lane changes)
     self._auto_blinker_dir = 0  # 0=off, 1=left, 2=right
@@ -152,19 +154,42 @@ class CarController(CarControllerBase):
       # Apply some deadzone + smoothing convergence to avoid oscillations
       if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14) and not reset_steering:
         self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
-        apply_curvature = self.anti_overshoot_curvature_last
+        requested_curvature = self.anti_overshoot_curvature_last
       else:
         if reset_steering:
           self.anti_overshoot_curvature_last = 0.0
-        apply_curvature = actuators.curvature
+        requested_curvature = actuators.curvature
 
       # apply rate limits, curvature error limit, and clip to signal range
       if reset_steering:
+        requested_curvature = 0.0
         self.apply_curvature_last = 0.0
+        self.post_reset_ramp_active = False
       else:
         current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-        self.apply_curvature_last = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature,
-                                                                CS.out.vEgoRaw, 0., CC.latActive, self.CP)
+        if self.reset_steering_last:
+          self.post_reset_ramp_active = True
+          self.apply_curvature_last = 0.0
+
+        if self.post_reset_ramp_active:
+          self.apply_curvature_last = apply_std_steer_angle_limits(
+            requested_curvature,
+            self.apply_curvature_last,
+            CS.out.vEgoRaw,
+            0.,
+            CC.latActive,
+            CarControllerParams.get_angle_limits(self.CP),
+          )
+
+          curvature_error = abs(requested_curvature - self.apply_curvature_last)
+          curvature_threshold = max(abs(requested_curvature) * 0.1, 0.001)
+          if curvature_error < curvature_threshold:
+            self.post_reset_ramp_active = False
+        else:
+          self.apply_curvature_last = apply_ford_curvature_limits(requested_curvature, self.apply_curvature_last, current_curvature,
+                                                                  CS.out.vEgoRaw, 0., CC.latActive, self.CP)
+
+      self.reset_steering_last = reset_steering
 
       if self.CP.flags & FordFlags.CANFD:
         # TODO: extended mode
