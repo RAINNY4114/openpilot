@@ -28,6 +28,7 @@ DEFAULT_PC_BLEND_RATIO_LOW = 0.40
 DEFAULT_PC_BLEND_RATIO_HIGH = 0.40
 DEFAULT_LC_PID_GAIN = 3.0
 DEFAULT_LANE_CHANGE_FACTOR_HIGH = 0.85
+TUNING_EPS = 1e-6
 
 
 def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
@@ -103,6 +104,9 @@ class CarController(CarControllerBase):
     self.pc_blend_ratio_high = DEFAULT_PC_BLEND_RATIO_HIGH
     self.lc_pid_gain = DEFAULT_LC_PID_GAIN
     self.lane_change_factor_high = DEFAULT_LANE_CHANGE_FACTOR_HIGH
+    self._lincoln_curvature_blend_active = False
+    self._lincoln_lane_positioning_active = False
+    self._lincoln_lane_change_smoothing_active = False
     self.lane_change_factor_low = 0.95
     self.pc_blend_ratio_bp = [0.0, 0.001]
     self.lane_change_factor_bp = [4.4, 40.23]
@@ -164,6 +168,17 @@ class CarController(CarControllerBase):
     self.lane_change_factor_high = float(np.clip(
       self._get_float_param("lane_change_factor_high", DEFAULT_LANE_CHANGE_FACTOR_HIGH), 0.5, 1.0,
     ))
+    self._lincoln_curvature_blend_active = (
+      abs(self.pc_blend_ratio_low - DEFAULT_PC_BLEND_RATIO_LOW) > TUNING_EPS or
+      abs(self.pc_blend_ratio_high - DEFAULT_PC_BLEND_RATIO_HIGH) > TUNING_EPS
+    )
+    self._lincoln_lane_positioning_active = (
+      abs(self.custom_path_offset - DEFAULT_CUSTOM_PATH_OFFSET) > TUNING_EPS or
+      abs(self.lc_pid_gain - DEFAULT_LC_PID_GAIN) > TUNING_EPS
+    )
+    self._lincoln_lane_change_smoothing_active = (
+      abs(self.lane_change_factor_high - DEFAULT_LANE_CHANGE_FACTOR_HIGH) > TUNING_EPS
+    )
 
   def _lincoln_requested_curvature(self, desired_curvature: float, v_ego_raw: float) -> tuple[float, bool]:
     if self.model is None:
@@ -179,9 +194,12 @@ class CarController(CarControllerBase):
     except Exception:
       predicted_curvature = 0.0
 
-    blend_ratio = float(np.interp(abs(desired_curvature), self.pc_blend_ratio_bp,
-                                  [self.pc_blend_ratio_low, self.pc_blend_ratio_high]))
-    requested_curvature = (predicted_curvature * blend_ratio) + (desired_curvature * (1.0 - blend_ratio))
+    if self._lincoln_curvature_blend_active:
+      blend_ratio = float(np.interp(abs(desired_curvature), self.pc_blend_ratio_bp,
+                                    [self.pc_blend_ratio_low, self.pc_blend_ratio_high]))
+      requested_curvature = (predicted_curvature * blend_ratio) + (desired_curvature * (1.0 - blend_ratio))
+    else:
+      requested_curvature = desired_curvature
 
     meta = getattr(self.model, "meta", None)
     lane_change_state = getattr(meta, "laneChangeState", log.LaneChangeState.off)
@@ -192,7 +210,7 @@ class CarController(CarControllerBase):
       log.LaneChangeState.laneChangeFinishing,
     )
 
-    if lane_change_active:
+    if lane_change_active and self._lincoln_lane_change_smoothing_active:
       lane_change_factor = float(np.interp(v_ego_raw, self.lane_change_factor_bp,
                                            [self.lane_change_factor_low, self.lane_change_factor_high]))
       if lane_change_direction == log.LaneChangeDirection.left and requested_curvature < 0.0:
@@ -204,6 +222,11 @@ class CarController(CarControllerBase):
 
   def _lincoln_path_angle_cmd(self, CS, lane_change_active: bool, reset_steering: bool) -> float:
     if self.model is None:
+      return 0.0
+    if not self._lincoln_lane_positioning_active:
+      self.lc_pid_controller.reset()
+      self.lc_path_angle_reset_counter = 0
+      self.path_angle_last = 0.0
       return 0.0
 
     try:
