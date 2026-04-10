@@ -90,7 +90,9 @@ struct ModelManagerSP @0xf35cc4560bbf6ec2 {
   }
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct AmapNavi @0xda96579883444c35 {
+        leftBlind @0 : Int32;
+        rightBlind @1 : Int32;
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {

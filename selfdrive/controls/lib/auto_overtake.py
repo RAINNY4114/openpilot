@@ -1,22 +1,15 @@
 import time
-
 from cereal import log
 from openpilot.common.constants import CV
-
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
-
-# Highway auto-overtake (experimental).
-# This only injects a lane-change desire; longitudinal control remains unchanged (ACC/openpilot).
+# ---------------- 参数 ----------------
 OVERTAKE_MIN_SPEED = 80 * CV.KPH_TO_MS
 OVERTAKE_MIN_CRUISE_SPEED = 90 * CV.KPH_TO_MS
-# Make auto-overtake less "rare" while keeping the *lane-clear* gating strict:
-# - Allow smaller speed deltas (common highway scenario: lead is ~10 km/h slower than set speed).
-# - Allow slightly larger headways (drivers often use longer ACC gaps).
 OVERTAKE_SPEED_DELTA = 10 * CV.KPH_TO_MS
-OVERTAKE_HEADWAY_MAX_S = 3.5  # only consider overtake when we're close to being speed-limited
+OVERTAKE_HEADWAY_MAX_S = 3.5
 OVERTAKE_LEAD_STABLE_SEC = 1.0
 
 PREPARE_BEFORE_LC_SEC = 0.6
@@ -29,188 +22,231 @@ LANE_PREF_AUTO = 0
 LANE_PREF_KEEP_LEFT = 1
 LANE_PREF_KEEP_RIGHT = 2
 
+REAR_DIST_TH = 30.0
+REAR_SPEED_TH = 5.0
+
 
 class AutoOvertakeHelper:
-  def __init__(self):
-    self._mode: str = "idle"  # idle|preparing|changing_out|holding|waiting_return|changing_back
-    self._out_dir = LaneChangeDirection.none
-    self._return_dir = LaneChangeDirection.none
-    self._cooldown_until = 0.0
-
-    self._need_since: float | None = None
-    self._prepare_since: float | None = None
-    self._clear_since: float | None = None
-    self._out_finished_t: float | None = None
-
-    self._last_lc_state = LaneChangeState.off
-    self._left_ok_since: float | None = None
-    self._right_ok_since: float | None = None
-
-  def reset(self) -> None:
-    self._mode = "idle"
-    self._out_dir = LaneChangeDirection.none
-    self._return_dir = LaneChangeDirection.none
-    self._need_since = None
-    self._prepare_since = None
-    self._clear_since = None
-    self._out_finished_t = None
-    self._left_ok_since = None
-    self._right_ok_since = None
-
-  @staticmethod
-  def _stable_ok(ok: bool, ok_since: float | None, now: float, stable_sec: float) -> tuple[float | None, bool]:
-    if ok:
-      if ok_since is None:
-        ok_since = now
-      stable = (now - ok_since) >= stable_sec
-      return ok_since, stable
-    return None, False
-
-  @staticmethod
-  def _opposite(direction: LaneChangeDirection) -> LaneChangeDirection:
-    if direction == LaneChangeDirection.left:
-      return LaneChangeDirection.right
-    if direction == LaneChangeDirection.right:
-      return LaneChangeDirection.left
-    return LaneChangeDirection.none
-
-  def _update_need_overtake(self, *, now: float, lead_present: bool, lead_d: float, v_lead: float,
-                            v_ego: float, v_cruise: float, min_cruise_speed: float, min_speed: float) -> bool:
-    need_raw = False
-    if lead_present and lead_d > 0.0 and v_cruise >= min_cruise_speed and v_ego >= min_speed:
-      headway = float(lead_d / max(v_ego, 0.1))
-      if (v_cruise - v_lead) >= OVERTAKE_SPEED_DELTA and headway <= OVERTAKE_HEADWAY_MAX_S:
-        need_raw = True
-
-    if need_raw:
-      if self._need_since is None:
-        self._need_since = now
-      return (now - self._need_since) >= OVERTAKE_LEAD_STABLE_SEC
-
-    self._need_since = None
-    return False
-
-  def update(self, *, enabled: bool, lc_state: LaneChangeState, v_ego: float, v_cruise: float,
-             lead_present: bool, lead_d: float, v_lead: float,
-             left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool,
-             lane_preference: int = LANE_PREF_AUTO, min_cruise_speed: float | None = None) -> LaneChangeDirection:
-    now = time.monotonic()
-    request = LaneChangeDirection.none
-
-    lane_preference = lane_preference if lane_preference in (LANE_PREF_AUTO, LANE_PREF_KEEP_LEFT, LANE_PREF_KEEP_RIGHT) else LANE_PREF_AUTO
-    min_cruise_speed = OVERTAKE_MIN_CRUISE_SPEED if min_cruise_speed is None else float(min_cruise_speed)
-    min_speed = min(OVERTAKE_MIN_SPEED, min_cruise_speed)
-
-    if (not enabled) or (not bsm_available):
-      self.reset()
-      self._last_lc_state = lc_state
-      return request
-
-    if v_ego < min_speed or v_cruise < min_cruise_speed:
-      self.reset()
-      self._last_lc_state = lc_state
-      return request
-
-    # Don't start overtake while the driver is explicitly signaling.
-    if manual_blinker and self._mode == "idle":
-      self.reset()
-      self._last_lc_state = lc_state
-      return request
-
-    self._left_ok_since, left_stable = self._stable_ok(left_ok, self._left_ok_since, now, CLEAR_LANE_STABLE_SEC)
-    self._right_ok_since, right_stable = self._stable_ok(right_ok, self._right_ok_since, now, CLEAR_LANE_STABLE_SEC)
-
-    pass_dir = LaneChangeDirection.right if is_rhd else LaneChangeDirection.left
-    pass_ok = right_stable if is_rhd else left_stable
-    return_dir = self._opposite(pass_dir)
-    return_ok = left_stable if is_rhd else right_stable
-
-    # When set, "keep left/right" means: after a pass, prefer staying on that physical side (no auto return).
-    stay_in_pass_lane = (lane_preference == LANE_PREF_KEEP_LEFT and not is_rhd) or (lane_preference == LANE_PREF_KEEP_RIGHT and is_rhd)
-
-    need_overtake = self._update_need_overtake(
-      now=now,
-      lead_present=lead_present,
-      lead_d=lead_d,
-      v_lead=v_lead,
-      v_ego=v_ego,
-      v_cruise=v_cruise,
-      min_cruise_speed=min_cruise_speed,
-      min_speed=min_speed,
-    )
-
-    # Detect lane-change completion (finishing -> off)
-    lc_finished = (self._last_lc_state == LaneChangeState.laneChangeFinishing and lc_state == LaneChangeState.off)
-
-    if self._mode == "idle":
-      self._out_dir = LaneChangeDirection.none
-      self._return_dir = LaneChangeDirection.none
-      self._prepare_since = None
-      self._clear_since = None
-      self._out_finished_t = None
-
-      if need_overtake and pass_ok and now >= self._cooldown_until:
-        self._mode = "preparing"
-        self._prepare_since = now
-        self._out_dir = pass_dir
-
-    elif self._mode == "preparing":
-      if not need_overtake:
-        self.reset()
-      else:
-        # wait a short delay to avoid flicker-based triggers
-        if self._prepare_since is not None and (now - self._prepare_since) >= PREPARE_BEFORE_LC_SEC:
-          if pass_ok:
-            self._mode = "changing_out"
-            request = self._out_dir
-
-    elif self._mode == "changing_out":
-      if lc_state in (LaneChangeState.off, LaneChangeState.preLaneChange) and pass_ok:
-        request = self._out_dir
-      # If the request is canceled before starting (preLaneChange -> off), retry after a short prepare delay.
-      if self._last_lc_state == LaneChangeState.preLaneChange and lc_state == LaneChangeState.off and not lc_finished:
-        if need_overtake:
-          self._mode = "preparing"
-          self._prepare_since = now
-        else:
-          self.reset()
-      if lc_finished:
-        self._mode = "holding" if stay_in_pass_lane else "waiting_return"
-        self._out_finished_t = now
-        self._clear_since = None
-
-    elif self._mode == "holding":
-      # Stay in the passing lane until user preference changes away from the passing side.
-      if not stay_in_pass_lane:
-        self._mode = "waiting_return"
-        self._clear_since = None
-
-    elif self._mode == "waiting_return":
-      # Wait until not "need_overtake" for a while, then return to original lane.
-      if need_overtake:
-        self._clear_since = None
-      else:
-        if self._clear_since is None:
-          self._clear_since = now
-        out_ok = self._out_finished_t is None or (now - self._out_finished_t) >= RETURN_MIN_TIME_AFTER_OUT_SEC
-        if out_ok and (now - self._clear_since) >= RETURN_CLEAR_DELAY_SEC and return_ok:
-          self._mode = "changing_back"
-          self._return_dir = return_dir
-          request = self._return_dir
-
-    elif self._mode == "changing_back":
-      if lc_state in (LaneChangeState.off, LaneChangeState.preLaneChange) and return_ok:
-        request = self._return_dir
-      # If return is canceled (preLaneChange -> off), go back to waiting_return and retry when stable again.
-      if self._last_lc_state == LaneChangeState.preLaneChange and lc_state == LaneChangeState.off and not lc_finished:
-        self._mode = "waiting_return"
-        self._clear_since = None
-      if lc_finished:
+    def __init__(self):
         self._mode = "idle"
-        self._cooldown_until = now + OVERTAKE_COOLDOWN_SEC
+        self._out_dir = LaneChangeDirection.none
+        self._return_dir = LaneChangeDirection.none
+        self._cooldown_until = 0.0
 
-    else:
-      self.reset()
+        self._need_since = None
+        self._prepare_since = None
+        self._clear_since = None
+        self._out_finished_t = None
 
-    self._last_lc_state = lc_state
-    return request
+        self._last_lc_state = LaneChangeState.off
+        self._left_ok_since = None
+        self._right_ok_since = None
+
+    def reset(self):
+        self.__init__()
+
+    @staticmethod
+    def _stable_ok(ok, ok_since, now, stable_sec):
+        if ok:
+            if ok_since is None:
+                ok_since = now
+            return ok_since, (now - ok_since) >= stable_sec
+        return None, False
+
+    @staticmethod
+    def _opposite(direction):
+        if direction == LaneChangeDirection.left:
+            return LaneChangeDirection.right
+        if direction == LaneChangeDirection.right:
+            return LaneChangeDirection.left
+        return LaneChangeDirection.none
+
+    # ---------------- 评分 ----------------
+    def _lane_score(self, *, side, v_ego, v_lead, lead_d,
+                    rear_dist, rear_speed, lane_free, bsm, is_highway):
+
+        if not lane_free or bsm:
+            return -100.0
+
+        score = 0.0
+
+        if v_lead is not None:
+            dv = v_ego - v_lead
+            if dv > 0:
+                score += min(dv * 2.0, 20.0)
+
+        if rear_dist is not None and rear_speed is not None:
+            if rear_dist < 20:
+                score -= 30
+            if rear_speed > 8:
+                score -= 20
+
+        if is_highway:
+            score += 5 if side == "left" else -2
+        else:
+            if side == "right":
+                score += 3
+
+        return score
+
+    def _choose_best_lane(self, left_data, right_data):
+        left_score = self._lane_score(**left_data)
+        right_score = self._lane_score(**right_data)
+
+        if abs(left_score - right_score) < 3:
+            return LaneChangeDirection.none
+
+        return LaneChangeDirection.left if left_score > right_score else LaneChangeDirection.right
+
+    # ---------------- 超车需求 ----------------
+    def _update_need_overtake(self, now, lead_present, lead_d, v_lead, v_ego, v_cruise):
+        if not (lead_present and lead_d > 0):
+            self._need_since = None
+            return False
+
+        headway = lead_d / max(v_ego, 0.1)
+        need_raw = (v_cruise - v_lead) >= OVERTAKE_SPEED_DELTA and headway <= OVERTAKE_HEADWAY_MAX_S
+
+        if need_raw:
+            if self._need_since is None:
+                self._need_since = now
+            return (now - self._need_since) >= OVERTAKE_LEAD_STABLE_SEC
+
+        self._need_since = None
+        return False
+
+    # ================= 主逻辑 =================
+    def update(self, *, enabled, lc_state, v_ego, v_cruise,
+               lead_present, lead_d, v_lead,
+               left_ok, right_ok, is_rhd, manual_blinker, bsm_available,
+               rear_left_dist=None, rear_left_speed=None,
+               rear_right_dist=None, rear_right_speed=None,
+               left_lidar_free=None, right_lidar_free=None,
+               left_bsm=False, right_bsm=False,
+               lane_preference=LANE_PREF_AUTO,
+               min_cruise_speed=None):
+
+        now = time.monotonic()
+        request = LaneChangeDirection.none
+
+        # 手动优先
+        if manual_blinker:
+            self.reset()
+            return request
+
+        if not enabled or not bsm_available:
+            self.reset()
+            self._last_lc_state = lc_state
+            return request
+
+        min_cruise_speed = OVERTAKE_MIN_CRUISE_SPEED if min_cruise_speed is None else min_cruise_speed
+
+        if v_ego < OVERTAKE_MIN_SPEED or v_cruise < min_cruise_speed:
+            self.reset()
+            self._last_lc_state = lc_state
+            return request
+
+        # 后车阻断
+        if rear_left_dist and rear_left_speed:
+            if rear_left_dist < REAR_DIST_TH and rear_left_speed > REAR_SPEED_TH:
+                left_ok = False
+
+        if rear_right_dist and rear_right_speed:
+            if rear_right_dist < REAR_DIST_TH and rear_right_speed > REAR_SPEED_TH:
+                right_ok = False
+
+        # 雷达优先
+        if left_lidar_free is not None:
+            left_ok = left_lidar_free
+        if right_lidar_free is not None:
+            right_ok = right_lidar_free
+
+        # BSM
+        if left_bsm:
+            left_ok = False
+        if right_bsm:
+            right_ok = False
+
+        # 稳定性
+        self._left_ok_since, left_stable = self._stable_ok(left_ok, self._left_ok_since, now, CLEAR_LANE_STABLE_SEC)
+        self._right_ok_since, right_stable = self._stable_ok(right_ok, self._right_ok_since, now, CLEAR_LANE_STABLE_SEC)
+
+        is_highway = v_ego > 22.0
+
+        best_dir = self._choose_best_lane(
+            left_data=dict(side="left", v_ego=v_ego, v_lead=v_lead, lead_d=lead_d,
+                           rear_dist=rear_left_dist, rear_speed=rear_left_speed,
+                           lane_free=left_ok, bsm=left_bsm, is_highway=is_highway),
+            right_data=dict(side="right", v_ego=v_ego, v_lead=v_lead, lead_d=lead_d,
+                            rear_dist=rear_right_dist, rear_speed=rear_right_speed,
+                            lane_free=right_ok, bsm=right_bsm, is_highway=is_highway)
+        )
+
+        pass_ok = (
+            (best_dir == LaneChangeDirection.left and left_stable) or
+            (best_dir == LaneChangeDirection.right and right_stable)
+        )
+
+        need_overtake = self._update_need_overtake(now, lead_present, lead_d, v_lead, v_ego, v_cruise)
+
+        lc_finished = (self._last_lc_state == LaneChangeState.laneChangeFinishing and lc_state == LaneChangeState.off)
+
+        # ================= 状态机 =================
+        if self._mode == "idle":
+            if need_overtake and pass_ok and now >= self._cooldown_until:
+                self._mode = "preparing"
+                self._prepare_since = now
+                self._out_dir = best_dir  # 锁方向
+
+        elif self._mode == "preparing":
+            if not need_overtake:
+                self.reset()
+            elif now - self._prepare_since >= PREPARE_BEFORE_LC_SEC:
+                if pass_ok:
+                    self._mode = "changing_out"
+                    request = self._out_dir
+
+        elif self._mode == "changing_out":
+            if lc_state in (LaneChangeState.off, LaneChangeState.preLaneChange) and pass_ok:
+                request = self._out_dir
+            if lc_finished:
+                self._mode = "waiting_return"
+                self._out_finished_t = now
+                self._clear_since = None
+
+        elif self._mode == "waiting_return":
+            # ✅ 是否已完成超车
+            passed_lead = (lead_d is None) or (lead_d > 40) or (v_ego > (v_lead or 0) + 5)
+
+            return_dir = self._opposite(self._out_dir)
+
+            return_lane_safe = (
+                (return_dir == LaneChangeDirection.left and left_stable) or
+                (return_dir == LaneChangeDirection.right and right_stable)
+            )
+
+            if not (passed_lead and return_lane_safe):
+                self._clear_since = None
+            else:
+                if self._clear_since is None:
+                    self._clear_since = now
+
+                if self._out_finished_t and now - self._out_finished_t < RETURN_MIN_TIME_AFTER_OUT_SEC:
+                    pass
+                elif (now - self._clear_since) >= RETURN_CLEAR_DELAY_SEC:
+                    self._mode = "changing_back"
+                    self._return_dir = return_dir
+                    request = self._return_dir
+
+        elif self._mode == "changing_back":
+            if lc_state in (LaneChangeState.off, LaneChangeState.preLaneChange):
+                request = self._return_dir
+            if lc_finished:
+                self._mode = "idle"
+                self._cooldown_until = now + OVERTAKE_COOLDOWN_SEC
+
+        else:
+            self.reset()
+
+        self._last_lc_state = lc_state
+        return request

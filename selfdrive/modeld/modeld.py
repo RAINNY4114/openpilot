@@ -65,7 +65,7 @@ def _resolve_tinygrad_paths(params: Params) -> tuple[Path, Path, Path, Path, boo
       )
   return (VISION_METADATA_PATH, POLICY_METADATA_PATH, VISION_PKL_PATH, POLICY_PKL_PATH, False)
 
-LAT_SMOOTH_SECONDS = 0.1
+LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
 
@@ -367,7 +367,7 @@ def main(demo=False):
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelExt"])
   sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay",
-                  "carParams", "customReservedRawData0", "radarState"])
+                  "carParams", "customReservedRawData0", "radarState", "amapNavi"])
 
   publish_state = PublishState()
   params = Params()
@@ -685,6 +685,7 @@ def main(demo=False):
         pass
 
       cs = sm["carState"]
+      navi = sm["amapNavi"]
       lat_active = bool(sm["carControl"].latActive)
       one_blinker = cs.leftBlinker != cs.rightBlinker
       bsm_available = bool(sm.valid.get("carParams", False) and sm["carParams"].enableBsm)
@@ -860,7 +861,7 @@ def main(demo=False):
 
       auto_dir = avoid_dir if avoid_dir != log.LaneChangeDirection.none else overtake_dir
       lc_state_before_update = DH.lane_change_state
-      DH.update(cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,
+      DH.update(navi, cs, lat_active, lane_change_prob, RED.left_edge_detected, RED.right_edge_detected,
                 auto_lane_change_direction=auto_dir, auto_confirm_delay_sec=auto_lc_confirm_delay_sec)
       if AUTO_LC_POST_FINISH_COOLDOWN_SEC > 0.0:
         if lc_state_before_update == log.LaneChangeState.laneChangeFinishing and DH.lane_change_state == log.LaneChangeState.off:

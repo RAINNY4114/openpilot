@@ -28,8 +28,8 @@ A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 # Slightly higher in 0-30 km/h for better launch, while keeping mid/high speed conservative.
 # "Comfort but still punchy": soften 25-40 m/s a bit while keeping low-speed response.
 # Slightly quicker launch: raise 0-10 m/s caps.
-A_CRUISE_MAX_VALS_FORD = [1.1, 0.9, 0.60, 0.50]
-A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
+A_CRUISE_MAX_VALS_FORD = [2.2, 1.7, 1.25, 0.95, 0.70, 0.48, 0.32, 0.25, 0.22, 0.018]
+A_CRUISE_MAX_BP = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5

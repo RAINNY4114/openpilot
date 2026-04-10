@@ -213,7 +213,7 @@ def main(demo: bool = False) -> None:
     cloudlog.warning(f"connected extra cam with buffer size: {vipc_client_extra.buffer_len} ({vipc_client_extra.width} x {vipc_client_extra.height})")
 
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelExt"])
-  sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"])
+  sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay", "amapNavi" ])
 
   publish_state = PublishState()
   params = Params()
@@ -274,6 +274,7 @@ def main(demo: bool = False) -> None:
       meta_extra = meta_main
 
     sm.update(0)
+    navi = sm["amapNavi"]
     desire = DH.desire
     v_ego = sm["carState"].vEgo
     is_rhd = sm["driverMonitoringState"].isRHD
@@ -344,7 +345,7 @@ def main(demo: bool = False) -> None:
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
+      DH.update(navi, sm['carState'], sm['carControl'].latActive, lane_change_prob)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
