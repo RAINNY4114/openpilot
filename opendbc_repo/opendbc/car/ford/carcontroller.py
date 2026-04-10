@@ -1,8 +1,4 @@
 import math
-from collections import deque
-
-from cereal import log
-import cereal.messaging as messaging
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, apply_hysteresis, structs
@@ -11,8 +7,6 @@ from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 from openpilot.common.params import Params
-from openpilot.common.pid import PIDController
-from openpilot.selfdrive.modeld.constants import ModelConstants
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
@@ -22,13 +16,6 @@ VisualAlert = structs.CarControl.HUDControl.VisualAlert
 AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation. higher actual roll raises lateral acceleration
 MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL - (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~2.4 m/s^2
 HUMAN_TURN_STEERING_ANGLE_DEG = 45.0
-
-DEFAULT_CUSTOM_PATH_OFFSET = 0.0
-DEFAULT_PC_BLEND_RATIO_LOW = 0.40
-DEFAULT_PC_BLEND_RATIO_HIGH = 0.40
-DEFAULT_LC_PID_GAIN = 3.0
-DEFAULT_LANE_CHANGE_FACTOR_HIGH = 0.85
-TUNING_EPS = 1e-6
 
 
 def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
@@ -80,8 +67,6 @@ class CarController(CarControllerBase):
     self.params = Params()
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.CAN = fordcan.CanBus(CP)
-    self.sm = messaging.SubMaster(["modelV2"])
-    self.model = None
 
     self.apply_curvature_last = 0
     self.anti_overshoot_curvature_last = 0
@@ -97,31 +82,6 @@ class CarController(CarControllerBase):
     self.human_turn = False
     self.post_reset_ramp_active = False
     self.reset_steering_last = False
-
-    # BP-derived Ford/Lincoln lateral tuning exposed in the Lincoln panel.
-    self.custom_path_offset = DEFAULT_CUSTOM_PATH_OFFSET
-    self.pc_blend_ratio_low = DEFAULT_PC_BLEND_RATIO_LOW
-    self.pc_blend_ratio_high = DEFAULT_PC_BLEND_RATIO_HIGH
-    self.lc_pid_gain = DEFAULT_LC_PID_GAIN
-    self.lane_change_factor_high = DEFAULT_LANE_CHANGE_FACTOR_HIGH
-    self._lincoln_curvature_blend_active = False
-    self._lincoln_lane_positioning_active = False
-    self._lincoln_lane_change_smoothing_active = False
-    self.lane_change_factor_low = 0.95
-    self.pc_blend_ratio_bp = [0.0, 0.001]
-    self.lane_change_factor_bp = [4.4, 40.23]
-    self.curvature_lookup_time = 0.2
-    self.path_offset_lookup_time = 0.2
-    self.min_laneline_confidence_bp = [0.6, 0.8]
-    self.lc_pid_speed_bp = [0.0, 9.0, 15.0]
-    self.lc_pid_speed_v = [0.0, 0.0, 1.0]
-    self.lc_path_angle_roc_bp = [5, 15, 25]
-    self.lc_path_angle_roc_v = [0.003, 0.0015, 0.002]
-    self.lc_pid_controller = PIDController(k_p=0.25, k_i=0.05, rate=20)
-    self.lc_path_angle_reset_counter = 0
-    self.lc_path_angle_reset_duration = 1.5
-    self.path_angle_last = 0.0
-    self.path_angle_max = 0.5
 
     # Auto-turn-signal latch (for auto-requested lane changes)
     self._auto_blinker_dir = 0  # 0=off, 1=left, 2=right
@@ -141,148 +101,9 @@ class CarController(CarControllerBase):
 
     self.enable_human_turn_detection = True
 
-  def _get_float_param(self, key: str, default: float) -> float:
-    raw = self.params.get(key)
-    if not raw:
-      return default
-    try:
-      if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="ignore")
-      return float(raw)
-    except (TypeError, ValueError):
-      return default
-
-  def _update_lincoln_lateral_tuning(self) -> None:
-    self.custom_path_offset = float(np.clip(
-      self._get_float_param("custom_path_offset", DEFAULT_CUSTOM_PATH_OFFSET), -0.5, 0.5,
-    ))
-    self.pc_blend_ratio_low = float(np.clip(
-      self._get_float_param("pc_blend_ratio_low_C_UI", DEFAULT_PC_BLEND_RATIO_LOW), 0.0, 1.0,
-    ))
-    self.pc_blend_ratio_high = float(np.clip(
-      self._get_float_param("pc_blend_ratio_high_C_UI", DEFAULT_PC_BLEND_RATIO_HIGH), 0.0, 1.0,
-    ))
-    self.lc_pid_gain = float(np.clip(
-      self._get_float_param("LC_PID_gain_UI", DEFAULT_LC_PID_GAIN), 0.0, 5.0,
-    ))
-    self.lane_change_factor_high = float(np.clip(
-      self._get_float_param("lane_change_factor_high", DEFAULT_LANE_CHANGE_FACTOR_HIGH), 0.5, 1.0,
-    ))
-    self._lincoln_curvature_blend_active = (
-      abs(self.pc_blend_ratio_low - DEFAULT_PC_BLEND_RATIO_LOW) > TUNING_EPS or
-      abs(self.pc_blend_ratio_high - DEFAULT_PC_BLEND_RATIO_HIGH) > TUNING_EPS
-    )
-    self._lincoln_lane_positioning_active = (
-      abs(self.custom_path_offset - DEFAULT_CUSTOM_PATH_OFFSET) > TUNING_EPS or
-      abs(self.lc_pid_gain - DEFAULT_LC_PID_GAIN) > TUNING_EPS
-    )
-    self._lincoln_lane_change_smoothing_active = (
-      abs(self.lane_change_factor_high - DEFAULT_LANE_CHANGE_FACTOR_HIGH) > TUNING_EPS
-    )
-
-  def _lincoln_requested_curvature(self, desired_curvature: float, v_ego_raw: float) -> tuple[float, bool]:
-    if self.model is None:
-      return desired_curvature, False
-
-    try:
-      orientation_rate = list(getattr(self.model.orientationRate, "z", []))
-      if len(orientation_rate) >= len(ModelConstants.T_IDXS):
-        curvatures = np.array(orientation_rate) / max(0.01, v_ego_raw)
-        predicted_curvature = float(np.interp(self.curvature_lookup_time, ModelConstants.T_IDXS, curvatures))
-      else:
-        predicted_curvature = 0.0
-    except Exception:
-      predicted_curvature = 0.0
-
-    if self._lincoln_curvature_blend_active:
-      blend_ratio = float(np.interp(abs(desired_curvature), self.pc_blend_ratio_bp,
-                                    [self.pc_blend_ratio_low, self.pc_blend_ratio_high]))
-      requested_curvature = (predicted_curvature * blend_ratio) + (desired_curvature * (1.0 - blend_ratio))
-    else:
-      requested_curvature = desired_curvature
-
-    meta = getattr(self.model, "meta", None)
-    lane_change_state = getattr(meta, "laneChangeState", log.LaneChangeState.off)
-    lane_change_direction = getattr(meta, "laneChangeDirection", log.LaneChangeDirection.none)
-    lane_change_active = lane_change_state in (
-      log.LaneChangeState.preLaneChange,
-      log.LaneChangeState.laneChangeStarting,
-      log.LaneChangeState.laneChangeFinishing,
-    )
-
-    if lane_change_active and self._lincoln_lane_change_smoothing_active:
-      lane_change_factor = float(np.interp(v_ego_raw, self.lane_change_factor_bp,
-                                           [self.lane_change_factor_low, self.lane_change_factor_high]))
-      if lane_change_direction == log.LaneChangeDirection.left and requested_curvature < 0.0:
-        requested_curvature *= lane_change_factor
-      elif lane_change_direction == log.LaneChangeDirection.right and requested_curvature > 0.0:
-        requested_curvature *= lane_change_factor
-
-    return requested_curvature, lane_change_active
-
-  def _lincoln_path_angle_cmd(self, CS, lane_change_active: bool, reset_steering: bool) -> float:
-    if self.model is None:
-      return 0.0
-    if not self._lincoln_lane_positioning_active:
-      self.lc_pid_controller.reset()
-      self.lc_path_angle_reset_counter = 0
-      self.path_angle_last = 0.0
-      return 0.0
-
-    try:
-      lane_lines = list(getattr(self.model, "laneLines", []))
-      lane_line_probs = list(getattr(self.model, "laneLineProbs", []))
-      position_y = list(getattr(getattr(self.model, "position", None), "y", []))
-      if len(lane_lines) < 3 or len(lane_line_probs) < 3 or len(position_y) < len(ModelConstants.T_IDXS):
-        return 0.0
-
-      left_y = list(getattr(lane_lines[1], "y", []))
-      right_y = list(getattr(lane_lines[2], "y", []))
-      if len(left_y) == 0 or len(right_y) == 0:
-        return 0.0
-
-      path_offset_position = float(np.interp(self.path_offset_lookup_time, ModelConstants.T_IDXS, position_y))
-      path_offset_lanelines = (left_y[0] + right_y[0]) / 2.0
-      laneline_width = right_y[0] + (-left_y[0])
-      laneline_width_tolerance = float(np.interp(laneline_width, [3.75, 4.25], [0.81, 0.59]))
-      laneline_confidence = min(lane_line_probs[1], lane_line_probs[2], laneline_width_tolerance)
-      laneline_path_offset_scale = float(np.interp(laneline_confidence, self.min_laneline_confidence_bp, [0.0, 1.0]))
-
-      path_offset = (path_offset_position * (1.0 - laneline_path_offset_scale) +
-                     (path_offset_lanelines * laneline_path_offset_scale)) + self.custom_path_offset
-      if lane_change_active:
-        path_offset = 0.0
-
-      path_offset_error = path_offset * (self.lc_pid_gain / 100.0)
-      lc_pid_speed_factor = float(np.interp(CS.out.vEgoRaw, self.lc_pid_speed_bp, self.lc_pid_speed_v))
-      path_angle = float(self.lc_pid_controller.update(path_offset_error * lc_pid_speed_factor))
-
-      if reset_steering:
-        path_angle = 0.0
-
-      path_angle_roc = float(np.interp(abs(CS.out.vEgoRaw), self.lc_path_angle_roc_bp, self.lc_path_angle_roc_v))
-      path_angle = float(np.clip(path_angle, self.path_angle_last - path_angle_roc, self.path_angle_last + path_angle_roc))
-
-      if CS.out.steeringPressed:
-        self.lc_path_angle_reset_counter += 1
-      else:
-        self.lc_path_angle_reset_counter = 0
-      if self.lc_path_angle_reset_counter > self.lc_path_angle_reset_duration * 20:
-        self.lc_pid_controller.reset()
-
-      path_angle = float(np.clip(path_angle, -self.path_angle_max, self.path_angle_max))
-      self.path_angle_last = path_angle
-      return path_angle
-    except Exception:
-      return 0.0
-
   def update(self, CC, CS, now_nanos):
     can_sends = []
-    self.sm.update(0)
-    if self.sm.updated["modelV2"]:
-      self.model = self.sm["modelV2"]
     self._update_human_turn_detection_enabled()
-    self._update_lincoln_lateral_tuning()
 
     actuators = CC.actuators
     hud_control = CC.hudControl
@@ -325,36 +146,26 @@ class CarController(CarControllerBase):
     ### lateral control ###
     # send steer msg at 20Hz
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
-      path_angle = 0.0
       self.human_turn = self.enable_human_turn_detection and CS.out.steeringPressed and \
                         abs(CS.out.steeringAngleDeg) > HUMAN_TURN_STEERING_ANGLE_DEG
       reset_steering = self.human_turn or CS.out.vEgoRaw < 0.1
-      lane_change_active = False
 
       # Bronco and some other cars consistently overshoot curv requests
       # Apply some deadzone + smoothing convergence to avoid oscillations
       if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14) and not reset_steering:
-        desired_curvature = float(actuators.curvature)
-        requested_curvature, lane_change_active = self._lincoln_requested_curvature(desired_curvature, CS.out.vEgoRaw)
-        self.anti_overshoot_curvature_last = anti_overshoot(requested_curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
+        self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
         requested_curvature = self.anti_overshoot_curvature_last
       else:
         if reset_steering:
           self.anti_overshoot_curvature_last = 0.0
-        desired_curvature = float(actuators.curvature)
-        requested_curvature, lane_change_active = self._lincoln_requested_curvature(desired_curvature, CS.out.vEgoRaw)
+        requested_curvature = actuators.curvature
 
       # apply rate limits, curvature error limit, and clip to signal range
       if reset_steering:
         requested_curvature = 0.0
         self.apply_curvature_last = 0.0
         self.post_reset_ramp_active = False
-        self.lc_pid_controller.reset()
-        self.lc_path_angle_reset_counter = 0
-        self.path_angle_last = 0.0
-        path_angle = 0.0
       else:
-        path_angle = self._lincoln_path_angle_cmd(CS, lane_change_active, reset_steering)
         current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
         if self.reset_steering_last:
           self.post_reset_ramp_active = True
@@ -374,7 +185,6 @@ class CarController(CarControllerBase):
           curvature_threshold = max(abs(requested_curvature) * 0.1, 0.001)
           if curvature_error < curvature_threshold:
             self.post_reset_ramp_active = False
-          path_angle = 0.0
         else:
           self.apply_curvature_last = apply_ford_curvature_limits(requested_curvature, self.apply_curvature_last, current_curvature,
                                                                   CS.out.vEgoRaw, 0., CC.latActive, self.CP)
@@ -390,14 +200,9 @@ class CarController(CarControllerBase):
         # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
         mode = 1 if CC.latActive else 0
         counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
-        can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., -path_angle, -self.apply_curvature_last, 0., counter))
+        can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter))
       else:
-        can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., -path_angle, -self.apply_curvature_last, 0.))
-
-      if not CC.latActive:
-        self.lc_pid_controller.reset()
-        self.lc_path_angle_reset_counter = 0
-        self.path_angle_last = 0.0
+        can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
 
     # send lka msg at 33Hz
     if (self.frame % CarControllerParams.LKA_STEP) == 0:
