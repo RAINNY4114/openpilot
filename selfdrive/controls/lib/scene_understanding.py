@@ -785,7 +785,10 @@ class SceneUnderstanding:
             danger_score += 1.0
         
         # 基于行人密度
-        danger_score += self.pedestrian_density * 2.0
+        for obj in self.objects:
+            if obj['type'] == self.OBJECT_TYPE_PEDESTRIAN:
+                if obj['behavior'].get('crossing_probability', 0) > 0.5:
+                    danger_score += 2.0
         
         # 基于两轮车密度
         danger_score += self.two_wheeler_density * 1.5
