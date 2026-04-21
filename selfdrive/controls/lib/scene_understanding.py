@@ -877,8 +877,9 @@ class SceneUnderstanding:
             # 停车场通常有3个以上的近距离车辆
             return ( 
                     stationary_cars >= 3 and
-                    self.traffic_density < 0.4 and
-                    self.obstacle_distance < 30
+                    self.traffic_density < 0.3 and
+                    self.obstacle_distance < 25 and
+                    self.curve_severity < 0.001
             )
         except:
             return False
