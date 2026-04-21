@@ -418,9 +418,11 @@ class SceneUnderstanding:
         return 0.0005 < self.curve_severity <= 0.0015
     
     def _is_obstacle(self):
-        """判断是否为障碍物场景"""
-        # 基于障碍物距离判断
-        return self.obstacle_distance < 20.0
+        """仅当真正阻挡车道才算障碍"""
+        for obj in self.objects:
+            if obj['x'] < 20 and abs(obj['y']) < 1.5:
+                return True
+        return False
     
     def _is_traffic_jam(self):
         """判断是否为交通拥堵场景"""
