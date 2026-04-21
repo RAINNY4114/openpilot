@@ -13,7 +13,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
 
 # ✅ 引入场景模块
-from openpilot.selfdrive.controls.lib.scene_understanding import SceneUnderstanding
+#from openpilot.selfdrive.controls.lib.scene_understanding import SceneUnderstanding
 
 _LEAD_ACCEL_TAU = 1.5
 SPEED, ACCEL = 0, 1
