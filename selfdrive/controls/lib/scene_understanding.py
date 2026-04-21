@@ -912,10 +912,28 @@ class SceneUnderstanding:
         # residential 区域通常速度较低，有一定数量的物体
         if not has_carstate:
             return False
-        
-        try:
-            v_ego = sm['carState'].vEgo
-            # residential 区域通常速度在10-20 m/s之间，有一定数量的物体
-            return 10 <= v_ego <= 20 and 1 <= len(self.objects) <= 5
-        except (KeyError, AttributeError):
+   
+    def should_brake(self):
+        """是否需要刹车（核心逻辑）"""
+
+        # 1️⃣ 最近目标
+        close_objs = [o for o in self.objects if 0 < o['x'] < 30]
+
+        if not close_objs:
             return False
+
+        # 2️⃣ 最危险目标（前方最近）
+        most_dangerous = min(close_objs, key=lambda o: o['x'])
+
+        behavior = most_dangerous.get("behavior", {})
+        ttc = behavior.get("time_to_collision", float('inf'))
+        risk = behavior.get("risk_level", "low")
+
+        # 3️⃣ 核心刹车逻辑
+        if ttc < 3:
+            return True
+
+        if risk in ["high", "critical"] and most_dangerous['x'] < 20:
+            return True
+
+        return False
