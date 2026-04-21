@@ -275,6 +275,28 @@ class Controls:
       alpha = 0.02  # ~0.5s time constant @100Hz
       self._road_edge_curv_correction = (1.0 - alpha) * float(self._road_edge_curv_correction) + alpha * float(raw_corr)
       new_desired_curvature = float(new_desired_curvature) + float(self._road_edge_curv_correction)
+      # ===== Sensor fusion layer (radar + lidar + BSM)=====
+      try:
+        radar_d = getattr(CS, "radar_dRel", None)
+        radar_v = getattr(CS, "radar_vRel", None)
+        lidar_left = getattr(CS, "lidar_left_dist", None)
+        lidar_right = getattr(CS, "lidar_right_dist", None)
+
+        if radar_d or lidar_left or lidar_right:
+          fusion = 0.0
+
+          if lidar_left and 0.1 < lidar_left < 2.0:
+            fusion += 0.0006
+          if lidar_right and 0.1 < lidar_right < 2.0:
+            fusion -= 0.0006
+
+          alpha = 0.05
+          self._fusion_curv = (1 - alpha) * self._fusion_curv + alpha * fusion
+
+          new_desired_curvature += self._fusion_curv
+
+      except:
+        pass
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = get_lat_delay(self.params, self.sm["liveDelay"].lateralDelay, self.CP.steerActuatorDelay) + LAT_SMOOTH_SECONDS

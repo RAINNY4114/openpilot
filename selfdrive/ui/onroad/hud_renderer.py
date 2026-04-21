@@ -28,7 +28,7 @@ class UIConfig:
   set_speed_width_metric: int = 200
   set_speed_width_imperial: int = 172
   set_speed_height: int = 204
-  wheel_icon_size: int = 320
+  wheel_icon_size: int = 144
 
 
 @dataclass(frozen=True)
@@ -171,25 +171,16 @@ class HudRenderer(Widget):
       COLORS.header_gradient_end,
     )
 
-    set_speed_width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
-    set_speed_left_x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - set_speed_width) // 2
-    set_speed_y = rect.y + 45
-
-    exp_button_rect_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
-    exp_button_y = rect.y + UI_CONFIG.border_size - 14
-    exp_display_size = float(self._exp_button.rect.width if self._exp_button.rect.width > 0 else UI_CONFIG.button_size)
-
     if self.is_cruise_available:
-      right_set_speed_x = rect.x + rect.width - UI_CONFIG.border_size - set_speed_width
-      self._draw_set_speed(rect, x_override=right_set_speed_x, anchor_x=set_speed_left_x, anchor_y=set_speed_y)
+      self._draw_set_speed(rect)
       self._draw_curve_speed_control()
 
     self._draw_current_speed(rect)
 
-    left_exp_display_x = rect.x + UI_CONFIG.border_size
-    left_button_x = left_exp_display_x + exp_display_size - UI_CONFIG.button_size
-    self._exp_button.render(rl.Rectangle(left_button_x, exp_button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
-    self._draw_pedal_icons(rect, exp_button_rect_x, exp_button_y)
+    button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
+    button_y = rect.y + UI_CONFIG.border_size
+    self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+    self._draw_pedal_icons(rect, button_x, button_y)
 
     # Lane preference button: left side, between MAX set-speed box (top-left)
     # and the driver monitoring icon (bottom-left).
@@ -290,17 +281,14 @@ class HudRenderer(Widget):
     tint_gas = rl.Color(255, 255, 255, int(round(255 * gas_opacity)))
     rl.draw_texture_pro(self._gas_pedal_icon, src_gas, dst_gas, rl.Vector2(0, 0), 0.0, tint_gas)
 
-  def _draw_set_speed(self, rect: rl.Rectangle, *, x_override: float | None = None,
-                      anchor_x: float | None = None, anchor_y: float | None = None) -> None:
+  def _draw_set_speed(self, rect: rl.Rectangle) -> None:
     """Draw the MAX speed indicator box."""
     set_speed_width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
-    anchor_x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - set_speed_width) // 2 if anchor_x is None else anchor_x
-    anchor_y = rect.y + 45 if anchor_y is None else anchor_y
-    x = anchor_x if x_override is None else x_override
-    y = anchor_y
+    x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - set_speed_width) // 2
+    y = rect.y + 45
 
     set_speed_rect = rl.Rectangle(x, y, set_speed_width, UI_CONFIG.set_speed_height)
-    self._set_speed_rect = rl.Rectangle(anchor_x, anchor_y, set_speed_width, UI_CONFIG.set_speed_height)
+    self._set_speed_rect = set_speed_rect
     rl.draw_rectangle_rounded(set_speed_rect, 0.35, 10, COLORS.black_translucent)
     rl.draw_rectangle_rounded_lines_ex(set_speed_rect, 0.35, 10, 6, COLORS.border_translucent)
 
