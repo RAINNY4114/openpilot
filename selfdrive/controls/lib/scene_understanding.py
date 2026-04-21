@@ -801,7 +801,12 @@ class SceneUnderstanding:
         elif self.scene_type == self.SCENE_TWO_WHEELER:
             danger_score += 2.0
         elif self.scene_type == self.SCENE_INTERSECTION:
-            danger_score += 2.0
+            # ❗只在有真实冲突时才加分
+            if any(
+                obj['behavior'].get('crossing_probability', 0) > 0.5 and obj['x'] < 30
+                for obj in self.objects
+            ):
+                danger_score += 2.0
         
         # 基于物体行为预测（简化版）
         for obj in self.objects[:5]:  # 只处理前5个物体
