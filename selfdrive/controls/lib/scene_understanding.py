@@ -879,6 +879,7 @@ class SceneUnderstanding:
                     stationary_cars >= 3
                     self.traffic_density < 0.4 and
                     self.obstacle_distance < 30
+            )
         except:
             return False
     
