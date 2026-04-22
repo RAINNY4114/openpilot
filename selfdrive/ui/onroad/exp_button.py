@@ -7,8 +7,6 @@ from openpilot.system.ui.widgets import Widget
 
 
 class ExpButton(Widget):
-  _WHEEL_CROP_INSET_RATIO = 32.0 / 256.0
-
   def __init__(self, button_size: int, icon_size: int):
     super().__init__()
     self._params = Params()
@@ -21,20 +19,13 @@ class ExpButton(Widget):
     self._hold_end_time: float | None = None
 
     self._white_color: rl.Color = rl.Color(255, 255, 255, 255)
-    self._black_bg: rl.Color = rl.Color(0, 0, 0, 0)
-    self._button_size: int = button_size
+    self._black_bg: rl.Color = rl.Color(0, 0, 0, 166)
     self._txt_wheel: rl.Texture = gui_app.texture('../../dragonpilot/selfdrive/assets/icons/chffr_wheel.png', icon_size, icon_size)
     self._txt_exp: rl.Texture = gui_app.texture('icons/experimental.png', icon_size, icon_size)
-    self._display_size: int = max(button_size, self._txt_wheel.width, self._txt_wheel.height, self._txt_exp.width, self._txt_exp.height)
-    self._rect = rl.Rectangle(0, 0, self._display_size, self._display_size)
+    self._rect = rl.Rectangle(0, 0, button_size, button_size)
 
   def set_rect(self, rect: rl.Rectangle) -> None:
-    self._rect = rl.Rectangle(
-      rect.x + rect.width - self._display_size,
-      rect.y,
-      self._display_size,
-      self._display_size,
-    )
+    self._rect.x, self._rect.y = rect.x, rect.y
 
   def _update_state(self) -> None:
     selfdrive_state = ui_state.sm["selfdriveState"]
@@ -57,24 +48,9 @@ class ExpButton(Widget):
 
     self._white_color.a = 180 if self.is_pressed or not self._engageable else 255
 
-    show_exp_icon = self._held_or_actual_mode()
-    texture = self._txt_exp if show_exp_icon else self._txt_wheel
+    texture = self._txt_exp if self._held_or_actual_mode() else self._txt_wheel
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
-
-    if show_exp_icon:
-      src_rect = rl.Rectangle(0, 0, float(texture.width), float(texture.height))
-    else:
-      inset = float(texture.width) * self._WHEEL_CROP_INSET_RATIO
-      src_rect = rl.Rectangle(inset, inset, float(texture.width) - 2 * inset, float(texture.height) - 2 * inset)
-
-    dest_rect = rl.Rectangle(float(center_x), float(center_y), float(texture.width), float(texture.height))
-    origin = rl.Vector2(texture.width / 2, texture.height / 2)
-
-    rotation = 0.0
-    if not show_exp_icon:
-      rotation = -float(ui_state.sm["carState"].steeringAngleDeg)
-
-    rl.draw_texture_pro(texture, src_rect, dest_rect, origin, rotation, self._white_color)
+    rl.draw_texture(texture, center_x - texture.width // 2, center_y - texture.height // 2, self._white_color)
 
   def _held_or_actual_mode(self):
     now = time.monotonic()
