@@ -265,82 +265,31 @@ class SceneUnderstanding:
         return road_conditions
     
     def _classify_scene(self, sm, has_carstate):
-        """分类场景"""
-        # 检查紧急情况
-        if self._is_emergency(sm):
-            return self.SCENE_EMERGENCY
-        
-        # 检查交叉口
-        if self._is_intersection():
-            return self.SCENE_INTERSECTION
-        
-        # 检查变道
-        if self._is_lane_change(sm, has_carstate):
-            return self.SCENE_LANE_CHANGE
-        
-        # 检查弯道
-        if self._is_curve():
-            return self.SCENE_CURVE
-        
-        # 检查障碍物
-        if self._is_obstacle():
-            return self.SCENE_OBSTACLE
+    """极简稳定版场景分类"""
 
-        # 隧道优先级高于拥堵
-        if self._is_tunnel():
-            return self.SCENE_TUNNEL
-        
-        # 检查交通拥堵
-        if self._is_traffic_jam():
-            return self.SCENE_TRAFFIC_JAM
-        
-        # 检查行人密集区
-        if self._is_pedestrian_area():
-            return self.SCENE_PEDESTRIAN
-        
-        # 检查两轮车密集区
-        if self._is_two_wheeler_area():
-            return self.SCENE_TWO_WHEELER
-        
-        # 检查施工区域
-        if self._is_construction_zone():
-            return self.SCENE_CONSTRUCTION
-        
-        # 检查交通灯场景
-        if self._is_traffic_light():
-            return self.SCENE_TRAFFIC_LIGHT
-        
-        # 检查高速场景
-        if self._is_highway(sm, has_carstate):
-            return self.SCENE_HIGHWAY
-        
-        # 检查城市场景
-        if self._is_urban(sm, has_carstate):
-            return self.SCENE_URBAN
-        
-        # 检查乡村场景
-        if self._is_rural(sm, has_carstate):
-            return self.SCENE_RURAL
-                      
-        # 检查桥梁场景
-        if self._is_bridge():
-            return self.SCENE_BRIDGE
-        
-        # 检查停车场场景
-        if self._is_parking_lot():
-            return self.SCENE_PARKING_LOT
-        
-        # 检查环岛场景
-        if self._is_roundabout():
-            return self.SCENE_ROUNDABOUT
-        
-        # 检查学校区域
-        if self._is_school_zone():
-            return self.SCENE_SCHOOL_ZONE
-        
-        # 检查 residential 区域
-        if self._is_residential(sm, has_carstate):
-            return self.SCENE_RESIDENTIAL
+    # 🚨 1. 障碍物（最高优先级）
+    if self._is_obstacle():
+        return "obstacle"
+
+    # 🚶 2. 行人
+    if self.pedestrian_density > 0.3:
+        return "pedestrian"
+
+    # 🚧 3. 锥桶 / 施工
+    if self.object_counts['cones'] >= 2:
+        return "construction"
+
+    # 🛣️ 4. 高速
+    if has_carstate:
+        try:
+            v_ego = sm['carState'].vEgo
+            if v_ego > 25:
+                return "highway"
+        except:
+            pass
+
+    # 🏙️ 5. 默认市区
+    return "urban"
         
         # 默认正常场景
         return self.SCENE_NORMAL
