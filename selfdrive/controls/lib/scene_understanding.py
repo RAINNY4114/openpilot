@@ -863,26 +863,14 @@ class SceneUnderstanding:
             return False
    
     def should_brake(self):
-        """是否需要刹车（核心逻辑）"""
+    close_objs = [o for o in self.objects if 0 < o['x'] < 25 and abs(o['y']) < 1.5]
 
-        # 1️⃣ 最近目标
-        close_objs = [o for o in self.objects if 0 < o['x'] < 30]
+    if not close_objs:
+        return False
 
-        if not close_objs:
-            return False
+    obj = min(close_objs, key=lambda o: o['x'])
+    ttc = obj['behavior'].get("time_to_collision", 999)
 
-        # 2️⃣ 最危险目标（前方最近）
-        most_dangerous = min(close_objs, key=lambda o: o['x'])
-
-        behavior = most_dangerous.get("behavior", {})
-        ttc = behavior.get("time_to_collision", float('inf'))
-        risk = behavior.get("risk_level", "low")
-
-        # 3️⃣ 核心刹车逻辑
-        if ttc < 3:
-            return True
-
-        if risk in ["high", "critical"] and most_dangerous['x'] < 20:
-            return True
+    return ttc < 3
 
         return False
