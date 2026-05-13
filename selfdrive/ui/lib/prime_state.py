@@ -45,11 +45,16 @@ class PrimeState:
 
   def _fetch_prime_status(self) -> None:
     dongle_id = self._params.get("DongleId")
-    if not dongle_id or dongle_id == UNREGISTERED_DONGLE_ID:
+    if not isinstance(dongle_id, str) or not dongle_id or dongle_id == UNREGISTERED_DONGLE_ID:
       return
 
     try:
       identity_token = get_token(dongle_id)
+    except Exception as e:
+      cloudlog.debug(f"Skipping prime status fetch: {e}")
+      return
+
+    try:
       response = api_get(f"v1.1/devices/{dongle_id}", timeout=self.API_TIMEOUT, access_token=identity_token)
       if response.status_code == 200:
         data = response.json()

@@ -78,7 +78,6 @@ _services: dict[str, tuple] = {
   "rawAudioData": (False, 20.),
   "bookmarkButton": (True, 0., 1),
   "audioFeedback": (True, 0., 1),
-  "amapNavi": (True, 0.),
 
   # debug
   "uiDebug": (True, 0., 1),
@@ -99,6 +98,7 @@ _services: dict[str, tuple] = {
   "customReservedRawData2": (True, 0.),
   "dpControlsState": (False, 100., 10),
   "modelExt": (True, 20.),
+  "carStateBP": (True, 100., 10),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}

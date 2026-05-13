@@ -9,10 +9,14 @@ LaneChangeDirection = log.LaneChangeDirection
 
 
 # Highway auto-overtake (experimental).
+# This only injects a lane-change desire; longitudinal control remains unchanged (ACC/openpilot).
 OVERTAKE_MIN_SPEED = 80 * CV.KPH_TO_MS
 OVERTAKE_MIN_CRUISE_SPEED = 90 * CV.KPH_TO_MS
+# Make auto-overtake less "rare" while keeping the *lane-clear* gating strict:
+# - Allow smaller speed deltas (common highway scenario: lead is ~10 km/h slower than set speed).
+# - Allow slightly larger headways (drivers often use longer ACC gaps).
 OVERTAKE_SPEED_DELTA = 10 * CV.KPH_TO_MS
-OVERTAKE_HEADWAY_MAX_S = 3.5
+OVERTAKE_HEADWAY_MAX_S = 3.5  # only consider overtake when we're close to being speed-limited
 OVERTAKE_LEAD_STABLE_SEC = 1.0
 
 PREPARE_BEFORE_LC_SEC = 0.6
@@ -28,7 +32,7 @@ LANE_PREF_KEEP_RIGHT = 2
 
 class AutoOvertakeHelper:
   def __init__(self):
-    self._mode: str = "idle"
+    self._mode: str = "idle"  # idle|preparing|changing_out|holding|waiting_return|changing_back
     self._out_dir = LaneChangeDirection.none
     self._return_dir = LaneChangeDirection.none
     self._cooldown_until = 0.0
@@ -72,27 +76,11 @@ class AutoOvertakeHelper:
 
   def _update_need_overtake(self, *, now: float, lead_present: bool, lead_d: float, v_lead: float,
                             v_ego: float, v_cruise: float, min_cruise_speed: float, min_speed: float) -> bool:
-
-    # ---------- 杈撳叆闃插尽锛堥槻宕╂簝 / 鑴忔暟鎹級 ----------
-    if (not lead_present) or (lead_d is None) or (lead_d <= 0.0):
-      self._need_since = None
-      return False
-
-    if v_lead is None:
-      self._need_since = None
-      return False
-
-    if v_cruise < min_cruise_speed or v_ego < min_speed:
-      self._need_since = None
-      return False
-
-    # ---------- 鏍稿績閫昏緫 ----------
-    headway = float(lead_d / max(v_ego, 0.1))
-
-    need_raw = (
-      (v_cruise - v_lead) >= OVERTAKE_SPEED_DELTA and
-      headway <= OVERTAKE_HEADWAY_MAX_S
-    )
+    need_raw = False
+    if lead_present and lead_d > 0.0 and v_cruise >= min_cruise_speed and v_ego >= min_speed:
+      headway = float(lead_d / max(v_ego, 0.1))
+      if (v_cruise - v_lead) >= OVERTAKE_SPEED_DELTA and headway <= OVERTAKE_HEADWAY_MAX_S:
+        need_raw = True
 
     if need_raw:
       if self._need_since is None:
@@ -106,7 +94,6 @@ class AutoOvertakeHelper:
              lead_present: bool, lead_d: float, v_lead: float,
              left_ok: bool, right_ok: bool, is_rhd: bool, manual_blinker: bool, bsm_available: bool,
              lane_preference: int = LANE_PREF_AUTO, min_cruise_speed: float | None = None) -> LaneChangeDirection:
-
     now = time.monotonic()
     request = LaneChangeDirection.none
 
@@ -124,6 +111,7 @@ class AutoOvertakeHelper:
       self._last_lc_state = lc_state
       return request
 
+    # Don't start overtake while the driver is explicitly signaling.
     if manual_blinker and self._mode == "idle":
       self.reset()
       self._last_lc_state = lc_state
@@ -137,6 +125,7 @@ class AutoOvertakeHelper:
     return_dir = self._opposite(pass_dir)
     return_ok = left_stable if is_rhd else right_stable
 
+    # When set, "keep left/right" means: after a pass, prefer staying on that physical side (no auto return).
     stay_in_pass_lane = (lane_preference == LANE_PREF_KEEP_LEFT and not is_rhd) or (lane_preference == LANE_PREF_KEEP_RIGHT and is_rhd)
 
     need_overtake = self._update_need_overtake(
@@ -150,6 +139,7 @@ class AutoOvertakeHelper:
       min_speed=min_speed,
     )
 
+    # Detect lane-change completion (finishing -> off)
     lc_finished = (self._last_lc_state == LaneChangeState.laneChangeFinishing and lc_state == LaneChangeState.off)
 
     if self._mode == "idle":
@@ -168,6 +158,7 @@ class AutoOvertakeHelper:
       if not need_overtake:
         self.reset()
       else:
+        # wait a short delay to avoid flicker-based triggers
         if self._prepare_since is not None and (now - self._prepare_since) >= PREPARE_BEFORE_LC_SEC:
           if pass_ok:
             self._mode = "changing_out"
@@ -176,33 +167,32 @@ class AutoOvertakeHelper:
     elif self._mode == "changing_out":
       if lc_state in (LaneChangeState.off, LaneChangeState.preLaneChange) and pass_ok:
         request = self._out_dir
-
+      # If the request is canceled before starting (preLaneChange -> off), retry after a short prepare delay.
       if self._last_lc_state == LaneChangeState.preLaneChange and lc_state == LaneChangeState.off and not lc_finished:
         if need_overtake:
           self._mode = "preparing"
           self._prepare_since = now
         else:
           self.reset()
-
       if lc_finished:
         self._mode = "holding" if stay_in_pass_lane else "waiting_return"
         self._out_finished_t = now
         self._clear_since = None
 
     elif self._mode == "holding":
+      # Stay in the passing lane until user preference changes away from the passing side.
       if not stay_in_pass_lane:
         self._mode = "waiting_return"
         self._clear_since = None
 
     elif self._mode == "waiting_return":
+      # Wait until not "need_overtake" for a while, then return to original lane.
       if need_overtake:
         self._clear_since = None
       else:
         if self._clear_since is None:
           self._clear_since = now
-
         out_ok = self._out_finished_t is None or (now - self._out_finished_t) >= RETURN_MIN_TIME_AFTER_OUT_SEC
-
         if out_ok and (now - self._clear_since) >= RETURN_CLEAR_DELAY_SEC and return_ok:
           self._mode = "changing_back"
           self._return_dir = return_dir
@@ -211,11 +201,10 @@ class AutoOvertakeHelper:
     elif self._mode == "changing_back":
       if lc_state in (LaneChangeState.off, LaneChangeState.preLaneChange) and return_ok:
         request = self._return_dir
-
+      # If return is canceled (preLaneChange -> off), go back to waiting_return and retry when stable again.
       if self._last_lc_state == LaneChangeState.preLaneChange and lc_state == LaneChangeState.off and not lc_finished:
         self._mode = "waiting_return"
         self._clear_since = None
-
       if lc_finished:
         self._mode = "idle"
         self._cooldown_until = now + OVERTAKE_COOLDOWN_SEC

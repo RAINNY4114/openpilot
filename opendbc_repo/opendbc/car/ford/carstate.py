@@ -90,24 +90,25 @@ class CarState(CarStateBase):
     if not self.CP.openpilotLongitudinalControl:
       ret.accFaulted = ret.accFaulted or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
 
-   # Gear
-        if self.CP.transmissionType == TransmissionType.automatic:
-            if self.use_alt_gear:
-                raw_gear = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
-            else:
-                raw_gear = cp.vl["PowertrainData_10"]["TrnRng_D_Rq"]
-            gear = self.shifter_values.get(raw_gear)
-            if raw_gear >= 3:
-                ret.gearShifter = GearShifter.drive
-            elif gear is not None:
-                ret.gearShifter = self.parse_gear_shifter(gear)
-            else:
-                ret.gearShifter = GearShifter.unknown
-        elif self.CP.transmissionType == TransmissionType.manual:
-            if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-                ret.gearShifter = GearShifter.reverse
-            else:
-                ret.gearShifter = GearShifter.drive
+    # gear
+    if self.CP.transmissionType == TransmissionType.automatic:
+        if self.use_alt_gear:
+            raw_gear = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
+        else:
+            raw_gear = cp.vl["PowertrainData_10"]["TrnRng_D_Rq"]
+        gear = self.shifter_values.get(raw_gear)
+        if raw_gear >= 3:
+            ret.gearShifter = GearShifter.drive
+        elif gear is not None:
+            ret.gearShifter = self.parse_gear_shifter(gear)
+        else:
+            ret.gearShifter = GearShifter.unknown
+        
+    elif self.CP.transmissionType == TransmissionType.manual:
+        if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
+            ret.gearShifter = GearShifter.reverse
+        else:
+            ret.gearShifter = GearShifter.drive
 
     # safety
     ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])

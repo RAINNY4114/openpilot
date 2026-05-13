@@ -57,6 +57,7 @@ class UIState:
         "liveDelay",
         "carOutput",
         "carControl",
+        "carStateBP",
         "liveParameters",
         "rawAudioData",
         "dpControlsState",

@@ -21,7 +21,7 @@ from openpilot.selfdrive.modeld.model_manager_helpers import (
   is_bundle_version_compatible,
 )
 
-MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v16.json"
+MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v15.json"
 CACHE_TIMEOUT_NS = int(3600 * 1e9)
 CHUNK_SIZE = 128 * 1024
 

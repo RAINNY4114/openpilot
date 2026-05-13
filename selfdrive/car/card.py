@@ -67,7 +67,7 @@ class Car:
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
     self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
-    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'])
+    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks', 'carStateBP'])
 
     self.can_rcv_cum_timeout_counter = 0
 
@@ -256,6 +256,11 @@ class Car:
       tracks_msg.valid = not any(RD.errors.to_dict().values())
       tracks_msg.liveTracks = RD
       self.pm.send('liveTracks', tracks_msg)
+
+    if hasattr(self.CI.CS, 'car_state_bp_msg') and self.CI.CS.car_state_bp_msg is not None:
+      cs_bp_send = self.CI.CS.car_state_bp_msg
+      cs_bp_send.valid = CS.canValid
+      self.pm.send('carStateBP', cs_bp_send)
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl):
     """control update loop, driven by carControl"""

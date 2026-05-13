@@ -294,15 +294,28 @@ class WifiManager:
         break
       time.sleep(1)
 
+  @staticmethod
+  def _normalize_object_path(path) -> str | None:
+    try:
+      if isinstance(path, bytes):
+        path = path.decode("utf-8", errors="ignore")
+      path = str(path)
+    except Exception:
+      return None
+    return path if path.startswith("/") else None
+
   def _get_adapter(self, adapter_type: int) -> str | None:
     # Return the first NetworkManager device path matching adapter_type
     try:
       device_paths = self._router_main.send_and_get_reply(new_method_call(self._nm, 'GetDevices')).body[0]
       for device_path in device_paths:
+        device_path = self._normalize_object_path(device_path)
+        if device_path is None:
+          continue
         dev_addr = DBusAddress(device_path, bus_name=NM, interface=NM_DEVICE_IFACE)
         dev_type = self._router_main.send_and_get_reply(Properties(dev_addr).get('DeviceType')).body[0][1]
         if dev_type == adapter_type:
-          return str(device_path)
+          return device_path
     except Exception as e:
       cloudlog.exception(f"Error getting adapter type {adapter_type}: {e}")
     return None
@@ -329,6 +342,9 @@ class WifiManager:
     return self._router_main.send_and_get_reply(Properties(self._nm).get('ActiveConnections')).body[0][1]
 
   def _get_connection_settings(self, conn_path: str) -> dict:
+    conn_path = self._normalize_object_path(conn_path)
+    if conn_path is None:
+      return {}
     conn_addr = DBusAddress(conn_path, bus_name=NM, interface=NM_CONNECTION_IFACE)
     reply = self._router_main.send_and_get_reply(new_method_call(conn_addr, 'GetSettings'))
     if reply.header.message_type == MessageType.error:
@@ -731,9 +747,12 @@ class WifiManager:
       known_connections = self._router_main.send_and_get_reply(new_method_call(settings_addr, 'ListConnections')).body[0]
 
       for conn_path in known_connections:
+        conn_path = self._normalize_object_path(conn_path)
+        if conn_path is None:
+          continue
         settings = self._get_connection_settings(conn_path)
         if settings and settings.get('connection', {}).get('id', ('s', ''))[1] == 'lte':
-          return str(conn_path)
+          return conn_path
     except Exception as e:
       cloudlog.exception(f"Error finding LTE connection: {e}")
     return None

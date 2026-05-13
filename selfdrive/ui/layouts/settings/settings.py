@@ -7,13 +7,13 @@ from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
 from openpilot.selfdrive.ui.layouts.settings.branding import BrandingLayout
+from openpilot.selfdrive.ui.layouts.settings.bp import BPLayout
 from openpilot.selfdrive.ui.layouts.settings.lincoln import LincolnLayout
 from openpilot.selfdrive.ui.layouts.settings.model_manager import ModelManagerLayout
 from openpilot.selfdrive.ui.layouts.settings.osm_maps import OSMMapsLayout
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.lib.text_measure import measure_text_cached
-from openpilot.system.ui.lib.wifi_manager import WifiManager
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.network import NetworkUI
 from dragonpilot.selfdrive.ui.layouts.settings.dragonpilot import DragonpilotLayout
@@ -43,8 +43,9 @@ class PanelType(IntEnum):
   DEVELOPER = 5
   DRAGONPILOT = 6
   BRANDING = 7
-  LINCOLN = 8
-  OSM_MAPS = 9
+  BP = 8
+  LINCOLN = 9
+  OSM_MAPS = 10
 
 
 @dataclass
@@ -60,6 +61,7 @@ class SettingsLayout(Widget):
     self._current_panel = PanelType.DEVICE
 
     # Panel configuration
+    from openpilot.system.ui.lib.wifi_manager import WifiManager
     wifi_manager = WifiManager()
     wifi_manager.set_active(False)
 
@@ -72,6 +74,7 @@ class SettingsLayout(Widget):
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
       PanelType.DRAGONPILOT: PanelInfo("dp", DragonpilotLayout()),
       PanelType.BRANDING: PanelInfo("Branding", BrandingLayout()),
+      PanelType.BP: PanelInfo("BP", BPLayout()),
       PanelType.LINCOLN: PanelInfo("Lincoln", LincolnLayout()),
       PanelType.OSM_MAPS: PanelInfo(tr_noop("Offline Maps"), OSMMapsLayout()),
     }
