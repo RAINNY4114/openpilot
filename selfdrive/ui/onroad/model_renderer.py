@@ -4,7 +4,6 @@ import numpy as np
 import pyray as rl
 from cereal import messaging, car
 from dataclasses import dataclass, field
-from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
@@ -52,14 +51,6 @@ DP_LINCOLN_LEAD_EFFECT_TTC_START_S = 5.0
 DP_LINCOLN_LEAD_EFFECT_TTC_FULL_S = 2.5
 DP_LINCOLN_LEAD_COLOR_FAR = rl.Color(255, 215, 0, 255)
 DP_LINCOLN_LEAD_COLOR_NEAR = rl.Color(255, 60, 0, 255)
-LEAD_RADAR_GLOW = rl.Color(0, 134, 233, 255)
-LEAD_RADAR_CHEVRON_BASE = rl.Color(0, 100, 200, 255)
-LEAD_VISION_GLOW = rl.Color(218, 202, 37, 255)
-LEAD_VISION_CHEVRON_BASE = rl.Color(201, 34, 49, 255)
-OVERLAY_SCALE_FACTORS = {0: 0.6, 1: 1.0, 2: 1.5}
-INVERT_UNDER_M = 100.0 * 0.3048
-NORMAL_OVER_M = 125.0 * 0.3048
-INVERTED_TOP_OFFSET = 350
 
 
 @dataclass
@@ -128,18 +119,6 @@ class ModelRenderer(Widget):
     # dp
     self._dp_ui_rainbow_rotation = 0.0
     self._dp_ui_rainbow_gradient = None
-    self._bp_params = Params()
-    self._ford_radar_overlay_enabled = self._bp_params.get_bool("FordPrefShowRadarLeadOverlay")
-    try:
-      size_val = int(self._bp_params.get("FordPrefRadarOverlaySize", return_default=True))
-    except (TypeError, ValueError):
-      size_val = 1
-    self._overlay_scale = OVERLAY_SCALE_FACTORS.get(size_val, 1.0)
-    self._lead_is_radar = [False, False]
-    self._lead_status_alpha = 0.0
-    self._overlay_inverted_mode = False
-    self._overlay_param_counter = 0
-    self._overlay_font = gui_app.font(FontWeight.SEMI_BOLD)
 
     # Lincoln HUD enhancements
     self._lead_box_valid = False
@@ -176,16 +155,6 @@ class ModelRenderer(Widget):
     if sm.updated['carParams']:
       self._longitudinal_control = sm['carParams'].openpilotLongitudinalControl
 
-    self._overlay_param_counter += 1
-    if self._overlay_param_counter >= 60:
-      self._overlay_param_counter = 0
-      self._ford_radar_overlay_enabled = self._bp_params.get_bool("FordPrefShowRadarLeadOverlay")
-      try:
-        size_val = int(self._bp_params.get("FordPrefRadarOverlaySize", return_default=True))
-      except (TypeError, ValueError):
-        size_val = 1
-      self._overlay_scale = OVERLAY_SCALE_FACTORS.get(size_val, 1.0)
-
     model = sm['modelV2']
     radar_state = sm['radarState'] if sm.valid['radarState'] else None
     lead_one = radar_state.leadOne if radar_state else None
@@ -205,7 +174,6 @@ class ModelRenderer(Widget):
       if render_lead_indicator:
         v_ego = float(sm["carState"].vEgo) if sm.valid.get("carState", False) else 0.0
         self._update_leads(radar_state, model, v_ego, path_x_array)
-        self._update_lead_radar_status(radar_state)
       self._transform_dirty = False
 
     # dp - draw live tracks before everything
@@ -218,7 +186,7 @@ class ModelRenderer(Widget):
     self._draw_path(sm)
 
     if render_lead_indicator and radar_state:
-      self._draw_lead_indicator(sm, radar_state)
+      self._draw_lead_indicator()
 
   def _update_raw_points(self, model):
     """Update raw 3D points from model data"""
@@ -404,14 +372,6 @@ class ModelRenderer(Widget):
     )
 
     self._update_experimental_gradient()
-
-  def _update_lead_radar_status(self, radar_state):
-    leads = [radar_state.leadOne, radar_state.leadTwo]
-    for i, lead_data in enumerate(leads):
-      if lead_data and lead_data.status:
-        self._lead_is_radar[i] = bool(getattr(lead_data, "radar", False))
-      else:
-        self._lead_is_radar[i] = False
 
   def _update_experimental_gradient(self):
     """Pre-calculate experimental mode gradient colors"""
@@ -648,11 +608,7 @@ class ModelRenderer(Widget):
         )
         draw_polygon(self._rect, self._path.projected_points, gradient=overlay)
 
-  def _draw_lead_indicator(self, sm=None, radar_state=None):
-    if self._ford_radar_overlay_enabled and sm is not None and radar_state is not None:
-      self._draw_ford_radar_overlay(sm, radar_state)
-      return
-
+  def _draw_lead_indicator(self):
     # Draw lead vehicles if available
     self._draw_lead_box()
     for lead in self._lead_vehicles:
@@ -669,142 +625,6 @@ class ModelRenderer(Widget):
       speed_str = f"{v_lead * 3.6:.0f}km/h" if ui_state.is_metric else f"{v_lead * 2.23694:.0f}mph"
       self._dp_paint_centered_lead_text(dist_str, 56, lead.x, start_y + lead.sz)
       self._dp_paint_centered_lead_text(speed_str, 48, lead.x, start_y + lead.sz + 40)
-
-  def _update_overlay_alpha(self, has_lead: bool):
-    if not has_lead:
-      self._lead_status_alpha = max(0.0, self._lead_status_alpha - 0.05)
-    else:
-      self._lead_status_alpha = min(1.0, self._lead_status_alpha + 0.1)
-
-  def _build_radar_overlay_text(self, d_rel: float, v_rel: float, v_ego: float) -> list[str]:
-    text_lines = []
-    val = max(0.0, d_rel)
-    unit = "m" if ui_state.is_metric else "ft"
-    if not ui_state.is_metric:
-      val *= 3.28084
-    text_lines.append(f"{val:.0f} {unit}")
-
-    multiplier = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
-    val = max(0.0, (v_rel + v_ego) * multiplier)
-    unit = "km/h" if ui_state.is_metric else "mph"
-    text_lines.append(f"{val:.0f} {unit}")
-
-    val = (d_rel / v_ego) if (d_rel > 0 and v_ego > 0) else 0.0
-    text_lines.append(f"{val:.1f} s" if (0 < val < 200) else "---")
-    return text_lines
-
-  def _draw_radar_overlay_boxes(self, text_lines: list[str], lead_vehicle: LeadVehicle, rect: rl.Rectangle, is_radar: bool):
-    if not lead_vehicle.chevron or len(lead_vehicle.chevron) < 3:
-      return
-
-    scale = self._overlay_scale
-    font_size = int(60 * scale)
-    padding = int(12 * scale)
-    box_spacing = int(15 * scale)
-    alpha = int(255 * self._lead_status_alpha)
-    text_color = rl.Color(255, 255, 255, alpha)
-    shadow_color = rl.Color(0, 0, 0, int(200 * self._lead_status_alpha))
-    box_color = rl.Color(40, 40, 40, int(220 * self._lead_status_alpha))
-
-    chevron_x = lead_vehicle.chevron[1][0]
-    chevron_y = lead_vehicle.chevron[1][1]
-
-    text_sizes = []
-    total_width = 0
-    for line in text_lines:
-      text_size = measure_text_cached(self._overlay_font, line, font_size, 0)
-      text_sizes.append(text_size)
-      total_width += text_size.x + (padding * 2)
-    total_width += box_spacing * (len(text_lines) - 1)
-    box_height = (text_sizes[0].y if text_sizes else font_size) + (padding * 2)
-
-    if self._overlay_inverted_mode:
-      center_x = rect.width / 2
-      y = INVERTED_TOP_OFFSET
-    else:
-      center_x = chevron_x
-      y = chevron_y + 40
-
-    start_x = center_x - total_width / 2
-    margin = 20
-    if start_x < margin:
-      start_x = margin
-    elif start_x + total_width > rect.width - margin:
-      start_x = rect.width - margin - total_width
-    current_x = start_x
-
-    if is_radar:
-      glow_color = LEAD_RADAR_GLOW
-      border_color = rl.Color(LEAD_RADAR_CHEVRON_BASE.r, LEAD_RADAR_CHEVRON_BASE.g, LEAD_RADAR_CHEVRON_BASE.b, alpha)
-    else:
-      glow_color = LEAD_VISION_GLOW
-      border_color = rl.Color(LEAD_VISION_CHEVRON_BASE.r, LEAD_VISION_CHEVRON_BASE.g, LEAD_VISION_CHEVRON_BASE.b, alpha)
-
-    border_thickness = max(2, int(6 * scale))
-    box_rects = []
-    for line, text_size in zip(text_lines, text_sizes, strict=True):
-      box_width = text_size.x + (padding * 2)
-      box_rect = rl.Rectangle(int(current_x), int(y), box_width, box_height)
-      box_rects.append(box_rect)
-      rl.draw_rectangle_rounded(box_rect, 0.2, 10, box_color)
-      rl.draw_rectangle_rounded_lines_ex(box_rect, 0.2, 10, border_thickness, border_color)
-      text_x = int(current_x + padding)
-      text_y = int(y + padding)
-      rl.draw_text_ex(self._overlay_font, line, rl.Vector2(text_x + 2, text_y + 2), font_size, 0, shadow_color)
-      rl.draw_text_ex(self._overlay_font, line, rl.Vector2(text_x, text_y), font_size, 0, text_color)
-      current_x += box_width + box_spacing
-
-    box = box_rects[1] if len(box_rects) == 3 else (box_rects[0] if box_rects else None)
-    if box is None:
-      return
-
-    center_x = box.x + box.width / 2
-    chevron_h = 40
-    if self._overlay_inverted_mode:
-      base_y = y + box_height
-      apex_y = base_y + chevron_h
-      chevron = [rl.Vector2(center_x, apex_y), rl.Vector2(box.x, base_y), rl.Vector2(box.x + box.width, base_y)]
-    else:
-      chevron = [rl.Vector2(center_x, y - chevron_h), rl.Vector2(box.x, y), rl.Vector2(box.x + box.width, y)]
-
-    rl.draw_triangle_fan(chevron, len(chevron), border_color)
-    rl.draw_line_ex(chevron[0], chevron[1], border_thickness, glow_color)
-    rl.draw_line_ex(chevron[1], chevron[2], border_thickness, glow_color)
-    rl.draw_line_ex(chevron[2], chevron[0], border_thickness, glow_color)
-    r = border_thickness / 2
-    rl.draw_circle_v(chevron[0], r, glow_color)
-    rl.draw_circle_v(chevron[1], r, glow_color)
-    rl.draw_circle_v(chevron[2], r, glow_color)
-
-  def _draw_ford_radar_overlay(self, sm, radar_state):
-    lead_one = radar_state.leadOne
-    lead_two = radar_state.leadTwo
-    has_lead_one = bool(lead_one and lead_one.status)
-    has_lead_two = bool(lead_two and lead_two.status)
-    self._update_overlay_alpha(has_lead_one or has_lead_two)
-    if self._lead_status_alpha <= 0.0:
-      return
-
-    if has_lead_one or has_lead_two:
-      d_rel_closest = min(
-        lead_one.dRel if has_lead_one else float("inf"),
-        lead_two.dRel if has_lead_two else float("inf"),
-      )
-      if d_rel_closest < INVERT_UNDER_M:
-        self._overlay_inverted_mode = True
-      elif d_rel_closest > NORMAL_OVER_M:
-        self._overlay_inverted_mode = False
-
-    v_ego = sm["carState"].vEgo
-    if has_lead_one and self._lead_vehicles[0].chevron:
-      text_lines = self._build_radar_overlay_text(lead_one.dRel, lead_one.vRel, v_ego)
-      self._draw_radar_overlay_boxes(text_lines, self._lead_vehicles[0], self._rect, self._lead_is_radar[0])
-
-    if has_lead_two and self._lead_vehicles[1].chevron:
-      d_rel_diff = abs(lead_one.dRel - lead_two.dRel) if has_lead_one else float("inf")
-      if d_rel_diff > 3.0:
-        text_lines = self._build_radar_overlay_text(lead_two.dRel, lead_two.vRel, v_ego)
-        self._draw_radar_overlay_boxes(text_lines, self._lead_vehicles[1], self._rect, self._lead_is_radar[1])
 
   @staticmethod
   def _get_path_length_idx(pos_x_array: np.ndarray, path_distance: float) -> int:

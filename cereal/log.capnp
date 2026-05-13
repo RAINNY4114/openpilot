@@ -2639,7 +2639,7 @@ struct Event {
     dpControlsState @107 :Custom.DpControlsState;
     modelExt @108 :Custom.ModelExt;
     modelManagerSP @109 :Custom.ModelManagerSP;
-    amapNavi @110 :Custom.AmapNavi; #鏂板姞鐨勫鑸拰闆疯揪娑堟伅;
+    amapNavi @110 :Custom.AmapNavi; #新加的导航和雷达消息
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
@@ -2650,7 +2650,7 @@ struct Event {
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;
-    carStateBP @140 :Custom.CarStateBP;
+    customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;
     customReserved16 @142 :Custom.CustomReserved16;
     customReserved17 @143 :Custom.CustomReserved17;

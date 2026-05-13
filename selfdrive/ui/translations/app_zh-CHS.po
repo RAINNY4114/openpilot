@@ -1623,6 +1623,39 @@ msgstr "启用人工转弯检测"
 msgid "Automatically pause steering when the driver applies large manual steering input, then smoothly resume."
 msgstr "驾驶员大角度手动打方向时自动暂停横向控制，松手后平滑恢复。"
 
+msgid "### Ford / Lincoln Lateral Tuning ###"
+msgstr "### Ford / Lincoln 横向调校 ###"
+
+msgid "In-Lane Offset"
+msgstr "车道内偏置"
+
+msgid "Adjust the lane-centering offset. Negative values bias left, positive values bias right."
+msgstr "调整车道居中偏置。负值偏左，正值偏右。"
+
+msgid "Predicted Curvature Blend Ratio Low"
+msgstr "低曲率预测曲率混合比"
+
+msgid "Blend ratio for predicted curvature on straights and gentle curves."
+msgstr "直道和缓弯时预测曲率的混合比例。"
+
+msgid "Predicted Curvature Blend Ratio High"
+msgstr "高曲率预测曲率混合比"
+
+msgid "Blend ratio for predicted curvature on medium and larger curves."
+msgstr "中等和较大弯道时预测曲率的混合比例。"
+
+msgid "Low Curvature PID Gain"
+msgstr "低曲率 PID 增益"
+
+msgid "Strength of low-curvature lane-centering correction."
+msgstr "低曲率场景下车道居中修正的力度。"
+
+msgid "Lane Change Factor High"
+msgstr "高速变道平滑系数"
+
+msgid "High-speed lane-change smoothing factor. Lower values soften the lane change more."
+msgstr "高速变道平滑系数。数值越低，变道动作越柔和。"
+
 msgid "Trigger angle"
 msgstr "触发角度"
 
@@ -2726,155 +2759,3 @@ msgstr "旋转动画"
 #: selfdrive/ui/layouts/settings/branding.py
 msgid "0 = spinner_track.png. 1 = 1spinner_track.png. Put custom files in selfdrive/assets/images/."
 msgstr "0 = spinner_track.png；1 = 1spinner_track.png。自定义图片请放到 selfdrive/assets/images/ 目录。"
- 
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "### Visuals ###"
-msgstr "### 视觉 ###"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "### Longitudinal Tuning ###"
-msgstr "### 纵向调校 ###"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "### Lateral Tuning ###"
-msgstr "### 横向调校 ###"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Show Blindspot Overlay"
-msgstr "显示盲区叠加提示"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Display red overlay when vehicle is detected in blindspot."
-msgstr "检测到盲区车辆时显示红色叠加提示。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Show Brake Status"
-msgstr "显示制动状态"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Display speed setpoint in red when vehicle is braking."
-msgstr "车辆制动时，将速度显示为红色。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Show Confidence Ball"
-msgstr "显示置信球"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Display the confidence ball on the left side of the driving view."
-msgstr "在驾驶画面左侧显示置信球。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Animate Steering Wheel"
-msgstr "方向盘动画"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Rotate the steering wheel icon to match the current steering angle."
-msgstr "让方向盘图标随当前转向角度旋转。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Bypass BP Longitudinal Control"
-msgstr "绕过 BP 纵向控制"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Use stock longitudinal logic instead of BluePilot TTC/coasting tuning."
-msgstr "使用原版纵向逻辑，而不是 BluePilot 的 TTC / 滑行调校。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Disable Downhill Compensation"
-msgstr "禁用下坡补偿"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Disable pitch-based brake/gas compensation when going downhill."
-msgstr "下坡时禁用基于俯仰角的刹车/油门补偿。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Disable BP Lateral Control"
-msgstr "禁用 BP 横向控制"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Disable BluePilot lateral control."
-msgstr "禁用 BluePilot 横向控制。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Disable Lane Change Under Speed"
-msgstr "低速禁用变道"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Pause lateral control when blinker is on and below minimum speed."
-msgstr "当转向灯开启且车速低于最低阈值时，暂停横向控制。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Enable Lane Positioning"
-msgstr "启用车道内定位"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Enable custom lane positioning controls."
-msgstr "启用自定义车道内定位控制。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "In-Lane Offset"
-msgstr "车道内偏移"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Adjust the in-lane offset (-0.5 to 0.5)."
-msgstr "调整车道内偏移量（-0.5 到 0.5）。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Enable Lanefull Mode"
-msgstr "启用全车道模式"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Enable lanefull mode for lane positioning."
-msgstr "为车道内定位启用全车道模式。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Use Custom Tuning Profile"
-msgstr "使用自定义调校配置"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Enable custom tuning profile settings."
-msgstr "启用自定义调校配置。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Predicted Curvature Blend Ratio High"
-msgstr "高曲率预测融合比例"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Adjust the high curvature blend ratio (0.0-1.0)."
-msgstr "调整高曲率预测融合比例（0.0-1.0）。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Predicted Curvature Blend Ratio Low"
-msgstr "低曲率预测融合比例"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Adjust the low curvature blend ratio (0.0-1.0)."
-msgstr "调整低曲率预测融合比例（0.0-1.0）。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Low Curvature PID Gain"
-msgstr "低曲率 PID 增益"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Adjust the low curvature PID gain (0.0-5.0)."
-msgstr "调整低曲率 PID 增益（0.0-5.0）。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Show Radar Lead Overlay (Ford ACC)"
-msgstr "显示雷达前车叠加层（Ford ACC）"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Display boxed lead vehicle info when using Ford stock ACC."
-msgstr "使用 Ford 原厂 ACC 时，显示盒状前车信息叠加层。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Radar Overlay Size"
-msgstr "雷达叠加层尺寸"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "Set the size of the radar lead overlay boxes."
-msgstr "设置雷达前车叠加框的尺寸。"
-
-#: selfdrive/ui/layouts/settings/bp.py
-msgid "None"
-msgstr "无"

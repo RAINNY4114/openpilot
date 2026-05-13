@@ -20,6 +20,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.controls.lib.desire_helper import AUTO_LC_BLINKER_DELAY_SEC
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
+from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.livedelay.helpers import get_lat_delay
 State = log.SelfdriveState.OpenpilotState
@@ -27,6 +28,20 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
+SIDE_INTRUSION_STALE_TIMEOUT_S = 1.0
+SIDE_INTRUSION_LANE_PROB_MIN = 0.65
+SIDE_INTRUSION_MIN_DIST_M = 4.0
+SIDE_INTRUSION_MAX_DIST_M = 35.0
+SIDE_INTRUSION_LINE_MARGIN_M = 0.35
+SIDE_INTRUSION_BASE_OFFSET_M = 0.16
+SIDE_INTRUSION_MAX_CURVATURE = 0.0010
+SIDE_INTRUSION_FILTER_ALPHA = 0.04
+SIDE_INTRUSION_PERSON_CLASS = 0
+SIDE_INTRUSION_VEHICLE_CLASSES = {1, 2, 3, 5, 7}
+SIDE_INTRUSION_PERSON_SCORE_MIN = 0.30
+SIDE_INTRUSION_VEHICLE_SCORE_MIN = 0.25
+SIDE_INTRUSION_PERSON_HEIGHT_M = 1.7
+SIDE_INTRUSION_VEHICLE_HEIGHT_M = 1.5
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -113,7 +128,7 @@ def _road_edge_lane_offset_curvature(model_v2: log.ModelDataV2, v_ego: float, le
     y_left = _interp(lookahead_m, left_x, left_y)
     y_right = _interp(lookahead_m, right_x, right_y)
 
-    lane_width = float(y_left - y_right)
+    lane_width = float(y_right - y_left)
     if not (2.6 < lane_width < 4.6):
       return 0.0
 
@@ -136,6 +151,114 @@ def _road_edge_lane_offset_curvature(model_v2: log.ModelDataV2, v_ego: float, le
     return 0.0
 
 
+def _side_intrusion_curvature(model_v2: log.ModelDataV2, det_payload: dict | None, v_ego: float) -> float:
+  if det_payload is None:
+    return 0.0
+
+  try:
+    lane_lines = list(getattr(model_v2, "laneLines", []) or [])
+    lane_probs = list(getattr(model_v2, "laneLineProbs", []) or [])
+    if len(lane_lines) < 3 or len(lane_probs) < 3:
+      return 0.0
+
+    left_prob = float(lane_probs[1])
+    right_prob = float(lane_probs[2])
+    prob = min(left_prob, right_prob)
+    if prob < SIDE_INTRUSION_LANE_PROB_MIN:
+      return 0.0
+
+    left = lane_lines[1]
+    right = lane_lines[2]
+    left_x = list(getattr(left, "x", []) or [])
+    left_y = list(getattr(left, "y", []) or [])
+    right_x = list(getattr(right, "x", []) or [])
+    right_y = list(getattr(right, "y", []) or [])
+    if len(left_x) < 2 or len(right_x) < 2:
+      return 0.0
+
+    img_w = int(det_payload.get("imgW", 0) or 0)
+    focal_length_px = float(det_payload.get("focalLengthPx", 0.0) or 0.0)
+    objs = det_payload.get("objs", None) or []
+    if img_w <= 0 or focal_length_px <= 1.0 or not isinstance(objs, list):
+      return 0.0
+
+    lookahead_m = _clamp(float(v_ego) * 0.7 + 10.0, 10.0, 25.0)
+    y_left_la = _interp(lookahead_m, left_x, left_y)
+    y_right_la = _interp(lookahead_m, right_x, right_y)
+    lane_width = float(y_right_la - y_left_la)
+    if not (2.6 < lane_width < 4.6):
+      return 0.0
+
+    left_intrusion = False
+    right_intrusion = False
+    cx0 = float(img_w) * 0.5
+
+    for o in objs:
+      if not isinstance(o, dict):
+        continue
+      try:
+        cls = int(o.get("c", -1))
+        score = float(o.get("s", 0.0))
+        x1 = float(o.get("x1", 0.0))
+        y1 = float(o.get("y1", 0.0))
+        x2 = float(o.get("x2", 0.0))
+        y2 = float(o.get("y2", 0.0))
+      except Exception:
+        continue
+
+      if cls == SIDE_INTRUSION_PERSON_CLASS:
+        score_min = SIDE_INTRUSION_PERSON_SCORE_MIN
+        obj_height_m = SIDE_INTRUSION_PERSON_HEIGHT_M
+      elif cls in SIDE_INTRUSION_VEHICLE_CLASSES:
+        score_min = SIDE_INTRUSION_VEHICLE_SCORE_MIN
+        obj_height_m = SIDE_INTRUSION_VEHICLE_HEIGHT_M
+      else:
+        continue
+      if score < score_min:
+        continue
+      if not (math.isfinite(x1) and math.isfinite(y1) and math.isfinite(x2) and math.isfinite(y2)):
+        continue
+      if x2 <= x1 or y2 <= y1:
+        continue
+
+      h_px = max(1.0, y2 - y1)
+      dist_m = (float(focal_length_px) * obj_height_m) / h_px
+      if not math.isfinite(dist_m) or dist_m < SIDE_INTRUSION_MIN_DIST_M or dist_m > SIDE_INTRUSION_MAX_DIST_M:
+        continue
+
+      y_left = _interp(dist_m, left_x, left_y)
+      y_right = _interp(dist_m, right_x, right_y)
+      left_boundary = min(float(y_left), float(y_right))
+      right_boundary = max(float(y_left), float(y_right))
+      lane_center = 0.5 * (left_boundary + right_boundary)
+
+      cx = 0.5 * (x1 + x2)
+      y_center = (cx - cx0) * dist_m / max(focal_length_px, 1.0)
+      y_inner_left_obj = (x2 - cx0) * dist_m / max(focal_length_px, 1.0)
+      y_inner_right_obj = (x1 - cx0) * dist_m / max(focal_length_px, 1.0)
+
+      if y_center < lane_center and y_inner_left_obj >= (left_boundary - SIDE_INTRUSION_LINE_MARGIN_M):
+        left_intrusion = True
+      elif y_center > lane_center and y_inner_right_obj <= (right_boundary + SIDE_INTRUSION_LINE_MARGIN_M):
+        right_intrusion = True
+
+    if left_intrusion == right_intrusion:
+      return 0.0
+
+    # Reuse the road-edge bias sign convention: left-side risk biases away from the left boundary.
+    y_target = SIDE_INTRUSION_BASE_OFFSET_M if left_intrusion else -SIDE_INTRUSION_BASE_OFFSET_M
+    max_off = max(0.0, 0.5 * lane_width - 0.35)
+    y_target = _clamp(float(y_target), -max_off, max_off)
+    y_center_la = 0.5 * (float(y_left_la) + float(y_right_la))
+    correction = -2.0 * float(y_center_la - y_target) / (lookahead_m ** 2)
+    lane_scale = _clamp((prob - SIDE_INTRUSION_LANE_PROB_MIN) / max(1e-3, 1.0 - SIDE_INTRUSION_LANE_PROB_MIN), 0.0, 1.0)
+    speed_scale = _clamp(_interp(float(v_ego), [8.0, 20.0, 35.0], [1.0, 0.75, 0.50]), 0.50, 1.0)
+    correction *= lane_scale * speed_scale
+    return _clamp(correction, -SIDE_INTRUSION_MAX_CURVATURE, SIDE_INTRUSION_MAX_CURVATURE)
+  except Exception:
+    return 0.0
+
+
 class Controls:
   def __init__(self) -> None:
     self.params = Params()
@@ -146,8 +269,8 @@ class Controls:
     self.CI = interfaces[self.CP.carFingerprint](self.CP)
 
     self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2', 'selfdriveState',
-                                   'liveCalibration', 'livePose', 'longitudinalPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'], poll='selfdriveState')
+                                    'liveCalibration', 'livePose', 'longitudinalPlan', 'carState', 'carOutput',
+                                    'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'customReservedRawData0'], poll='selfdriveState')
     self.pm = messaging.PubMaster(['carControl', 'controlsState', 'dpControlsState'])
 
     self.steer_limited_by_safety = False
@@ -171,12 +294,36 @@ class Controls:
     self.alka_active = False
 
     self._road_edge_curv_correction = 0.0
+    self._side_intrusion_curv_correction = 0.0
+    self._side_intrusion_det_payload: dict | None = None
+    self._side_intrusion_last_update_t = 0.0
+    self._dp_auto_avoid_enabled = self.params.get_bool("dp_lincoln_auto_avoid")
+    self._dp_auto_avoid_last_param_check = 0.0
     self._auto_lc_blinker_delay_until = 0.0
     self._auto_lc_blinker_pending = False
     self._auto_lc_last_state = LaneChangeState.off
 
   def update(self):
     self.sm.update(15)
+    now_mono = time.monotonic()
+    if now_mono - self._dp_auto_avoid_last_param_check >= 1.0:
+      self._dp_auto_avoid_last_param_check = now_mono
+      try:
+        self._dp_auto_avoid_enabled = self.params.get_bool("dp_lincoln_auto_avoid")
+      except Exception:
+        self._dp_auto_avoid_enabled = False
+
+    if self.sm.updated.get("customReservedRawData0", False):
+      try:
+        raw = self.sm["customReservedRawData0"]
+        payload = decode_cone_detections(raw) if raw else None
+        if payload is not None:
+          self._side_intrusion_det_payload = payload
+          self._side_intrusion_last_update_t = now_mono
+      except Exception:
+        self._side_intrusion_det_payload = None
+        self._side_intrusion_last_update_t = 0.0
+
     if self.sm.updated["liveCalibration"]:
       self.pose_calibrator.feed_live_calib(self.sm['liveCalibration'])
     if self.sm.updated["livePose"]:
@@ -263,40 +410,33 @@ class Controls:
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
 
     # Ford/Lincoln: when driving in the outermost lane (road edge/guardrail), bias away slightly to avoid
-    # hugging the edge. This is gated on road-edge detection and confident inner lane lines.
-    if (not CC.latActive) or getattr(self.CP, "brand", "") != "ford" or CS.leftBlinker or CS.rightBlinker:
+    # hugging the edge. The same Auto avoidance switch also enables side-intrusion bias when an adjacent
+    # vehicle approaches the current lane boundary; both are lane-within corrections, not lane changes.
+    auto_avoid_enabled = bool(self._dp_auto_avoid_enabled)
+    lc_state = getattr(model_v2.meta, "laneChangeState", LaneChangeState.off)
+    if (not CC.latActive) or getattr(self.CP, "brand", "") != "ford" or CS.leftBlinker or CS.rightBlinker or lc_state != LaneChangeState.off:
       self._road_edge_curv_correction = 0.0
+      self._side_intrusion_curv_correction = 0.0
     else:
       raw_corr = 0.0
+      raw_side_corr = 0.0
       if CS.vEgo > 8.0:
         left_edge, right_edge = _road_edge_detected(model_v2)
         raw_corr = _road_edge_lane_offset_curvature(model_v2, CS.vEgo, left_edge, right_edge)
+        det_fresh = (time.monotonic() - self._side_intrusion_last_update_t) <= SIDE_INTRUSION_STALE_TIMEOUT_S
+        if auto_avoid_enabled and det_fresh:
+          raw_side_corr = _side_intrusion_curvature(model_v2, self._side_intrusion_det_payload, CS.vEgo)
 
       alpha = 0.02  # ~0.5s time constant @100Hz
       self._road_edge_curv_correction = (1.0 - alpha) * float(self._road_edge_curv_correction) + alpha * float(raw_corr)
-      new_desired_curvature = float(new_desired_curvature) + float(self._road_edge_curv_correction)
-      # ===== Sensor fusion layer (radar + lidar + BSM)=====
-      try:
-        radar_d = getattr(CS, "radar_dRel", None)
-        radar_v = getattr(CS, "radar_vRel", None)
-        lidar_left = getattr(CS, "lidar_left_dist", None)
-        lidar_right = getattr(CS, "lidar_right_dist", None)
-
-        if radar_d or lidar_left or lidar_right:
-          fusion = 0.0
-
-          if lidar_left and 0.1 < lidar_left < 2.0:
-            fusion += 0.0006
-          if lidar_right and 0.1 < lidar_right < 2.0:
-            fusion -= 0.0006
-
-          alpha = 0.05
-          self._fusion_curv = (1 - alpha) * self._fusion_curv + alpha * fusion
-
-          new_desired_curvature += self._fusion_curv
-
-      except:
-        pass
+      if auto_avoid_enabled:
+        self._side_intrusion_curv_correction = (
+          (1.0 - SIDE_INTRUSION_FILTER_ALPHA) * float(self._side_intrusion_curv_correction) +
+          SIDE_INTRUSION_FILTER_ALPHA * float(raw_side_corr)
+        )
+      else:
+        self._side_intrusion_curv_correction = 0.0
+      new_desired_curvature = float(new_desired_curvature) + float(self._road_edge_curv_correction) + float(self._side_intrusion_curv_correction)
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = get_lat_delay(self.params, self.sm["liveDelay"].lateralDelay, self.CP.steerActuatorDelay) + LAT_SMOOTH_SECONDS
