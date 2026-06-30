@@ -656,31 +656,23 @@
     ],
     "package": "Co-Pilot360 Assist 2.0"
   },
-  "Ford Focus 2018-22": {
+  "Ford Focus 2018": {
     "platform": "FORD_FOCUS_MK4",
     "make": "Ford",
     "brand": "ford",
     "model": "Focus",
     "year": [
-      "2018",
-      "2019",
-      "2020",
-      "2021",
-      "2022"
+      "2018"
     ],
     "package": "Adaptive Cruise Control with Lane Centering"
   },
-  "Ford Focus Hybrid 2018-22": {
+  "Ford Focus Hybrid 2018": {
     "platform": "FORD_FOCUS_MK4",
     "make": "Ford",
     "brand": "ford",
     "model": "Focus Hybrid",
     "year": [
-      "2018",
-      "2019",
-      "2020",
-      "2021",
-      "2022"
+      "2018"
     ],
     "package": "Adaptive Cruise Control with Lane Centering"
   },
@@ -1613,17 +1605,6 @@
       "2024"
     ],
     "package": "Highway Driving Assist II"
-  },
-  "Hyundai Ioniq 6 (without HDA II) 2023-24": {
-    "platform": "HYUNDAI_IONIQ_6",
-    "make": "Hyundai",
-    "brand": "hyundai",
-    "model": "Ioniq 6 (without HDA II)",
-    "year": [
-      "2023",
-      "2024"
-    ],
-    "package": "Highway Driving Assist"
   },
   "Hyundai Ioniq Electric 2019": {
     "platform": "HYUNDAI_IONIQ_EV_LTD",
@@ -2724,6 +2705,19 @@
     ],
     "package": "All"
   },
+  "Lincoln Nautilus 2018-20": {
+    "platform": "FORD_EXPLORER_MK6",
+    "make": "Lincoln",
+    "brand": "ford",
+    "model": "Nautilutus",
+    "year": [
+      "2018",
+      "2019",
+      "2020",
+      "2021"     
+    ],
+    "package": "Adaptive Cruise Control with Lane Centering"
+   },
   "Lincoln Aviator 2020-24": {
     "platform": "FORD_EXPLORER_MK6",
     "make": "Lincoln",
@@ -2808,7 +2802,7 @@
     ],
     "package": "All"
   },
-  "Nissan Altima 2019-24": {
+  "Nissan Altima 2019-20, 2024": {
     "platform": "NISSAN_ALTIMA",
     "make": "Nissan",
     "brand": "nissan",
@@ -2816,9 +2810,6 @@
     "year": [
       "2019",
       "2020",
-      "2021",
-      "2022",
-      "2023",
       "2024"
     ],
     "package": "ProPILOT Assist"
