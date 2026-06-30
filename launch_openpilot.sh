@@ -2,6 +2,15 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# ==========================
+export ATHENA_HOST='wss://athena.konik.ai/'
+export API_HOST='https://api.konik.ai'
+export MAPBOX_TOKEN='pk.eyJ1IjoibXJvbmVjYyIsImEiOiJjbHhqbzlkbTYxNXUwMmtzZjdoMGtrZnVvIn0.SC7GNLtMFUGDgC2bAZcKzg'
+export SKIP_FW_QUERY=1
+export NAVD=true
+export NAVMODEL=true
+
+# ==========================
 # On any failure, run the fallback launcher
 trap 'exec ./launch_chffrplus.sh' ERR
 C3_LAUNCH_SH="./sunnypilot/system/hardware/c3/launch_chffrplus.sh"
