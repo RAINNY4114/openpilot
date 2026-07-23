@@ -88,16 +88,16 @@ static bool ford_get_quality_flag_valid(const CANPacket_t *msg) {
 
 // Curvature rate limits
 #define FORD_LIMITS(limit_lateral_acceleration) {                                               \
-  .max_angle = 1500,          /* 0.02 curvature */                                              \
+  .max_angle = 1700,          /* 0.02 curvature */                                              \
   .angle_deg_to_can = 50000,  /* 1 / (2e-5) rad to can */                                       \
-  .max_angle_error = 600,     /* 0.002 * FORD_STEERING_LIMITS.angle_deg_to_can */               \
+  .max_angle_error = 800,     /* 0.002 * FORD_STEERING_LIMITS.angle_deg_to_can */               \
   .angle_rate_up_lookup = {                                                                     \
     {5., 25., 40.},                                                                             \
-    {0.010,0.006,0.003}                                                                   \
+    {0.012,0.008,0.004}                                                                  \
   },                                                                                            \
   .angle_rate_down_lookup = {                                                                   \
     {5., 25., 40.},                                                                             \
-    {0.010,0.006,0.003}                                                                 \
+    {0.012,0.008,0.004}                                                            \
   },                                                                                            \
                                                                                                 \
   /* no blending at low speed due to lack of torque wind-up and inaccurate current curvature */ \
