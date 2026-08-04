@@ -269,9 +269,16 @@ class Controls:
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP)
 
-    self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2','radarState',
-    'lidarState', 'selfdriveState', 'liveCalibration', 'livePose', 'longitudinalPlan', 'carState', 'carOutput',
+    self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2','selfdriveState', 'liveCalibration', 'livePose', 'longitudinalPlan', 'carState', 'carOutput',
                                     'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'customReservedRawData0'], poll='carState')
+    if 'radarState' in messaging.service_list:
+        services.append('radarState')
+    if 'lidarState' in messaging.service_list:
+        services.append('lidarState')
+    self.sm = messaging.SubMaster(
+        services,
+        poll='carState'
+    )
     self.pm = messaging.PubMaster(['carControl', 'controlsState', 'dpControlsState'])
 
     self.steer_limited_by_safety = False
