@@ -369,6 +369,11 @@ class Controls:
                                            torque_params.frictionCoefficientFiltered)
 
     long_plan = self.sm['longitudinalPlan']
+    scene_speed_limit = \
+        scene_hint.get(
+            "speed_limit",
+            None
+        )
     model_v2 = self.sm['modelV2']
 
     CC = car.CarControl.new_message()
