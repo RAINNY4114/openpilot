@@ -350,6 +350,7 @@ class Controls:
 
   def state_control(self):
     CS = self.sm['carState']
+    scene_hint = self.scene_hint
 
     # Update VehicleModel
     lp = self.sm['liveParameters']
