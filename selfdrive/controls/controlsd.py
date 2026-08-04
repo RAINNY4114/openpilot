@@ -543,13 +543,11 @@ class Controls:
     #       sm.all_checks(), but this creates a circular dependency
 
     # dpControlsState
-    if self.scene_hint:
+    if time.monotonic()-self.last_scene_log>2:
         cloudlog.info(
-            f"""
-    Scene:
-    {self.scene_hint}
-    """
+        f"Scene:{self.scene_hint}"
         )
+    self.last_scene_log=time.monotonic()
     dat = messaging.new_message('dpControlsState')
     dat.valid = True
     ncs = dat.dpControlsState
