@@ -427,6 +427,13 @@ class Controls:
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+    # =====================================
+    # OVA Oncoming Vehicle Avoidance
+    # =====================================
+    if scene_hint.get("oncoming", False):
+        if CS.vEgo > 10:
+        # 向右轻微避让
+            new_desired_curvature += 0.0005
 
     # Ford/Lincoln: when driving in the outermost lane (road edge/guardrail), bias away slightly to avoid
     # hugging the edge. The same Auto avoidance switch also enables side-intrusion bias when an adjacent
