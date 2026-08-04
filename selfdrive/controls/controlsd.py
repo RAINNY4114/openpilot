@@ -427,6 +427,12 @@ class Controls:
 
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
+    if scene_speed_limit is not None:
+        if CS.vEgo > scene_speed_limit * CV.KPH_TO_MS:
+            actuators.accel = min(
+                actuators.accel,
+                -0.5
+            )
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
 
     # Steering PID loop and lateral MPC
