@@ -532,6 +532,13 @@ class Controls:
     #       sm.all_checks(), but this creates a circular dependency
 
     # dpControlsState
+    if self.scene_hint:
+        cloudlog.info(
+            f"""
+    Scene:
+    {self.scene_hint}
+    """
+        )
     dat = messaging.new_message('dpControlsState')
     dat.valid = True
     ncs = dat.dpControlsState
