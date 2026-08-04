@@ -431,7 +431,14 @@ class Controls:
     # Ford/Lincoln: when driving in the outermost lane (road edge/guardrail), bias away slightly to avoid
     # hugging the edge. The same Auto avoidance switch also enables side-intrusion bias when an adjacent
     # vehicle approaches the current lane boundary; both are lane-within corrections, not lane changes.
-    auto_avoid_enabled = bool(self._dp_auto_avoid_enabled)
+    auto_avoid_enabled = bool(
+        self._dp_auto_avoid_enabled
+        or
+        scene_hint.get(
+            "avoid",
+            False
+        )
+    )
     lc_state = getattr(model_v2.meta, "laneChangeState", LaneChangeState.off)
     if (not CC.latActive) or getattr(self.CP, "brand", "") != "ford" or CS.leftBlinker or CS.rightBlinker or lc_state != LaneChangeState.off:
       self._road_edge_curv_correction = 0.0
