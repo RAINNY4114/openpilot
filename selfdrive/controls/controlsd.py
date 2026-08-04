@@ -283,6 +283,9 @@ class Controls:
 
     self.LoC = LongControl(self.CP)
     self.VM = VehicleModel(self.CP)
+    # Sensor Fusion Scene Module
+    self.scene_understanding = SceneUnderstanding()
+    self.scene_hint = {}
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
       self.LaC = LatControlAngle(self.CP, self.CI, DT_CTRL)
