@@ -309,6 +309,20 @@ class Controls:
 
   def update(self):
     self.sm.update(15)
+    # ==========================================
+    # Scene Understanding Update
+    # Camera + MR76 Radar + Lidar
+    # ==========================================
+    try:
+      scene_type, objects, road = \
+          self.scene_understanding.update(self.sm)
+      self.scene_hint = \
+          self.scene_understanding.get_decision_hint()
+    except Exception as e:
+      cloudlog.warning(
+          f"SceneUnderstanding error: {e}"
+      )
+      self.scene_hint = {}
     now_mono = time.monotonic()
     if now_mono - self._dp_auto_avoid_last_param_check >= 1.0:
       self._dp_auto_avoid_last_param_check = now_mono
