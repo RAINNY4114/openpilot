@@ -443,7 +443,7 @@ class Controls:
     # =====================================
     if scene_hint.get("oncoming", False):
         if CS.vEgo > 10:
-        # 向右轻微避让
+            # 向右轻微避让
             new_desired_curvature += 0.0005
 
     # Ford/Lincoln: when driving in the outermost lane (road edge/guardrail), bias away slightly to avoid
