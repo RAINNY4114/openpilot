@@ -23,6 +23,7 @@ from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.livedelay.helpers import get_lat_delay
+from openpilot.selfdrive.controls.lib.SceneUnderstanding_v2 import SceneUnderstanding
 State = log.SelfdriveState.OpenpilotState
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
