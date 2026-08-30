@@ -488,18 +488,6 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "CUPRA Born 2021-23": {
-    "platform": "CUPRA_BORN_MK1",
-    "make": "CUPRA",
-    "brand": "volkswagen",
-    "model": "Born",
-    "year": [
-      "2021",
-      "2022",
-      "2023"
-    ],
-    "package": "Adaptive Cruise Control (ACC) & Lane Assist"
-  },
   "Dodge Durango 2020-21": {
     "platform": "DODGE_DURANGO",
     "make": "Dodge",
@@ -668,31 +656,23 @@
     ],
     "package": "Co-Pilot360 Assist 2.0"
   },
-  "Ford Focus 2018-22": {
+  "Ford Focus 2018": {
     "platform": "FORD_FOCUS_MK4",
     "make": "Ford",
     "brand": "ford",
     "model": "Focus",
     "year": [
-      "2018",
-      "2019",
-      "2020",
-      "2021",
-      "2022"
+      "2018"
     ],
     "package": "Adaptive Cruise Control with Lane Centering"
   },
-  "Ford Focus Hybrid 2018-22": {
+  "Ford Focus Hybrid 2018": {
     "platform": "FORD_FOCUS_MK4",
     "make": "Ford",
     "brand": "ford",
     "model": "Focus Hybrid",
     "year": [
-      "2018",
-      "2019",
-      "2020",
-      "2021",
-      "2022"
+      "2018"
     ],
     "package": "Adaptive Cruise Control with Lane Centering"
   },
@@ -1033,7 +1013,7 @@
     ],
     "package": "All"
   },
-  "Honda Accord Hybrid 2023-26": {
+  "Honda Accord Hybrid 2023-25": {
     "platform": "HONDA_ACCORD_11G",
     "make": "Honda",
     "brand": "honda",
@@ -1041,20 +1021,17 @@
     "year": [
       "2023",
       "2024",
-      "2025",
-      "2026"
+      "2025"
     ],
     "package": "All"
   },
-  "Honda City (Brazil only) 2023-25": {
+  "Honda City (Brazil only) 2023": {
     "platform": "HONDA_CITY_7G",
     "make": "Honda",
     "brand": "honda",
     "model": "City (Brazil only)",
     "year": [
-      "2023",
-      "2024",
-      "2025"
+      "2023"
     ],
     "package": "All"
   },
@@ -1082,7 +1059,7 @@
     ],
     "package": "All"
   },
-  "Honda Civic 2022-26": {
+  "Honda Civic 2022-24": {
     "platform": "HONDA_CIVIC_2022",
     "make": "Honda",
     "brand": "honda",
@@ -1090,9 +1067,7 @@
     "year": [
       "2022",
       "2023",
-      "2024",
-      "2025",
-      "2026"
+      "2024"
     ],
     "package": "All"
   },
@@ -1174,7 +1149,7 @@
       "2020",
       "2021"
     ],
-    "package": "All"
+    "package": "Honda Sensing"
   },
   "Honda CR-V 2015-16": {
     "platform": "HONDA_CRV",
@@ -1630,17 +1605,6 @@
       "2024"
     ],
     "package": "Highway Driving Assist II"
-  },
-  "Hyundai Ioniq 6 (without HDA II) 2023-24": {
-    "platform": "HYUNDAI_IONIQ_6",
-    "make": "Hyundai",
-    "brand": "hyundai",
-    "model": "Ioniq 6 (without HDA II)",
-    "year": [
-      "2023",
-      "2024"
-    ],
-    "package": "Highway Driving Assist"
   },
   "Hyundai Ioniq Electric 2019": {
     "platform": "HYUNDAI_IONIQ_EV_LTD",
@@ -2741,6 +2705,19 @@
     ],
     "package": "All"
   },
+  "Lincoln Nautilus 2018-21": {
+    "platform": "FORD_EXPLORER_MK6",
+    "make": "Lincoln",
+    "brand": "ford",
+    "model": "Nautilutus",
+    "year": [
+      "2018",
+      "2019",
+      "2020",
+      "2021"     
+    ],
+    "package": "Adaptive Cruise Control with Lane Centering"
+   },
   "Lincoln Aviator 2020-24": {
     "platform": "FORD_EXPLORER_MK6",
     "make": "Lincoln",
@@ -2825,7 +2802,7 @@
     ],
     "package": "All"
   },
-  "Nissan Altima 2019-24": {
+  "Nissan Altima 2019-20, 2024": {
     "platform": "NISSAN_ALTIMA",
     "make": "Nissan",
     "brand": "nissan",
@@ -2833,9 +2810,6 @@
     "year": [
       "2019",
       "2020",
-      "2021",
-      "2022",
-      "2023",
       "2024"
     ],
     "package": "ProPILOT Assist"
@@ -2845,21 +2819,6 @@
     "make": "Nissan",
     "brand": "nissan",
     "model": "Leaf",
-    "year": [
-      "2018",
-      "2019",
-      "2020",
-      "2021",
-      "2022",
-      "2023"
-    ],
-    "package": "ProPILOT Assist"
-  },
-  "Nissan Leaf IC 2018-23": {
-    "platform": "NISSAN_LEAF_IC",
-    "make": "Nissan",
-    "brand": "nissan",
-    "model": "Leaf IC",
     "year": [
       "2018",
       "2019",
@@ -4240,29 +4199,6 @@
       "2022",
       "2023",
       "2024"
-    ],
-    "package": "Adaptive Cruise Control (ACC) & Lane Assist"
-  },
-  "Volkswagen ID.4 2021-23": {
-    "platform": "VOLKSWAGEN_ID4_MK1",
-    "make": "Volkswagen",
-    "brand": "volkswagen",
-    "model": "ID.4",
-    "year": [
-      "2021",
-      "2022",
-      "2023"
-    ],
-    "package": "Adaptive Cruise Control (ACC) & Lane Assist"
-  },
-  "Volkswagen ID.4 2024-25": {
-    "platform": "VOLKSWAGEN_ID4_MK2",
-    "make": "Volkswagen",
-    "brand": "volkswagen",
-    "model": "ID.4",
-    "year": [
-      "2024",
-      "2025"
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
