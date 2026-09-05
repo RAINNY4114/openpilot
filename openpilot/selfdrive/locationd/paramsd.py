@@ -163,7 +163,7 @@ class VehicleParamsLearner:
     vehicleParameters = msg.vehicleParameters
     vehicleParameters.posenetValid = True
     vehicleParameters.sensorValid = sensors_valid
-    vehicleParameters.steerRatio = float(x[States.STEER_RATIO].item())
+    vehicleParameters.steerRatio = 16.8
     vehicleParameters.stiffnessFactor = float(x[States.STIFFNESS].item())
     vehicleParameters.roll = float(self.roll)
     vehicleParameters.angleOffsetAverageDeg = float(self.avg_angle_offset)
