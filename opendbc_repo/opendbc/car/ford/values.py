@@ -201,34 +201,10 @@ class CAR(Platforms):
     CarSpecs(mass=2000, wheelbase=3.27, steerRatio=17.0),
   )
 
-  # Lincoln Nautilus 2018-21
-  #
-  # Native Ford platform/fingerprint is retained.
-  # MR76 is only selected as the radar decoder.
   LINCOLN_NAUTILUS = FordPlatformConfig(
-    [
-      FordCarDocs(
-        "Lincoln Nautilus 2018-21",
-        "Adaptive Cruise Control with Lane Centering",
-      ),
-    ],
-    CarSpecs(
-      mass=2050,
-      wheelbase=3.025,
-      steerRatio=16.8,
-    ),
+    [FordCarDocs("Lincoln Nautilus 2018-21", "Adaptive Cruise Control with Lane Centering")],
+    CarSpecs(mass=2050, wheelbase=3.025, steerRatio=19.33),
   )
-
-
-# MR76 is decoded directly from raw CAN in RadarInterface.
-#
-# Do NOT add u_radar.dbc here.
-# Do NOT create a separate LINCOLN_NAUTILUS_MR76 platform.
-CAR.LINCOLN_NAUTILUS.dbc_dict = {
-  Bus.pt: 'ford_lincoln_base_pt',
-  Bus.radar: RADAR.MR76,
-}
-
 
 # FW response contains a combined software and part number
 # A-Z except no I, O or W
