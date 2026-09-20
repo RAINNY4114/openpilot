@@ -1,0 +1,1450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AMAPNAVI 参数设置</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: white;
+            font-family: Arial, sans-serif;
+            padding: 10px;
+            line-height: 1.4;
+            font-size: 14px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 12px;
+            background: #2d2d2d;
+            border-radius: 8px;
+            flex-shrink: 0;
+        }
+
+        .header h1 {
+            color: #4CAF50;
+            margin-bottom: 8px;
+            font-size: clamp(1.0rem, 4vw, 1.5rem);
+        }
+
+        .header p {
+            color: #ccc;
+            margin-bottom: 10px;
+            font-size: clamp(0.8rem, 3vw, 1rem);
+        }
+
+        .search-container {
+            margin-bottom: 15px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #1a1a1a;
+            padding: 5px 0;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #555;
+            border-radius: 5px;
+            background: #2d2d2d;
+            color: white;
+            font-size: clamp(0.6rem, 3vw, 0.8rem);
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+
+        .params-container {
+            background: #2d2d2d;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .category-title {
+            margin: 15px 0 10px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            font-weight: bold;
+            color: white;
+        }
+
+        .category-title::before {
+            content: '▶';
+            margin-right: 8px;
+            font-size: 12px;
+            transition: transform 0.3s;
+        }
+
+        .category-title.expanded::before {
+            transform: rotate(90deg);
+        }
+
+        .category-content {
+            display: none;
+        }
+
+        .category-content.expanded {
+            display: block;
+        }
+
+        .param-item {
+            margin: 10px 0;
+            padding: 10px;
+            background: #333;
+            border-radius: 5px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .param-label {
+            color: #4CAF50;
+            font-weight: bold;
+            font-size: 14px;
+            min-width: 180px;
+            margin-right: 10px;
+        }
+
+        .param-controls {
+            display: flex;
+            align-items: center;
+            flex: 1;
+        }
+        .param-controls > * {
+            margin-right: 10px;
+        }
+        .param-controls > *:last-child {
+            margin-right: 0;
+        }
+
+        .param-input {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #444;
+            border-radius: 4px;
+            background: #2d2d2d;
+            color: white;
+            font-size: 13px;
+            min-width: 80px;
+            text-align: center;
+            -moz-appearance: textfield;
+            outline: none;
+            border: none;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .param-input:focus {
+            outline: none;
+            border: none;
+            box-shadow: none;
+        }
+
+        .param-input::-webkit-outer-spin-button,
+        .param-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .param-select {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            background: #2d2d2d;
+            color: white;
+            font-size: 13px;
+            min-width: 120px;
+        }
+
+        .param-number-controls {
+            display: flex;
+            align-items: center;
+            background: #3a3a3a;
+            border-radius: 4px;
+            padding: 4px;
+        }
+
+        .number-btn {
+            background: #555;
+            color: white;
+            border: none;
+            width: 26px;
+            height: 26px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            margin-right: 5px;
+        }
+        .number-btn:last-child {
+            margin-right: 0;
+        }
+
+        .number-btn:hover {
+            background: #666;
+        }
+
+        .param-info {
+            flex-basis: 100%;
+            margin-top: 8px;
+            color: #ccc;
+            font-size: 0.8rem;
+        }
+
+        .param-description {
+            margin-bottom: 4px;
+            line-height: 1.75;
+        }
+
+        .param-default {
+            color: #9fadfc;
+        }
+
+        .buttons {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 15px;
+            position: sticky;
+            bottom: 0;
+            z-index: 100;
+            background: #1a1a1a;
+            padding: 10px 0;
+        }
+
+        .save-btn, .reset-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s;
+            margin: 0 5px;
+        }
+
+        .save-btn {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .save-btn:hover {
+            background: #45a049;
+        }
+
+        .reset-btn {
+            background: #ff9800;
+            color: white;
+        }
+
+        .reset-btn:hover {
+            background: #e68900;
+        }
+
+        .status {
+            text-align: center;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+            display: none;
+            font-weight: bold;
+            font-size: 13px;
+            position: sticky;
+            bottom: 70px;
+            z-index: 1000;
+            background: #1a1a1a;
+        }
+
+        .success {
+            background: rgba(76, 175, 80, 0.6);
+            color: #fff;
+            border: 1px solid #4CAF50;
+        }
+
+        .error {
+            background: rgba(244, 67, 54, 0.8);
+            color: #fff;
+            border: 1px solid #f44336;
+        }
+
+        .no-results {
+            text-align: center;
+            padding: 15px;
+            color: #ccc;
+            display: none;
+        }
+
+        .expand-all {
+            text-align: right;
+            margin-bottom: 10px;
+            position: sticky;
+            top: 45px;
+            z-index: 99;
+            background: #1a1a1a;
+            padding: 5px 0;
+        }
+
+        .expand-btn {
+            background: transparent;
+            color: #4CAF50;
+            border: 1px solid #4CAF50;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 6px;
+        }
+
+        .expand-btn:first-child {
+            margin-left: 0;
+        }
+
+        .subgroup {
+            margin-bottom: 15px;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .subgroup-title {
+            padding: 8px 12px;
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+        }
+
+        .highway-subgroup .subgroup-title {
+            background-color: #E91E63;
+            text-align: center;
+        }
+
+        .normal-road-subgroup .subgroup-title {
+            background-color: #9C27B0;
+            text-align: center;
+        }
+
+        .subgroup-content {
+            padding: 10px;
+        }
+
+        .highway-subgroup .subgroup-content {
+            background: rgba(233, 30, 99, 0.4);
+        }
+
+        .normal-road-subgroup .subgroup-content {
+            background: rgba(156, 39, 176, 0.4);
+        }
+
+        .subgroup-content .param-item {
+            background: transparent !important;
+            margin: 8px 0;
+        }
+
+        @media (max-width: 768px) {
+            .param-item {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .param-label {
+                min-width: auto;
+                margin-right: 0;
+                margin-bottom: 10px;
+            }
+
+            .param-controls {
+                width: 100%;
+            }
+
+            .save-btn, .reset-btn {
+                margin: 5px;
+            }
+        }
+        .connection-info {
+            text-align: center;
+            color: #888;
+            margin-top: 15px;
+            font-size: clamp(0.7rem, 2.5vw, 0.85rem);
+            padding: 0 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚙️ AMAPNAVI 参数设置</h1>
+            <p>根据参数下面的说明设置适合的值</p>
+        </div>
+
+        <div class="search-container">
+            <input type="text" class="search-input" id="search-input" placeholder="搜索参数名称或描述...">
+        </div>
+        <div class="expand-all">
+            <button class="expand-btn" onclick="exportConfig()">备份</button>
+            <button class="expand-btn" onclick="pickConfigFile()">恢复</button>
+            <input
+                type="file"
+                id="configFileInput"
+                accept=".json,application/json"
+                style="display:none"
+                onchange="onConfigFileSelected(event)"
+            >
+            <button class="expand-btn" id="expand-all-btn">展开参数</button>
+            <button class="expand-btn" id="collapse-all-btn" style="display:none;">折叠所有参数</button>
+        </div>
+
+        <div class="params-container" id="params-container">
+        </div>
+
+        <div class="no-results" id="no-results">
+            没有找到匹配的参数
+        </div>
+
+        <div class="status" id="status-message"></div>
+
+        <div class="buttons">
+            <button class="save-btn" onclick="saveParams()">💾 保存参数设置</button>
+            <button class="reset-btn" onclick="resetParams()">🔄 恢复默认参数</button>
+        </div>
+
+        <div class="connection-info">
+            系统运行中 | 访问地址: <span id="nav_params-ip">-</span>:8088/nav_params
+        </div>
+    </div>
+
+    <script>
+        // 使用ES5兼容的语法
+        var paramConfig = {
+            "DisableBlindSpot": {
+                chineseName: "禁用原车盲区信号(0)",
+                defaultValue: 0,
+                description: "0:不禁用,1:禁用",
+                inputRange: [0, 1],
+                uiType: "select",
+                options: [
+                    { value: 0, text: "不禁用原车盲区" },
+                    { value: 1, text: "禁用原车盲区" }
+                ],
+                category: "公共参数设置"
+            },
+            "EnableCruiseStateShow": {
+                chineseName: "显示巡航小蓝灯(1)",
+                defaultValue: 1,
+                description: "0:不显示,1:显示",
+                inputRange: [0, 1],
+                uiType: "select",
+                options: [
+                    { value: 0, text: "不显示巡航状态" },
+                    { value: 1, text: "显示巡航状态" }
+                ],
+                category: "公共参数设置"
+            },
+            "DynamicBlindRange": {
+                chineseName: "动态盲区宽度",
+                defaultValue: 0,
+                description: "盲区的侧面宽度是否动态调整",
+                inputRange: [0, 2],
+                uiType: "select",
+                options: [
+                    { value: 0, text: "盲区宽度固定" },
+                    { value: 1, text: "导航时动态调整盲区宽度" },
+                    { value: 2, text: "动态调整盲区宽度" }
+                ],
+                category: "公共参数设置"
+            },
+            "DynamicBlindDistance": {
+                chineseName: "动态盲区距离",
+                defaultValue: 0,
+                description: "是否通过前后车的速度和时间计算允许变道的距离",
+                inputRange: [0, 2],
+                uiType: "select",
+                options: [
+                    { value: 0, text: "固定的盲区距离" },
+                    { value: 1, text: "导航变道时动态盲区距离" },
+                    { value: 2, text: "车速时距动态盲区距离" }
+                ],
+                category: "公共参数设置"
+            },
+            "LidarBsdDelayTime": {
+                chineseName: "激光雷达侧面车道有车延时(x0.1s)",
+                defaultValue: 10,
+                description: "当激光雷达探测侧面车道有车信号消失后，经过延时的秒数后允许变道",
+                inputRange: [0, 100],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+            "LidarFrontVDistTime": {
+                chineseName: "激光雷达侧前方有车允许变道绝对速度时距(x0.1s)",
+                defaultValue: -50,
+                description: "当与激光雷达侧前方车辆的距离大于'本车速度x时间'时允许变道，单位0.1秒;如果设置为负值，表示绝对距离(单位为0.1m)，如-100，表示绝对距离大于10米时允许变道",
+                inputRange: [-500, 50],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+            "LidarFrontVRelDistTime": {
+                chineseName: "激光雷达侧前方有车允许变道相对速度时距(x0.1s)",
+                defaultValue: 40,
+                description: "当'本车相对于侧前方车辆的速度差x时间'小于两车距离时，允许变道，单位0.1秒",
+                inputRange: [0, 200],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+            "LidarBehindVDistTime": {
+                chineseName: "激光雷达侧后方有车允许变道的绝对速度时距(x0.1s)",
+                defaultValue: -100,
+                description: "当与激光雷达侧后方车辆的距离大于'对方速度x时间'时允许变道，单位0.1秒;如果设置为负值，表示绝对距离(单位为0.1m)，如-100，表示绝对距离大于10米时允许变道",
+                inputRange: [-500, 50],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+            "LidarBehindVRelDistTime": {
+                chineseName: "激光雷达侧后方有车允许变道的相对速度时距(x0.1s)",
+                defaultValue: 40,
+                description: "当'侧后方车辆的相对于本车的速度差x时间'小于两车距离时，允许变道，单位0.1秒",
+                inputRange: [0, 200],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+            "LaneLineDelayTime": {
+                chineseName: "实线阻止变道延时(x0.1s)",
+                defaultValue: 10,
+                description: "当实线信号消失后，经过延时的秒数后允许变道",
+                inputRange: [0, 100],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+            "StockBlinkerCtrl": {
+                chineseName: "外接控制原车转向拨杆(0)",
+                defaultValue: 0,
+                description: "0:关闭，1:打开",
+                inputRange: [0, 1],
+                uiType: "select",
+                options: [
+                    { value: 0, text: "关闭" },
+                    { value: 1, text: "打开" }
+                ],
+                category: "公共参数设置"
+            },
+            "ShowDebugLog": {
+                chineseName: "调试信息显示",
+                defaultValue: 0,
+                description: "设置不同的值，输出不同的调试信息",
+                inputRange: [0, 256],
+                step: 1,
+                uiType: "number",
+                category: "公共参数设置"
+            },
+
+            "LidarMinClearance": {
+                chineseName: "侧向目标最小安全间距(x0.1m)",
+                defaultValue: 40,
+                description: "侧向目标与本车的最小纵向间距，低于该值判定为危险；速度时距算出的安全距离也不会小于这个值",
+                inputRange: [10, 150],
+                step: 5,
+                uiType: "number",
+                category: "盲区风险评估"
+            },
+            "LidarTtcThreshold": {
+                chineseName: "侧向目标危险TTC(x0.1s)",
+                defaultValue: 25,
+                description: "侧向目标正在接近时，碰撞时间(TTC)低于该值判定为危险；越大越保守",
+                inputRange: [10, 60],
+                step: 1,
+                uiType: "number",
+                category: "盲区风险评估"
+            },
+            "LidarRiskHorizon": {
+                chineseName: "侧向目标预测窗口(x0.1s)",
+                defaultValue: 30,
+                description: "预测侧向目标未来多少秒内的最近距离，应覆盖一次完整变道所需时间",
+                inputRange: [10, 80],
+                step: 1,
+                uiType: "number",
+                category: "盲区风险评估"
+            },
+
+            "BsdTimeHeadway": {
+                chineseName: "变道所需车头时距(x0.1s)",
+                defaultValue: 12,
+                description: "空档 = 本车速度 x 该时距，加上下面的额外余量；越大要求的空档越大",
+                inputRange: [5, 30],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdMinGap": {
+                chineseName: "变道所需绝对最小空档(x0.1m)",
+                defaultValue: 80,
+                description: "低速时兜底的最小空档，与时距算出的值取大者",
+                inputRange: [30, 200],
+                step: 5,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdMergeMargin": {
+                chineseName: "变道额外余量(x0.1m)",
+                defaultValue: 30,
+                description: "在所需空档之上再留出的余量，给变道动作本身留空间",
+                inputRange: [0, 100],
+                step: 5,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdRearDangerGap": {
+                chineseName: "后车贴太近禁止减速的距离(x0.1m)",
+                defaultValue: 60,
+                description: "后车距离小于该值且在接近时，禁止通过减速让行（避免被追尾）",
+                inputRange: [20, 150],
+                step: 5,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdSpeedMargin": {
+                chineseName: "与目标车的期望速度差(km/h)",
+                defaultValue: 6,
+                description: "让行后与目标车保持的速度差：加速抢位要比后车快这么多，减速让行要比前车慢这么多",
+                inputRange: [0, 20],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdMaxSpeedup": {
+                chineseName: "最大加速让行幅度(km/h)",
+                defaultValue: 12,
+                description: "需要的加速量超过该值就放弃这次变道机会，维持车速等下一次",
+                inputRange: [0, 30],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdMaxSlowdown": {
+                chineseName: "最大减速让行幅度(km/h)",
+                defaultValue: 18,
+                description: "需要的减速量超过该值就放弃这次变道机会，维持车速等下一次",
+                inputRange: [0, 40],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdAccelLimit": {
+                chineseName: "让行加速变化率(x0.1 km/h/s)",
+                defaultValue: 15,
+                description: "加速让行时车速变化的快慢，越小越平顺",
+                inputRange: [3, 50],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdDecelLimit": {
+                chineseName: "让行减速变化率(x0.1 km/h/s)",
+                defaultValue: 25,
+                description: "减速让行时车速变化的快慢，越小越平顺",
+                inputRange: [3, 60],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+            "BsdCommitTime": {
+                chineseName: "让行决策保持时间(x0.1s)",
+                defaultValue: 25,
+                description: "决定加速抢位或减速让行后坚持的时间，避免在两种方案之间反复横跳",
+                inputRange: [0, 80],
+                step: 1,
+                uiType: "number",
+                category: "盲区让行参数"
+            },
+
+            "StockFrontBlindEnable": {
+                chineseName: "原车前侧盲区检测",
+                defaultValue: 1,
+                description: "用原车前雷达判断相邻车道是否有妨碍变道的目标（关闭时只使用模型的视觉结果）",
+                inputRange: [0, 1],
+                uiType: "select",
+                options: [
+                    { value: 0, text: "关闭" },
+                    { value: 1, text: "启用" }
+                ],
+                category: "原车前侧盲区"
+            },
+            "StockFrontLatMin": {
+                chineseName: "横向下限(x0.1m)",
+                defaultValue: 12,
+                description: "横向偏移小于该值视为还在本车道（前车），不算前侧盲区；实际取该值与半个车道宽的较大者",
+                inputRange: [0, 30],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontLatMax": {
+                chineseName: "横向上限硬顶(x0.1m)",
+                defaultValue: 50,
+                description: "横向偏移的绝对上限，防止把远处车道的车算进来",
+                inputRange: [20, 100],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontLatLaneFactor": {
+                chineseName: "横向上限倍数(x0.1倍车道宽)",
+                defaultValue: 18,
+                description: "横向上限 = 该倍数 x 车道宽（1.8=只认相邻车道），与上面的硬顶取较小者",
+                inputRange: [10, 30],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontDrelMin": {
+                chineseName: "纵向窗口-身后(x0.1m)",
+                defaultValue: -200,
+                description: "负值表示在本车身后多少米以内才纳入判断（如 -200 = 身后20米）",
+                inputRange: [-500, 0],
+                step: 10,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontDrelMax": {
+                chineseName: "纵向窗口-前方(x0.1m)",
+                defaultValue: 800,
+                description: "本车前方多少米以内才纳入判断（如 800 = 前方80米）",
+                inputRange: [100, 2000],
+                step: 50,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontTimeHeadway": {
+                chineseName: "安全时距(x0.1s)",
+                defaultValue: 15,
+                description: "安全纵向间距 = 本车速度 x 该时距，越大越保守",
+                inputRange: [5, 40],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontMinClearance": {
+                chineseName: "绝对最小间距(x0.1m)",
+                defaultValue: 40,
+                description: "低速时兜底的最小纵向间距，与时距算出的值取大者",
+                inputRange: [10, 150],
+                step: 5,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontTtc": {
+                chineseName: "危险TTC(x0.1s)",
+                defaultValue: 25,
+                description: "目标正在接近时，碰撞时间低于该值判定为危险（含后方快速追上来的目标）",
+                inputRange: [10, 60],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontHorizon": {
+                chineseName: "预测窗口(x0.1s)",
+                defaultValue: 30,
+                description: "按相对速度外推多少秒来算最近间距，应覆盖一次完整变道",
+                inputRange: [10, 80],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontOnTime": {
+                chineseName: "置位延时(x0.1s)",
+                defaultValue: 3,
+                description: "连续判定有风险达到该时间才置位，避免单帧误报导致闪烁",
+                inputRange: [0, 20],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+            "StockFrontOffTime": {
+                chineseName: "清除延时(x0.1s)",
+                defaultValue: 8,
+                description: "连续判定无风险达到该时间才清除，避免临界处来回跳",
+                inputRange: [0, 50],
+                step: 1,
+                uiType: "number",
+                category: "原车前侧盲区"
+            },
+        };
+
+        var categoryColors = {
+            "公共参数设置": "#3F51B5",
+            "盲区风险评估": "#2196F3",
+            "盲区让行参数": "#FF5722",
+            "高速公路参数": "#E91E63",
+            "普通公路参数": "#9C27B0",
+            "ATC参数": "#009688",
+            "速度参数": "#FF9800",
+            "原车前侧盲区": "#00BCD4",
+        };
+
+        var NavParamsData = {};
+        var expandedCategories = {};
+
+        function loadNavParams() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/nav_params_data', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            NavParamsData = JSON.parse(xhr.responseText);
+
+                            if (!NavParamsData || Object.keys(NavParamsData).length === 0) {
+                                for (var key in paramConfig) {
+                                    if (paramConfig.hasOwnProperty(key)) {
+                                        NavParamsData[key] = paramConfig[key].defaultValue;
+                                    }
+                                }
+                            }
+
+                            renderParams();
+                        } catch (error) {
+                            console.error('加载参数失败:', error);
+                            showStatus('加载参数失败: ' + error, 'error');
+
+                            for (var key in paramConfig) {
+                                if (paramConfig.hasOwnProperty(key)) {
+                                    NavParamsData[key] = paramConfig[key].defaultValue;
+                                }
+                            }
+                            renderParams();
+                        }
+                    } else {
+                        console.error('加载参数失败: ' + xhr.status);
+                        showStatus('加载参数失败: ' + xhr.status, 'error');
+
+                        for (var key in paramConfig) {
+                            if (paramConfig.hasOwnProperty(key)) {
+                                NavParamsData[key] = paramConfig[key].defaultValue;
+                            }
+                        }
+                        renderParams();
+                    }
+                }
+            };
+            xhr.send();
+        }
+
+        function renderParams() {
+            var container = document.getElementById('params-container');
+            var html = '';
+
+            var categories = {};
+            for (var key in paramConfig) {
+                if (paramConfig.hasOwnProperty(key)) {
+                    var category = paramConfig[key].category;
+                    if (!categories[category]) {
+                        categories[category] = [];
+                    }
+                    categories[category].push(key);
+                }
+            }
+
+            for (var category in categories) {
+                if (categories.hasOwnProperty(category)) {
+                    var categoryId = category.replace(/\s+/g, '-');
+                    var isExpanded = expandedCategories[category] || false;
+                    var categoryColor = categoryColors[category] || "#4CAF50";
+
+                    html += '<div class="category-title ' + (isExpanded ? 'expanded' : '') + '" data-category="' + category + '" style="background-color: ' + categoryColor + '">' +
+                        category +
+                    '</div>' +
+                    '<div class="category-content ' + (isExpanded ? 'expanded' : '') + '" id="' + categoryId + '">';
+
+                    if (category === "速度参数") {
+                        html += '<div class="subgroup highway-subgroup">' +
+                            '<div class="subgroup-title">高速公路速度参数</div>' +
+                            '<div class="subgroup-content">';
+
+                        var highwayKeys = categories[category];
+                        for (var i = 0; i < highwayKeys.length; i++) {
+                            var key = highwayKeys[i];
+                            if (key.indexOf('H') !== -1 || key.indexOf('Highway') !== -1) {
+                                var config = paramConfig[key];
+                                var value = NavParamsData[key] !== undefined ? NavParamsData[key] : config.defaultValue;
+
+                                html += '<div class="param-item" data-param-key="' + key + '">' +
+                                    '<div class="param-label">' + config.chineseName + '</div>' +
+                                    '<div class="param-controls">' +
+                                        generateInputField(key, config, value) +
+                                    '</div>' +
+                                    '<div class="param-info">' +
+                                        '<div class="param-description">' + config.description + '</div>' +
+                                        '<div class="param-default">默认值: ' + config.defaultValue + '</div>' +
+                                    '</div>' +
+                                '</div>';
+                            }
+                        }
+
+                        html += '</div>' +
+                        '</div>' +
+                        '<div class="subgroup normal-road-subgroup">' +
+                            '<div class="subgroup-title">普通公路速度参数</div>' +
+                            '<div class="subgroup-content">';
+
+                        var normalRoadKeys = categories[category];
+                        for (var j = 0; j < normalRoadKeys.length; j++) {
+                            var key = normalRoadKeys[j];
+                            if (key.indexOf('H') === -1 && key.indexOf('Highway') === -1) {
+                                var config = paramConfig[key];
+                                var value = NavParamsData[key] !== undefined ? NavParamsData[key] : config.defaultValue;
+
+                                html += '<div class="param-item" data-param-key="' + key + '">' +
+                                    '<div class="param-label">' + config.chineseName + '</div>' +
+                                    '<div class="param-controls">' +
+                                        generateInputField(key, config, value) +
+                                    '</div>' +
+                                    '<div class="param-info">' +
+                                        '<div class="param-description">' + config.description + '</div>' +
+                                        '<div class="param-default">默认值: ' + config.defaultValue + '</div>' +
+                                    '</div>' +
+                                '</div>';
+                            }
+                        }
+
+                        html += '</div>' +
+                        '</div>';
+                    } else {
+                        var categoryKeys = categories[category];
+                        for (var k = 0; k < categoryKeys.length; k++) {
+                            var key = categoryKeys[k];
+                            var config = paramConfig[key];
+                            var value = NavParamsData[key] !== undefined ? NavParamsData[key] : config.defaultValue;
+
+                            html += '<div class="param-item" data-param-key="' + key + '">' +
+                                '<div class="param-label">' + config.chineseName + '</div>' +
+                                '<div class="param-controls">' +
+                                    generateInputField(key, config, value) +
+                                '</div>' +
+                                '<div class="param-info">' +
+                                    '<div class="param-description">' + config.description + '</div>' +
+                                    '<div class="param-default">默认值: ' + config.defaultValue + '</div>' +
+                                '</div>' +
+                            '</div>';
+                        }
+                    }
+
+                    html += '</div>';
+                }
+            }
+
+            container.innerHTML = html;
+
+            setupCategoryToggles();
+            setupSearch();
+            disableInputFields();
+        }
+
+        function generateInputField(key, config, value) {
+            if (config.uiType === 'select') {
+                var options = '';
+                for (var i = 0; i < config.options.length; i++) {
+                    var option = config.options[i];
+                    var selected = option.value == value ? 'selected' : '';
+                    options += '<option value="' + option.value + '" ' + selected + '>' + option.text + '</option>';
+                }
+
+                return '<select class="param-select" id="' + key + '">' + options + '</select>';
+            } else if (config.uiType === 'number') {
+                return '<div class="param-number-controls">' +
+                    '<button type="button" class="number-btn" onclick="adjustNumber(\'' + key + '\', -' + config.step + ')">-</button>' +
+                    '<input type="number" class="param-input" id="' + key + '" ' +
+                           'value="' + value + '" min="' + config.inputRange[0] + '" ' +
+                           'max="' + config.inputRange[1] + '" step="' + config.step + '" readonly>' +
+                    '<button type="button" class="number-btn" onclick="adjustNumber(\'' + key + '\', ' + config.step + ')">+</button>' +
+                '</div>';
+            } else {
+                return '<input type="text" class="param-input" id="' + key + '" value="' + value + '" readonly>';
+            }
+        }
+
+        function disableInputFields() {
+            var inputs = document.querySelectorAll('.param-input');
+            for (var i = 0; i < inputs.length; i++) {
+                var input = inputs[i];
+
+                input.addEventListener('keydown', function(e) {
+                    e.preventDefault();
+                    return false;
+                });
+
+                input.addEventListener('paste', function(e) {
+                    e.preventDefault();
+                    return false;
+                });
+
+                input.addEventListener('drop', function(e) {
+                    e.preventDefault();
+                    return false;
+                });
+            }
+        }
+
+        function adjustNumber(id, step) {
+            var input = document.getElementById(id);
+            if (!input) return;
+
+            var value = parseFloat(input.value) || 0;
+            var min = parseFloat(input.min);
+            var max = parseFloat(input.max);
+
+            value += step;
+
+            if (value < min) value = min;
+            if (value > max) value = max;
+
+            input.value = value;
+        }
+
+        function setupCategoryToggles() {
+            var categoryTitles = document.querySelectorAll('.category-title');
+
+            for (var i = 0; i < categoryTitles.length; i++) {
+                (function() {
+                    var title = categoryTitles[i];
+
+                    title.addEventListener('click', function() {
+                        var category = this.getAttribute('data-category');
+                        var content = this.nextElementSibling;
+
+                        if (hasClass(content, 'expanded')) {
+                            removeClass(content, 'expanded');
+                            removeClass(this, 'expanded');
+                            expandedCategories[category] = false;
+                        } else {
+                            collapseAllCategories();
+
+                            addClass(content, 'expanded');
+                            addClass(this, 'expanded');
+                            expandedCategories[category] = true;
+                        }
+
+                        updateExpandButtons();
+                    });
+                })();
+            }
+
+            document.getElementById('expand-all-btn').addEventListener('click', expandAllCategories);
+            document.getElementById('collapse-all-btn').addEventListener('click', collapseAllCategories);
+        }
+
+        function hasClass(element, className) {
+            if (element.classList) {
+                return element.classList.contains(className);
+            } else {
+                return new RegExp('(^| )' + className + '( |$)', 'gi').test(element.className);
+            }
+        }
+
+        function addClass(element, className) {
+            if (element.classList) {
+                element.classList.add(className);
+            } else {
+                element.className += ' ' + className;
+            }
+        }
+
+        function removeClass(element, className) {
+            if (element.classList) {
+                element.classList.remove(className);
+            } else {
+                element.className = element.className.replace(new RegExp('(^|\\b)' + className.split(' ').join('|') + '(\\b|$)', 'gi'), ' ');
+            }
+        }
+
+        function expandAllCategories() {
+            var categories = document.querySelectorAll('.category-title');
+            var contents = document.querySelectorAll('.category-content');
+
+            for (var i = 0; i < categories.length; i++) {
+                var category = categories[i];
+                addClass(category, 'expanded');
+                var categoryName = category.getAttribute('data-category');
+                expandedCategories[categoryName] = true;
+            }
+
+            for (var j = 0; j < contents.length; j++) {
+                var content = contents[j];
+                addClass(content, 'expanded');
+            }
+
+            updateExpandButtons();
+        }
+
+        function collapseAllCategories() {
+            var categories = document.querySelectorAll('.category-title');
+            var contents = document.querySelectorAll('.category-content');
+
+            for (var i = 0; i < categories.length; i++) {
+                var category = categories[i];
+                removeClass(category, 'expanded');
+                var categoryName = category.getAttribute('data-category');
+                expandedCategories[categoryName] = false;
+            }
+
+            for (var j = 0; j < contents.length; j++) {
+                var content = contents[j];
+                removeClass(content, 'expanded');
+            }
+
+            updateExpandButtons();
+        }
+
+        function updateExpandButtons() {
+            var expandBtn = document.getElementById('expand-all-btn');
+            var collapseBtn = document.getElementById('collapse-all-btn');
+
+            var isAnyExpanded = false;
+            for (var key in expandedCategories) {
+                if (expandedCategories.hasOwnProperty(key)) {
+                    if (expandedCategories[key]) {
+                        isAnyExpanded = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isAnyExpanded) {
+                expandBtn.style.display = 'none';
+                collapseBtn.style.display = 'inline-block';
+            } else {
+                expandBtn.style.display = 'inline-block';
+                collapseBtn.style.display = 'none';
+            }
+        }
+
+        function setupSearch() {
+            var searchInput = document.getElementById('search-input');
+            var paramItems = document.querySelectorAll('.param-item');
+            var noResults = document.getElementById('no-results');
+
+            searchInput.addEventListener('input', function() {
+                var searchTerm = this.value.toLowerCase();
+                var visibleCount = 0;
+
+                for (var i = 0; i < paramItems.length; i++) {
+                    var item = paramItems[i];
+                    var key = item.getAttribute('data-param-key');
+                    var config = paramConfig[key];
+                    var text = (config.chineseName + ' ' + config.description).toLowerCase();
+
+                    if (text.indexOf(searchTerm) !== -1) {
+                        item.style.display = 'flex';
+                        visibleCount++;
+
+                        var categoryContent = item.closest('.category-content');
+                        var categoryTitle = categoryContent.previousElementSibling;
+                        var category = categoryTitle.getAttribute('data-category');
+
+                        if (!hasClass(categoryContent, 'expanded')) {
+                            addClass(categoryContent, 'expanded');
+                            addClass(categoryTitle, 'expanded');
+                            expandedCategories[category] = true;
+                        }
+                    } else {
+                        item.style.display = 'none';
+                    }
+                }
+
+                if (visibleCount === 0 && searchTerm) {
+                    noResults.style.display = 'block';
+                } else {
+                    noResults.style.display = 'none';
+                }
+
+                updateExpandButtons();
+            });
+        }
+
+        function saveParams() {
+            var formData = {};
+
+            for (var key in paramConfig) {
+                if (paramConfig.hasOwnProperty(key)) {
+                    var element = document.getElementById(key);
+                    if (element) {
+                        var value;
+
+                        if (paramConfig[key].uiType === 'select') {
+                            value = parseInt(element.value, 10);
+                        } else if (paramConfig[key].uiType === 'number') {
+                            value = parseFloat(element.value);
+                        } else {
+                            value = element.value;
+                        }
+
+                        var config = paramConfig[key];
+                        if (config.inputRange && Array.isArray(config.inputRange)) {
+                            if (value < config.inputRange[0]) value = config.inputRange[0];
+                            if (value > config.inputRange[1]) value = config.inputRange[1];
+                        }
+
+                        formData[key] = value;
+                    }
+                }
+            }
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/nav_params', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            var result = JSON.parse(xhr.responseText);
+                            if (result.status === 'success') {
+                                showStatus('参数保存成功', 'success');
+                                NavParamsData = formData;
+                            } else {
+                                showStatus('保存失败: ' + result.message, 'error');
+                            }
+                        } catch (error) {
+                            showStatus('保存失败: ' + error, 'error');
+                        }
+                    } else {
+                        showStatus('保存失败: ' + xhr.status, 'error');
+                    }
+                }
+            };
+            xhr.send(JSON.stringify(formData));
+        }
+
+        function resetParams() {
+			var xhr = new XMLHttpRequest();
+			xhr.open('GET', '/get_default_nav_params', true);
+			xhr.onreadystatechange = function() {
+				if (xhr.readyState === 4) {
+					if (xhr.status === 200) {
+						try {
+							var defaultData = JSON.parse(xhr.responseText);
+
+							for (var key in paramConfig) {
+								if (paramConfig.hasOwnProperty(key)) {
+									if (defaultData.hasOwnProperty(key)) {
+										NavParamsData[key] = defaultData[key];
+									} else {
+										NavParamsData[key] = paramConfig[key].defaultValue;
+									}
+								}
+							}
+
+							var saveXhr = new XMLHttpRequest();
+							saveXhr.open('POST', '/nav_params', true);
+							saveXhr.setRequestHeader('Content-Type', 'application/json');
+							saveXhr.onreadystatechange = function() {
+								if (saveXhr.readyState === 4) {
+									if (saveXhr.status === 200) {
+										try {
+											var result = JSON.parse(saveXhr.responseText);
+											if (result.status === 'success') {
+												showStatus('接口获取默认参数值恢复成功', 'success');
+												renderParams();
+											} else {
+												throw new Error(result.message);
+											}
+										} catch (error) {
+											throw new Error(error);
+										}
+									} else {
+										throw new Error('保存失败: ' + saveXhr.status);
+									}
+								}
+							};
+							saveXhr.send(JSON.stringify(NavParamsData));
+
+						} catch (error) {
+							// 如果从服务器获取默认值失败，则使用本地默认值
+							for (var key in paramConfig) {
+								if (paramConfig.hasOwnProperty(key)) {
+									NavParamsData[key] = paramConfig[key].defaultValue;
+								}
+							}
+
+							var saveXhr = new XMLHttpRequest();
+							saveXhr.open('POST', '/nav_params', true);
+							saveXhr.setRequestHeader('Content-Type', 'application/json');
+							saveXhr.onreadystatechange = function() {
+								if (saveXhr.readyState === 4) {
+									if (saveXhr.status === 200) {
+										try {
+											var result = JSON.parse(saveXhr.responseText);
+											if (result.status === 'success') {
+												showStatus('本地获取默认参数恢复成功', 'success');
+												renderParams();
+											} else {
+												showStatus('默认参数恢复失败: ' + result.message, 'error');
+											}
+										} catch (error) {
+											showStatus('默认参数恢复失败: ' + error, 'error');
+										}
+									} else {
+										showStatus('默认参数保存失败: ' + saveXhr.status, 'error');
+									}
+								}
+							};
+							saveXhr.send(JSON.stringify(NavParamsData));
+						}
+					} else {
+						// 如果从服务器获取默认值失败，则使用本地默认值
+						for (var key in paramConfig) {
+							if (paramConfig.hasOwnProperty(key)) {
+								NavParamsData[key] = paramConfig[key].defaultValue;
+							}
+						}
+
+						var saveXhr = new XMLHttpRequest();
+						saveXhr.open('POST', '/nav_params', true);
+						saveXhr.setRequestHeader('Content-Type', 'application/json');
+						saveXhr.onreadystatechange = function() {
+							if (saveXhr.readyState === 4) {
+								if (saveXhr.status === 200) {
+									try {
+										var result = JSON.parse(saveXhr.responseText);
+										if (result.status === 'success') {
+											showStatus('本地获取默认参数恢复成功', 'success');
+											renderParams();
+										} else {
+											showStatus('默认参数恢复失败: ' + result.message, 'error');
+										}
+									} catch (error) {
+										showStatus('默认参数恢复失败: ' + error, 'error');
+									}
+								} else {
+									showStatus('默认参数保存失败: ' + saveXhr.status, 'error');
+								}
+							}
+						};
+						saveXhr.send(JSON.stringify(NavParamsData));
+					}
+				}
+			};
+			xhr.send();
+        }
+
+        function showStatus(message, type) {
+            var status = document.getElementById('status-message');
+            status.textContent = message;
+            status.className = 'status ' + type;
+            status.style.display = 'block';
+            setTimeout(function() {
+                status.style.display = 'none';
+            }, 3000);
+        }
+
+        // 备份/恢复只针对本页(config.py -> nav_params.json)管理的参数，
+        // 不涉及 openpilot 系统参数。备份=下载 JSON 文件，恢复=选择 JSON 文件。
+        // 备份走服务端下载接口（带 Content-Disposition），
+        // iOS Safari 不支持 a[download] + Blob，用这个方式全平台通用。
+        function exportConfig() {
+            showStatus("正在备份参数...", "tip");
+            window.location.href = "/nav_params_download";
+            showStatus("备份文件已开始下载", "success");
+        }
+
+        function pickConfigFile() {
+            document.getElementById("configFileInput").click();
+        }
+
+        function onConfigFileSelected(event) {
+            const input = event.target;
+            const file = input.files && input.files[0];
+            if (!file) {
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function () {
+                restoreConfig(String(reader.result), file.name);
+            };
+            reader.onerror = function () {
+                showStatus("文件读取失败", "error");
+            };
+            reader.readAsText(file);
+            // 清空以便再次选择同一个文件时也能触发 change
+            input.value = "";
+        }
+
+        function restoreConfig(text, fileName) {
+            var data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                showStatus("JSON 格式错误: " + e, "error");
+                return;
+            }
+
+            if (!data || typeof data !== "object" || Array.isArray(data) ||
+                Object.keys(data).length === 0) {
+                showStatus(fileName + " 不是一个有效的参数文件", "error");
+                return;
+            }
+
+            showStatus("正在从 " + fileName + " 恢复配置...", "tip");
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", "/nav_params", true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            const result = JSON.parse(xhr.responseText);
+                            if (result.status === "success") {
+                                showStatus("配置已恢复", "success");
+                                loadNavParams();
+                            } else {
+                                showStatus("恢复失败: " + result.message, "error");
+                            }
+                        } catch (e) {
+                            showStatus("恢复失败: " + e, "error");
+                        }
+                    } else {
+                        showStatus("恢复失败: HTTP " + xhr.status, "error");
+                    }
+                }
+            };
+            xhr.send(JSON.stringify(data));
+        }
+
+        // 页面加载完成后初始化
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', loadNavParams);
+        } else {
+            loadNavParams();
+        }
+		document.getElementById('nav_params-ip').textContent = window.location.hostname;
+    </script>
+</body>
+</html>

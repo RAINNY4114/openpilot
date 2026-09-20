@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>eGPU 大模型管理</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --card: #171c23;
+    --card-hi: #1e242d;
+    --line: #2a323d;
+    --fg: #e8edf3;
+    --dim: #93a1b1;
+    --accent: #4ea1ff;
+    --ok: #37c871;
+    --warn: #f0b429;
+    --err: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans CJK SC", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .sub { color: var(--dim); font-size: 13px; }
+  .toolbar { margin-left: auto; display: flex; gap: 8px; }
+  button {
+    font: inherit;
+    border: 1px solid var(--line);
+    background: var(--card-hi);
+    color: var(--fg);
+    padding: 8px 14px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  button:hover:not(:disabled) { background: #273040; border-color: #384555; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #6cb2ff; border-color: #6cb2ff; }
+  button.danger { color: var(--err); border-color: #4a2830; }
+  button.danger:hover:not(:disabled) { background: #2a1a1f; border-color: #6b3038; }
+  button.mini { padding: 6px 10px; font-size: 13px; border-radius: 8px; }
+
+  .banner {
+    padding: 10px 14px;
+    border-radius: 10px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--dim);
+  }
+  .banner.warn { border-color: #5a4a1e; background: #221c0e; color: #f2d48a; }
+  .banner.err { border-color: #5a2630; background: #221114; color: #ffb3b3; }
+
+  .grid { display: grid; gap: 12px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 14px;
+  }
+  .card.active { border-color: #2e5f3f; box-shadow: inset 0 0 0 1px #24492f; }
+  .card.selected { border-color: #2f4f74; box-shadow: inset 0 0 0 1px #26405e; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .name { font-weight: 600; font-size: 16px; }
+  .pid { color: var(--dim); font-size: 12px; word-break: break-all; margin-top: 3px; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+  .badge {
+    font-size: 11.5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .badge.ok { color: #9ae6b8; border-color: #29543a; background: #12251a; }
+  .badge.on { color: #bcd9ff; border-color: #2b4a70; background: #101d2d; }
+  .badge.sel { color: #ffe0a3; border-color: #5a4a1e; background: #221c0e; }
+  .badge.miss { color: #f0b8b8; border-color: #5a2630; background: #221114; }
+
+  .actions { margin-left: auto; display: flex; gap: 8px; }
+  .progress { margin-top: 11px; height: 7px; border-radius: 999px; background: #0a0d11; overflow: hidden; border: 1px solid var(--line); }
+  .progress > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s ease; }
+  .pmeta { margin-top: 6px; font-size: 12px; color: var(--dim); }
+
+  footer { margin-top: 18px; color: var(--dim); font-size: 12px; line-height: 1.7; }
+  code { background: #0a0d11; border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; font-size: 12px; }
+  select {
+    font: inherit;
+    background: var(--card-hi);
+    color: var(--fg);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 7px 10px;
+  }
+  .toolbar label { color: var(--dim); font-size: 13px; align-self: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>eGPU 大模型管理</h1>
+  <span class="sub" id="summary"></span>
+  <span class="sub" id="delivery"></span>
+  <div class="toolbar">
+    <label for="sourceSelect">模型来源</label>
+    <select id="sourceSelect" hidden></select>
+    <button id="btnRefresh" class="mini">刷新</button>
+  </div>
+</header>
+
+<div id="banners"></div>
+<div class="grid" id="list"></div>
+
+<footer>
+  切换模型需要重启设备才生效：模型已下载时立即切换，未下载时会在重启后自动下载。<br>
+  <b>模型来源</b>（重启后生效）：<code>自动</code> = 优先分片包，没有分片时用预编译包；
+  <code>分片包</code> = 只用分片（缺失时回退本地编译）；
+  <code>预编译包</code> = 只用预编译。<br>
+  分片包是仓库自带编译器产出的 split 形态（warp 在集成 GPU，实测 34ms/帧、不丢帧）；
+  预编译包是 fused 形态（warp 在 eGPU，每帧整帧过 USB，约 58ms/帧、会丢帧）——
+  两者只是"交付方式"，用哪个由上面的开关决定。<br>
+  预编译包在 <code>/data/media/0/carrot/models/</code>，分片包在
+  <code>&lt;openpilot&gt;/selfdrive/modeld/models/</code>，多个模型可以共存。
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  const state = { models: [], selected: null, active: null, busy: false, remote: false, source: null, sources: [], delivery: null };
+
+  function fmtBytes(v) {
+    const n = Number(v) || 0;
+    if (n <= 0) return "-";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / 1048576).toFixed(0) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
+  }
+
+  function banner(text, kind) {
+    const el = document.createElement("div");
+    el.className = "banner" + (kind ? " " + kind : "");
+    el.textContent = text;
+    $("banners").appendChild(el);
+  }
+
+  async function getJson(url) {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(url + " -> HTTP " + r.status);
+    return r.json();
+  }
+
+  async function postJson(url, body) {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    let data = null;
+    try { data = await r.json(); } catch (_) {}
+    if (!r.ok || (data && data.ok === false)) {
+      throw new Error((data && data.error) || ("HTTP " + r.status));
+    }
+    return data;
+  }
+
+  function card(model) {
+    const el = document.createElement("div");
+    el.className = "card";
+    if (model.active) el.classList.add("active");
+    else if (model.selected) el.classList.add("selected");
+
+    const head = document.createElement("div");
+    head.className = "row";
+    const info = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = model.label;
+    const pid = document.createElement("div");
+    pid.className = "pid";
+    pid.textContent = (model.model_id || "-") + "  ·  " + fmtBytes(model.size);
+    info.appendChild(name);
+    info.appendChild(pid);
+    head.appendChild(info);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    if (!model.active) {
+      const use = document.createElement("button");
+      use.textContent = model.selected ? "重启以启用" : "使用此模型";
+      use.className = "primary mini";
+      use.addEventListener("click", () => selectModel(model, use));
+      actions.appendChild(use);
+    }
+    if (model.downloaded && !model.active && !model.selected) {
+      const del = document.createElement("button");
+      del.textContent = "删除";
+      del.className = "danger mini";
+      del.addEventListener("click", () => removeModel(model, del));
+      actions.appendChild(del);
+    }
+    head.appendChild(actions);
+    el.appendChild(head);
+
+    const badges = document.createElement("div");
+    badges.className = "badges";
+    const add = (text, cls) => {
+      const b = document.createElement("span");
+      b.className = "badge" + (cls ? " " + cls : "");
+      b.textContent = text;
+      badges.appendChild(b);
+    };
+    if (model.active) add("当前使用中", "on");
+    if (model.selected && !model.active) add("已选择 · 待重启", "sel");
+    add(model.downloaded ? "已下载" : "未下载", model.downloaded ? "ok" : "miss");
+    add(model.sha256.slice(0, 12) + "…");
+    el.appendChild(badges);
+
+    // Render the bar for the active model as well: a first-time download has nothing
+    // "downloaded" yet, so gating on model.downloaded hid the bar exactly while the
+    // download was running. The amount line mirrors the settings card's wording.
+    if (model.downloaded || model.active) {
+      const bar = document.createElement("div");
+      bar.className = "progress";
+      const fill = document.createElement("i");
+      bar.appendChild(fill);
+      el.appendChild(bar);
+      const amount = document.createElement("div");
+      amount.className = "amount";
+      amount.style.cssText = "margin-top:6px;font-size:12px;opacity:.75";
+      el.appendChild(amount);
+      el.dataset.progressFor = model.sha256;
+      el.dataset.downloaded = model.downloaded ? "1" : "0";
+    }
+    return el;
+  }
+
+  async function selectModel(model, button) {
+    if (state.busy) return;
+    const needDownload = !model.downloaded;
+    const msg = needDownload
+      ? `“${model.label}”尚未下载（${fmtBytes(model.size)}）。\n选择后需要重启，设备会在重启后自动下载该模型。\n\n现在选择并重启吗？`
+      : `切换到“${model.label}”？\n需要重启设备才能生效。\n\n现在切换并重启吗？`;
+    if (!window.confirm(msg)) return;
+
+    state.busy = true;
+    button.disabled = true;
+    button.textContent = "处理中…";
+    try {
+      const res = await postJson("/api/egpu/models/select", { sha256: model.sha256, reboot: true });
+      banner(res.reboot_requested ? "已切换，设备正在重启…" : "已切换（重启后生效）", "warn");
+      await load();
+    } catch (err) {
+      banner("切换失败：" + err.message, "err");
+      button.disabled = false;
+      button.textContent = "使用此模型";
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  async function removeModel(model, button) {
+    if (state.busy) return;
+    if (!window.confirm(`删除“${model.label}”的本地文件？\n下次使用需要重新下载（${fmtBytes(model.size)}）。`)) return;
+    state.busy = true;
+    button.disabled = true;
+    try {
+      await postJson("/api/egpu/models/remove", { sha256: model.sha256 });
+      await load();
+    } catch (err) {
+      banner("删除失败：" + err.message, "err");
+      button.disabled = false;
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  async function refreshDownloadProgress() {
+    let status = null;
+    try { status = await getJson("/api/egpu/model"); } catch (_) { return; }
+    if (!status || !status.available) return;
+    const sha = status.sha256;
+    if (!sha) return;
+    const card = document.querySelector(`[data-progress-for="${sha}"]`);
+    if (!card) return;
+    const downloading = status.state === "downloading";
+    const pct = Math.max(0, Math.min(100, Number(status.progress) || 0));
+    const fill = card.querySelector(".progress > i");
+    if (fill) {
+      fill.style.width = downloading ? pct + "%"
+        : (card.dataset.downloaded === "1" ? "100%" : "0%");
+    }
+    const amount = card.querySelector(".amount");
+    if (amount) {
+      // Same shape as the settings card: "512.0 MB / 751.2 MB · 66.8%"
+      amount.textContent = downloading && status.total_bytes
+        ? `${fmtBytes(status.downloaded_bytes)} / ${fmtBytes(status.total_bytes)} · ${pct.toFixed(1)}%`
+        : "";
+    }
+    // Live badge so the state is readable without opening the settings page.
+    let badge = card.querySelector(".badge.dl");
+    if (downloading || status.state === "verifying") {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "badge dl";
+        card.querySelector(".badges").appendChild(badge);
+      }
+      badge.textContent = downloading ? "正在下载" : "正在验证";
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+
+  // Which delivery the active model actually resolved to (chunked vs precompiled).
+  function updateDelivery() {
+    const el = $("delivery");
+    if (!el) return;
+    const names = { chunked: "分片包", precompiled: "预编译包" };
+    el.textContent = state.delivery
+      ? "当前实际使用：" + (names[state.delivery] || state.delivery)
+      : "";
+  }
+
+  const SOURCE_LABELS = { auto: "自动（分片优先）", chunked: "分片包", precompiled: "预编译包" };
+
+  function renderSource() {
+    const sel = $("sourceSelect");
+    if (!sel) return;
+    if (!state.sources.length) { sel.hidden = true; return; }
+    sel.hidden = false;
+    if (sel.dataset.filled !== state.sources.join(",")) {
+      sel.innerHTML = "";
+      for (const s of state.sources) {
+        const option = document.createElement("option");
+        option.value = s;
+        option.textContent = SOURCE_LABELS[s] || s;
+        sel.appendChild(option);
+      }
+      sel.dataset.filled = state.sources.join(",");
+      sel.addEventListener("change", changeSource);
+    }
+    sel.value = state.source || "auto";
+  }
+
+  async function changeSource() {
+    const sel = $("sourceSelect");
+    if (!sel || state.busy) return;
+    state.busy = true;
+    try {
+      await postJson("/api/egpu/models/source", { source: sel.value });
+      banner("模型来源已设为「" + (SOURCE_LABELS[sel.value] || sel.value) + "」，重启后生效。", "warn");
+    } catch (err) {
+      banner("设置失败：" + err.message, "err");
+    } finally {
+      state.busy = false;
+      await load();
+    }
+  }
+
+  async function load() {
+    $("banners").innerHTML = "";
+    let data;
+    try {
+      data = await getJson("/api/egpu/models");
+    } catch (err) {
+      banner("无法获取模型列表：" + err.message, "err");
+      return;
+    }
+    state.models = data.models || [];
+    state.selected = data.selected;
+    state.active = data.active;
+    state.remote = !!data.remote_catalog;
+    state.source = data.source || null;
+    state.sources = data.sources || [];
+    state.delivery = data.delivery || null;
+    renderSource();
+    updateDelivery();
+
+    const list = $("list");
+    list.innerHTML = "";
+    if (!state.models.length) {
+      const empty = document.createElement("div");
+      empty.className = "banner";
+      empty.textContent = "没有找到任何模型。请确认 eGPU 已连接，且服务器上存在 models/catalog.json。";
+      list.appendChild(empty);
+    } else {
+      for (const m of state.models) list.appendChild(card(m));
+    }
+
+    const activeLabel = (state.models.find((m) => m.active) || {}).label;
+    // m.active is what modeld is running; state.active is what the next boot loads.
+    // They differ until the reboot after a switch, and showing only one of them is
+    // what made a freshly downloaded model look like it was already in use.
+    const nextLabel = (state.models.find((m) => m.sha256 === state.active && !m.active) || {}).label;
+    $("summary").textContent = state.models.length
+      ? `${state.models.length} 个模型${activeLabel ? " · 当前：" + activeLabel : ""}${nextLabel ? " · 重启后：" + nextLabel : ""}`
+      : "";
+    if (!state.remote && state.models.length) {
+      banner("服务器未提供 models/catalog.json，仅显示本机已下载的模型。", "warn");
+    }
+    await refreshDownloadProgress();
+  }
+
+  $("btnRefresh").addEventListener("click", load);
+  load();
+  setInterval(() => { load(); }, 20000);
+  setInterval(refreshDownloadProgress, 2000);
+})();
+</script>
+</body>
+</html>

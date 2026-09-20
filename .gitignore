@@ -1,0 +1,5 @@
+openpilot/selfdrive/modeld/models/*.onnx
+openpilot/selfdrive/modeld/models/big_driving_*
+openpilot/selfdrive/modeld/models/.big_model_build_stamp
+amapnavi_bak
+amapnavi_bak/

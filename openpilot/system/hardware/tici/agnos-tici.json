@@ -1,0 +1,83 @@
+[
+  {
+    "name": "xbl",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/xbl-6710967ca9701f205d7ab19c3a9b0dd2f547e65b3d96048b7c2b03755aafa0f1.img.xz",
+    "hash": "6710967ca9701f205d7ab19c3a9b0dd2f547e65b3d96048b7c2b03755aafa0f1",
+    "hash_raw": "6710967ca9701f205d7ab19c3a9b0dd2f547e65b3d96048b7c2b03755aafa0f1",
+    "size": 3282256,
+    "sparse": false,
+    "full_check": true,
+    "has_ab": true,
+    "ondevice_hash": "003a17ab1be68a696f7efe4c9938e8be511d4aacfc2f3211fc896bdc1681d089"
+  },
+  {
+    "name": "xbl_config",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/xbl_config-63922cfbfdf4ab87986c4ba8f3a4df5bf28414b3f71a29ec5947336722215535.img.xz",
+    "hash": "63922cfbfdf4ab87986c4ba8f3a4df5bf28414b3f71a29ec5947336722215535",
+    "hash_raw": "63922cfbfdf4ab87986c4ba8f3a4df5bf28414b3f71a29ec5947336722215535",
+    "size": 98124,
+    "sparse": false,
+    "full_check": true,
+    "has_ab": true,
+    "ondevice_hash": "2a855dd636cc94718b64bea83a44d0a31741ecaa8f72a63613ff348ec7404091"
+  },
+  {
+    "name": "abl",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/abl-32a2174b5f764e95dfc54cf358ba01752943b1b3b90e626149c3da7d5f1830b6.img.xz",
+    "hash": "32a2174b5f764e95dfc54cf358ba01752943b1b3b90e626149c3da7d5f1830b6",
+    "hash_raw": "32a2174b5f764e95dfc54cf358ba01752943b1b3b90e626149c3da7d5f1830b6",
+    "size": 274432,
+    "sparse": false,
+    "full_check": true,
+    "has_ab": true,
+    "ondevice_hash": "32a2174b5f764e95dfc54cf358ba01752943b1b3b90e626149c3da7d5f1830b6"
+  },
+  {
+    "name": "aop",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/aop-21370172e590bd4ea907a558bcd6df20dc7a6c7d38b8e62fdde18f4a512ba9e9.img.xz",
+    "hash": "21370172e590bd4ea907a558bcd6df20dc7a6c7d38b8e62fdde18f4a512ba9e9",
+    "hash_raw": "21370172e590bd4ea907a558bcd6df20dc7a6c7d38b8e62fdde18f4a512ba9e9",
+    "size": 184364,
+    "sparse": false,
+    "full_check": true,
+    "has_ab": true,
+    "ondevice_hash": "c1be2f4aac5b3af49b904b027faec418d05efd7bd5144eb4fdfcba602bcf2180"
+  },
+  {
+    "name": "devcfg",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/devcfg-d7d7e52963bbedbbf8a7e66847579ca106a0a729ce2cf60f4b8d8ea4b535d620.img.xz",
+    "hash": "d7d7e52963bbedbbf8a7e66847579ca106a0a729ce2cf60f4b8d8ea4b535d620",
+    "hash_raw": "d7d7e52963bbedbbf8a7e66847579ca106a0a729ce2cf60f4b8d8ea4b535d620",
+    "size": 40336,
+    "sparse": false,
+    "full_check": true,
+    "has_ab": true,
+    "ondevice_hash": "17b229668b20305ff8fa3cd5f94716a3aaa1e5bf9d1c24117eff7f2f81ae719f"
+  },
+  {
+    "name": "boot",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/boot-c3-c3clone-7f6a45827e82f0d7ee2bab286daf60fec79c40fd4af2aee967b146e06b5ece70.img.xz",
+    "compressed_hash": "e7d166d7eaec2fb05726577f9251b92a7fe5ef086b4a60d1ce2faafba5992c0f",
+    "compressed_size": 14315480,
+    "hash": "7f6a45827e82f0d7ee2bab286daf60fec79c40fd4af2aee967b146e06b5ece70",
+    "hash_raw": "7f6a45827e82f0d7ee2bab286daf60fec79c40fd4af2aee967b146e06b5ece70",
+    "size": 48343040,
+    "sparse": false,
+    "full_check": true,
+    "has_ab": true,
+    "ondevice_hash": "4c148fbea709da7b2fc2626a7005d5fdc766623c9f4d35e2440d66abee09def6"
+  },
+  {
+    "name": "system",
+    "url": "http://www.gitop.vip:82/agnos-19.6.3-carrot/system-b97e492686fa3902b0385f13fa5663c911f0b150d06b722111d386f4ad42a7d7.img.xz",
+    "compressed_hash": "57a1e8fbf72ba0608512b505075b03ce41a77427da7edb43e093ddb99f4bda60",
+    "compressed_size": 1008228912,
+    "hash": "ee1d82e325bfce8cc9c2fc1a509b65436830b9f34d3ee6568cf5345216d18c25",
+    "hash_raw": "b97e492686fa3902b0385f13fa5663c911f0b150d06b722111d386f4ad42a7d7",
+    "size": 4718592000,
+    "sparse": true,
+    "full_check": false,
+    "has_ab": true,
+    "ondevice_hash": "922f61a474912aef459586e9cc4f0dd923d58d5e9d67b3163566c7b0be8a5b55"
+  }
+]
