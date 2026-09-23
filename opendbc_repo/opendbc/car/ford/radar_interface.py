@@ -1660,7 +1660,7 @@ class RadarInterface(RadarInterfaceBase):
     # ========================================================================
 
     if scan_index_2lsb != 3:
-      return False
+      return True
 
     # ========================================================================
     # Cluster current points against previous OEM clusters.
