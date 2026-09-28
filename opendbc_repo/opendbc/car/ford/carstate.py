@@ -93,7 +93,9 @@ class CarState(CarStateBase, MadsCarState):
     if self.CP.transmissionType == TransmissionType.automatic:
       gear_lvr_pos = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
 
-      if gear_lvr_pos in (3, 4, 5):
+      if gear_lvr_pos == 4:  # SPORT_DRIVESPORT (S)
+        ret.gearShifter = GearShifter.sport
+      elif gear_lvr_pos in (3, 5):  # DRIVE, LOW
         ret.gearShifter = GearShifter.drive
       elif gear_lvr_pos == 1:
         ret.gearShifter = GearShifter.reverse
