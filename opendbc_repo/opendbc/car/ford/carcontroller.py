@@ -1,17 +1,22 @@
 import math
 import numpy as np
+
 from opendbc.can import CANPacker
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, apply_hysteresis, structs
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 
+from openpilot.selfdrive.controls.lib.ford_curve_controller import FordCurveController
+
+
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 
+
 def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
   diff = 0.1
-  tau = 5  # 5s smooths over the overshoot
+  tau = 5
   dt = DT_CTRL * CarControllerParams.STEER_STEP
   alpha = 1 - np.exp(-dt / tau)
 
@@ -22,7 +27,11 @@ def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
 
   output_curvature = last_lataccel / (max(v_ego, 1) ** 2)
 
-  return float(np.interp(v_ego, [5, 10], [apply_curvature, output_curvature]))
+  return float(np.interp(
+    v_ego,
+    [5, 10],
+    [apply_curvature, output_curvature],
+  ))
 
 
 def apply_creep_compensation(accel: float, v_ego: float) -> float:
@@ -35,19 +44,39 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP, CP_SP):
     super().__init__(dbc_names, CP, CP_SP)
+
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.CAN = fordcan.CanBus(CP)
 
     self.apply_curvature_last = 0
     self.anti_overshoot_curvature_last = 0
+
     self.accel = 0.0
     self.gas = 0.0
     self.brake_request = False
+
     self.main_on_last = False
     self.lkas_enabled_last = False
     self.steer_alert_last = False
     self.lead_distance_bars_last = None
     self.distance_bar_frame = 0
+
+    # Ford / Lincoln curvature controller.
+    #
+    # All Ford-specific curvature processing is handled inside this
+    # controller:
+    #
+    # - Human Turn Detection
+    # - Curve Entry / Hold / Exit
+    # - current-curvature error protection
+    # - Ford curvature rate limiting
+    # - lateral acceleration limiting
+    # - anti-overshoot
+    # - post-driver-reset ramp
+    #
+    # CarController itself only supplies vehicle state and sends the
+    # resulting curvature to the Ford CAN message.
+    self.curve_controller = FordCurveController(CP)
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -56,116 +85,402 @@ class CarController(CarControllerBase):
     hud_control = CC.hudControl
 
     main_on = CS.out.cruiseState.available
-    steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
+    steer_alert = hud_control.visualAlert in (
+      VisualAlert.steerRequired,
+      VisualAlert.ldw,
+    )
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
 
-    ### acc buttons ###
+    # =======================================================================
+    # ACC buttons
+    # =======================================================================
+
     if CC.cruiseControl.cancel:
-      can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, cancel=True))
-      can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.main, CS.buttons_stock_values, cancel=True))
-    elif CC.cruiseControl.resume and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
-      can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, resume=True))
-      can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.main, CS.buttons_stock_values, resume=True))
-    # if stock lane centering isn't off, send a button press to toggle it off
-    # the stock system checks for steering pressed, and eventually disengages cruise control
-    elif CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0 and (self.frame % CarControllerParams.ACC_UI_STEP) == 0:
-      can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, tja_toggle=True))
+      can_sends.append(
+        fordcan.create_button_msg(
+          self.packer,
+          self.CAN.camera,
+          CS.buttons_stock_values,
+          cancel=True,
+        )
+      )
+      can_sends.append(
+        fordcan.create_button_msg(
+          self.packer,
+          self.CAN.main,
+          CS.buttons_stock_values,
+          cancel=True,
+        )
+      )
 
-    ### lateral control ###
-    # send steer msg at 20Hz
+    elif CC.cruiseControl.resume and (
+      self.frame % CarControllerParams.BUTTONS_STEP
+    ) == 0:
+      can_sends.append(
+        fordcan.create_button_msg(
+          self.packer,
+          self.CAN.camera,
+          CS.buttons_stock_values,
+          resume=True,
+        )
+      )
+      can_sends.append(
+        fordcan.create_button_msg(
+          self.packer,
+          self.CAN.main,
+          CS.buttons_stock_values,
+          resume=True,
+        )
+      )
+
+    # If stock lane centering isn't off, send a button press to toggle it off.
+    # The stock system checks for steering pressed, and eventually disengages
+    # cruise control.
+    elif (
+      CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0
+      and (self.frame % CarControllerParams.ACC_UI_STEP) == 0
+    ):
+      can_sends.append(
+        fordcan.create_button_msg(
+          self.packer,
+          self.CAN.camera,
+          CS.buttons_stock_values,
+          tja_toggle=True,
+        )
+      )
+
+    # =======================================================================
+    # Lateral control
+    # =======================================================================
+
+    # Send steer msg at 20Hz.
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
-      # Bronco and some other cars consistently overshoot curv requests
-      # Apply some deadzone + smoothing convergence to avoid oscillations
-      if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14):
-        self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
-        apply_curvature = self.anti_overshoot_curvature_last
-      else:
-        apply_curvature = actuators.curvature
 
-      # apply rate limits, curvature error limit, and clip to signal range
-      current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-      # No blending at low speed due to lack of torque wind-up and inaccurate current curvature
-      if CS.out.vEgoRaw > 9:
-        apply_curvature = float(np.clip(apply_curvature, current_curvature - CarControllerParams.CURVATURE_ERROR,
-                                        current_curvature + CarControllerParams.CURVATURE_ERROR))
-      apply_curvature = CarControllerParams.CURVATURE_LIMITS.apply_limits(apply_curvature, self.apply_curvature_last, CS.out.vEgoRaw,
-                                                                          0., CC.latActive, CarControllerParams.STEER_STEP)
-      self.apply_curvature_last = apply_curvature
+      v_ego = float(max(CS.out.vEgoRaw, 0.1))
+
+      # Keep the existing Bronco / F-150 anti-overshoot behavior.
+      #
+      # This remains outside FordCurveController because it is an existing
+      # vehicle-specific CarController behavior.
+      if self.CP.carFingerprint in (
+        CAR.FORD_BRONCO_SPORT_MK1,
+        CAR.FORD_F_150_MK14,
+      ):
+        self.anti_overshoot_curvature_last = anti_overshoot(
+          actuators.curvature,
+          self.anti_overshoot_curvature_last,
+          v_ego,
+        )
+        requested_curvature = self.anti_overshoot_curvature_last
+      else:
+        requested_curvature = float(actuators.curvature)
+
+      # ---------------------------------------------------------------
+      # Current vehicle curvature
+      #
+      # FordCurveController uses this for the RAINNY-style
+      # current-curvature error protection.
+      # ---------------------------------------------------------------
+
+      current_curvature = (
+        -float(CS.out.yawRate) / v_ego
+      )
+
+      # ---------------------------------------------------------------
+      # Driver steering state
+      #
+      # These values are consumed by HumanTurnDetection.
+      # ---------------------------------------------------------------
+
+      steering_angle_deg = float(
+        getattr(
+          CS.out,
+          "steeringAngleDeg",
+          0.0,
+        )
+      )
+
+      steering_torque_nm = float(
+        getattr(
+          CS.out,
+          "steeringTorque",
+          0.0,
+        )
+      )
+
+      steering_pressed = bool(
+        getattr(
+          CS.out,
+          "steeringPressed",
+          False,
+        )
+      )
+
+      # ---------------------------------------------------------------
+      # Cruise state
+      #
+      # HTD disables itself while cruise is enabled, according to the
+      # supplied FordCurveController implementation.
+      # ---------------------------------------------------------------
+
+      cruise_enabled = bool(
+        getattr(
+          CS.out.cruiseState,
+          "enabled",
+          False,
+        )
+      )
+
+      # S-gear (Sport). Ford's selector position 4 ("Sport_DriveSport") is
+      # reported by carstate.py as GearShifter.sport. FordCurveController uses
+      # it for its Sport profile, but only when `dp_ford_sport_enable` is set.
+      sport_gear = bool(
+        CS.out.gearShifter == structs.CarState.GearShifter.sport
+      )
+
+      # ---------------------------------------------------------------
+      # Ford Curve Controller
+      #
+      # IMPORTANT:
+      # Do NOT apply CURVATURE_ERROR or CURVATURE_LIMITS here again.
+      # FordCurveController is now the single curvature-processing stage.
+      # ---------------------------------------------------------------
+
+      apply_curvature = self.curve_controller.update(
+        desired_curvature=requested_curvature,
+        v_ego=v_ego,
+        active=bool(CC.latActive),
+        steering_angle_deg=steering_angle_deg,
+        steering_torque_nm=steering_torque_nm,
+        steering_pressed=steering_pressed,
+        lat_active=bool(CC.latActive),
+        cruise_enabled=cruise_enabled,
+        current_curvature=current_curvature,
+        sport_gear=sport_gear,
+      )
+
+      self.apply_curvature_last = float(apply_curvature)
+
+      # =====================================================================
+      # Ford lateral CAN message
+      # =====================================================================
 
       if self.CP.flags & FordFlags.CANFD:
         # TODO: extended mode
-        # Ford uses four individual signals to dictate how to drive to the car. Curvature alone (limited to 0.02 m^-1)
-        # can actuate the steering for a large portion of any lateral movements. However, in order to get further control on
-        # steer actuation, the other three signals are necessary. Ford controls vehicles differently than most other makes.
-        # A detailed explanation on ford control can be found here:
-        # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
+        #
+        # Ford uses four individual signals to dictate how to drive to the
+        # car. Curvature alone (limited to 0.02 m^-1) can actuate the steering
+        # for a large portion of any lateral movements. However, in order to
+        # get further control on steer actuation, the other three signals are
+        # necessary.
+
         mode = 1 if CC.latActive else 0
-        counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
-        can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter))
+        counter = (
+          self.frame // CarControllerParams.STEER_STEP
+        ) % 0x10
+
+        can_sends.append(
+          fordcan.create_lat_ctl2_msg(
+            self.packer,
+            self.CAN,
+            mode,
+            0.,
+            0.,
+            -self.apply_curvature_last,
+            0.,
+            counter,
+          )
+        )
+
       else:
-        can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
+        # Q3 / non-CANFD Ford path.
+        #
+        # This is the path required for the 2018 Lincoln MKX / Nautilus
+        # configuration.
+        can_sends.append(
+          fordcan.create_lat_ctl_msg(
+            self.packer,
+            self.CAN,
+            CC.latActive,
+            0.,
+            0.,
+            -self.apply_curvature_last,
+            0.,
+          )
+        )
 
-    # send lka msg at 33Hz
+    # =======================================================================
+    # LKA
+    # =======================================================================
+
+    # Send lka msg at 33Hz.
     if (self.frame % CarControllerParams.LKA_STEP) == 0:
-      can_sends.append(fordcan.create_lka_msg(self.packer, self.CAN))
+      can_sends.append(
+        fordcan.create_lka_msg(
+          self.packer,
+          self.CAN,
+        )
+      )
 
-    ### longitudinal control ###
-    # send acc msg at 50Hz
-    if self.CP.openpilotLongitudinalControl and (self.frame % CarControllerParams.ACC_CONTROL_STEP) == 0:
+    # =======================================================================
+    # Longitudinal control
+    # =======================================================================
+
+    # Send acc msg at 50Hz.
+    if (
+      self.CP.openpilotLongitudinalControl
+      and (self.frame % CarControllerParams.ACC_CONTROL_STEP) == 0
+    ):
       accel = actuators.accel
       gas = accel
 
       if CC.longActive:
         # Compensate for engine creep at low speed.
-        # Either the ABS does not account for engine creep, or the correction is very slow
-        # TODO: verify this applies to EV/hybrid
-        accel = apply_creep_compensation(accel, CS.out.vEgo)
+        # Either the ABS does not account for engine creep, or the correction
+        # is very slow.
+        accel = apply_creep_compensation(
+          accel,
+          CS.out.vEgo,
+        )
 
-        # The stock system has been seen rate limiting the brake accel to 5 m/s^3,
-        # however even 3.5 m/s^3 causes some overshoot with a step response.
-        accel = max(accel, self.accel - (3.5 * CarControllerParams.ACC_CONTROL_STEP * DT_CTRL))
+        # The stock system has been seen rate limiting the brake accel to
+        # 5 m/s^3, however even 3.5 m/s^3 causes some overshoot with a step
+        # response.
+        accel = max(
+          accel,
+          self.accel
+          - (
+            3.5
+            * CarControllerParams.ACC_CONTROL_STEP
+            * DT_CTRL
+          ),
+        )
 
-      accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-      gas = float(np.clip(gas, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      accel = float(
+        np.clip(
+          accel,
+          CarControllerParams.ACCEL_MIN,
+          CarControllerParams.ACCEL_MAX,
+        )
+      )
 
-      # Both gas and accel are in m/s^2, accel is used solely for braking
+      gas = float(
+        np.clip(
+          gas,
+          CarControllerParams.ACCEL_MIN,
+          CarControllerParams.ACCEL_MAX,
+        )
+      )
+
+      # Both gas and accel are in m/s^2.
+      # accel is used solely for braking.
       if not CC.longActive or gas < CarControllerParams.MIN_GAS:
         gas = CarControllerParams.INACTIVE_GAS
 
-      # PCM applies pitch compensation to gas/accel, but we need to compensate for the brake/pre-charge bits
+      # PCM applies pitch compensation to gas/accel, but we need to
+      # compensate for the brake/pre-charge bits.
       accel_due_to_pitch = 0.0
-      if len(CC.orientationNED) == 3:
-        accel_due_to_pitch = math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY
 
-      accel_pitch_compensated = accel + accel_due_to_pitch
+      if len(CC.orientationNED) == 3:
+        accel_due_to_pitch = (
+          math.sin(CC.orientationNED[1])
+          * ACCELERATION_DUE_TO_GRAVITY
+        )
+
+      accel_pitch_compensated = (
+        accel + accel_due_to_pitch
+      )
+
       if accel_pitch_compensated > 0.3 or not CC.longActive:
         self.brake_request = False
       elif accel_pitch_compensated < 0.0:
         self.brake_request = True
 
-      stopping = CC.actuators.longControlState == LongCtrlState.stopping
-      # TODO: look into using the actuators packet to send the desired speed
-      can_sends.append(fordcan.create_acc_msg(self.packer, self.CAN, CC.longActive, gas, accel, stopping, self.brake_request, v_ego_kph=V_CRUISE_MAX))
+      stopping = (
+        CC.actuators.longControlState
+        == LongCtrlState.stopping
+      )
+
+      can_sends.append(
+        fordcan.create_acc_msg(
+          self.packer,
+          self.CAN,
+          CC.longActive,
+          gas,
+          accel,
+          stopping,
+          self.brake_request,
+          # [FIX] ACC_PRED_REQUEST_CHANNEL: stock sends the set speed here,
+          # openpilot sent V_CRUISE_MAX (145) which may hold a low gear.
+          v_ego_kph=(
+            float(CS.out.cruiseState.speed) * 3.6
+            if CS.out.cruiseState.speed > 0
+            else V_CRUISE_MAX
+          ),
+        )
+      )
 
       self.accel = accel
       self.gas = gas
 
-    ### ui ###
-    send_ui = (self.main_on_last != main_on) or (self.lkas_enabled_last != CC.latActive) or (self.steer_alert_last != steer_alert)
-    # send lkas ui msg at 1Hz or if ui state changes
-    if (self.frame % CarControllerParams.LKAS_UI_STEP) == 0 or send_ui:
-      can_sends.append(fordcan.create_lkas_ui_msg(self.packer, self.CAN, main_on, CC.latActive, steer_alert, hud_control, CS.lkas_status_stock_values))
+    # =======================================================================
+    # UI
+    # =======================================================================
 
-    # send acc ui msg at 5Hz or if ui state changes
+    send_ui = (
+      (self.main_on_last != main_on)
+      or (self.lkas_enabled_last != CC.latActive)
+      or (self.steer_alert_last != steer_alert)
+    )
+
+    # Send lkas ui msg at 1Hz or if ui state changes.
+    if (
+      (self.frame % CarControllerParams.LKAS_UI_STEP) == 0
+      or send_ui
+    ):
+      can_sends.append(
+        fordcan.create_lkas_ui_msg(
+          self.packer,
+          self.CAN,
+          main_on,
+          CC.latActive,
+          steer_alert,
+          hud_control,
+          CS.lkas_status_stock_values,
+        )
+      )
+
+    # Send acc ui msg at 5Hz or if ui state changes.
     if hud_control.leadDistanceBars != self.lead_distance_bars_last:
       send_ui = True
       self.distance_bar_frame = self.frame
 
-    if (self.frame % CarControllerParams.ACC_UI_STEP) == 0 or send_ui:
-      show_distance_bars = self.frame - self.distance_bar_frame < 400
-      can_sends.append(fordcan.create_acc_ui_msg(self.packer, self.CAN, self.CP, main_on, CC.latActive,
-                                                 fcw_alert, CS.out.cruiseState.standstill, show_distance_bars,
-                                                 hud_control, CS.acc_tja_status_stock_values))
+    if (
+      (self.frame % CarControllerParams.ACC_UI_STEP) == 0
+      or send_ui
+    ):
+      show_distance_bars = (
+        self.frame - self.distance_bar_frame < 400
+      )
+
+      can_sends.append(
+        fordcan.create_acc_ui_msg(
+          self.packer,
+          self.CAN,
+          self.CP,
+          main_on,
+          CC.latActive,
+          fcw_alert,
+          CS.out.cruiseState.standstill,
+          show_distance_bars,
+          hud_control,
+          CS.acc_tja_status_stock_values,
+        )
+      )
+
+    # =======================================================================
+    # State update
+    # =======================================================================
 
     self.main_on_last = main_on
     self.lkas_enabled_last = CC.latActive
@@ -173,9 +488,11 @@ class CarController(CarControllerBase):
     self.lead_distance_bars_last = hud_control.leadDistanceBars
 
     new_actuators = actuators.as_builder()
+
     new_actuators.curvature = self.apply_curvature_last
     new_actuators.accel = self.accel
     new_actuators.gas = self.gas
 
     self.frame += 1
+
     return new_actuators, can_sends

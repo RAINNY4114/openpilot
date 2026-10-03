@@ -1,3 +1,5 @@
+import os
+
 from opendbc.car import CanBusBase
 
 
@@ -16,6 +18,55 @@ class CanBus(CanBusBase):
   @property
   def camera(self) -> int:
     return self.offset + 2
+
+
+# ---------------------------------------------------------------------------
+# dp_ford: hot-reloadable Ford lateral signal tuning.
+#
+# These two signals are NOT validated by panda (see opendbc/safety/modes/ford.h
+# ford_tx_hook -- only LatCtl_D_Rq, LatCtlPath_An_Actl, LatCtlPathOffst_L_Actl
+# and LatCtlCurv_NoRate_Actl are checked), so they can be changed at runtime
+# without a panda firmware rebuild. Defaults reproduce the previous hard-coded
+# values exactly, so behaviour is unchanged until a parameter is set.
+#
+#   dp_ford_ramp_type      0=Slow (default), 1=Medium, 2=Fast, 3=Immediate
+#   dp_ford_precision_type 0=Comfortable, 1=Precise (default)
+#
+# Read with plain file I/O on purpose: these live outside params_keys.h, so
+# Params.get() would raise UnknownKeyName.
+# ---------------------------------------------------------------------------
+_DP_PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
+
+_DP_CACHE = {"ramp": None, "prec": None, "tick": 0}
+_DP_CACHE_TICKS = 400     # ~2 s at 20 Hz lateral rate (STEER_STEP=5 @ 100 Hz)
+
+
+def _dp_read_int(fname, default, lo, hi):
+  for d in _DP_PARAM_DIRS:
+    p = os.path.join(d, fname)
+    try:
+      with open(p, "r") as f:
+        raw = f.read().strip()
+    except (OSError, IOError):
+      continue
+    if not raw:
+      continue
+    try:
+      val = int(float(raw))
+    except ValueError:
+      continue
+    return max(lo, min(hi, val))
+  return default
+
+
+def _dp_tuning():
+  """Return (ramp_type, precision_type), cached for ~2 s."""
+  _DP_CACHE["tick"] += 1
+  if _DP_CACHE["ramp"] is None or _DP_CACHE["tick"] >= _DP_CACHE_TICKS:
+    _DP_CACHE["tick"] = 0
+    _DP_CACHE["ramp"] = _dp_read_int("dp_ford_ramp_type", 0, 0, 3)
+    _DP_CACHE["prec"] = _dp_read_int("dp_ford_precision_type", 1, 0, 3)
+  return _DP_CACHE["ramp"], _DP_CACHE["prec"]
 
 
 def calculate_lat_ctl2_checksum(mode: int, counter: int, dat: bytearray) -> int:
@@ -71,10 +122,10 @@ def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float
     "HandsOffCnfm_B_Rq": 0,                     # Unknown: 0=Inactive, 1=Active [0|1]
     "LatCtl_D_Rq": 1 if lat_active else 0,      # Mode: 0=None, 1=ContinuousPathFollowing, 2=InterventionLeft,
                                                 #       3=InterventionRight, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
-                                                #             Makes no difference with curvature control
-    "LatCtlPrecision_D_Rq": 1,                  # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
-                                                #            The stock system always uses comfortable
+    "LatCtlRampType_D_Rq": _dp_tuning()[0],     # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
+                                                #             dp_ford_ramp_type, default 0 (unchanged)
+    "LatCtlPrecision_D_Rq": _dp_tuning()[1],    # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+                                                #            dp_ford_precision_type, default 1 (unchanged)
     "LatCtlPathOffst_L_Actl": path_offset,      # Path offset [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # Path angle [-0.5|0.5235] radians
     "LatCtlCurv_NoRate_Actl": curvature_rate,   # Curvature rate [-0.001024|0.00102375] 1/meter^2
@@ -97,8 +148,8 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path
   values = {
     "LatCtl_D2_Rq": mode,                       # Mode: 0=None, 1=PathFollowingLimitedMode, 2=PathFollowingExtendedMode,
                                                 #       3=SafeRampOut, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
-    "LatCtlPrecision_D_Rq": 1,                  # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+    "LatCtlRampType_D_Rq": _dp_tuning()[0],     # dp_ford_ramp_type, default 0 (unchanged)
+    "LatCtlPrecision_D_Rq": _dp_tuning()[1],    # dp_ford_precision_type, default 1 (unchanged)
     "LatCtlPathOffst_L_Actl": path_offset,      # [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # [-0.5|0.5235] radians
     "LatCtlCurv_No_Actl": curvature,            # [-0.02|0.02094] 1/meter
@@ -130,7 +181,12 @@ def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: fl
     "AccPrpl_A_Rq": gas,                              # Acceleration request: [-5|5.23] m/s^2
     # No observed acceleration seen from this signal alone. During stock system operation, it appears to
     # be the raw acceleration request (AccPrpl_A_Rq when positive, AccBrkTot_A_Rq when negative)
-    "AccPrpl_A_Pred": -5.0,                           # Acceleration request: [-5|5.23] m/s^2
+    # [FIX] ACC_PRED_REQUEST_CHANNEL
+    # Measured: the stock IPMA drives this car with AccPrpl_A_Rq pinned at
+    # -5.00 and the real bidirectional request on AccPrpl_A_Pred.  openpilot
+    # had it backwards, so the PCM applied no torque (braking, which uses
+    # AccBrkTot_A_Rq, kept working -- aEgo was +0.00 while cmd was 1.11).
+    "AccPrpl_A_Pred": gas,  # [FIX] ACC_PRED_REQUEST_CHANNEL
     "AccResumEnbl_B_Rq": 1 if long_active else 0,
     # No observed acceleration seen from this signal alone
     "AccVeh_V_Trg": v_ego_kph,                        # Target speed: [0|255] km/h

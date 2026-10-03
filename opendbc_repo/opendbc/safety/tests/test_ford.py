@@ -106,6 +106,38 @@ class TestFordSafetyBase(common.CarSafetyTest):
     fudged_speed = speed + 1.0
     max_curvature_accel_can = int(MAX_LATERAL_ACCEL / (fudged_speed * fudged_speed) * self.DEG_TO_CAN) - 1
     return min(max_curvature_accel_can, round(self.MAX_CURVATURE * self.DEG_TO_CAN))
+  # Curvature rate field encoding, from the DBC. See FORD_CURVATURE_RATE_SCALE in modes/ford.h.
+  CURVATURE_RATE_SCALE = 2.5E-007      # 0x3D3 LatCtlCurv_NoRate_Actl, 13 bits, zero point 4096
+  CURVATURE_RATE_ZERO = 4096
+  CANFD_CURVATURE_RATE_SCALE = 1E-006  # 0x3D6 LatCtlCrv_NoRate2_Actl, 11 bits, zero point 1024
+  CANFD_CURVATURE_RATE_ZERO = 1024
+
+  def _curvature_rate_encoding(self):
+    """(zero point, CAN units per physical unit) for the rate field of the active message."""
+    if self.STEER_MESSAGE == MSG_LateralMotionControl2:
+      return self.CANFD_CURVATURE_RATE_ZERO, self.CANFD_CURVATURE_RATE_SCALE
+    return self.CURVATURE_RATE_ZERO, self.CURVATURE_RATE_SCALE
+
+  def _curvature_rate_raw(self, msg):
+    """Decode the rate field exactly as ford_tx_hook() does."""
+    dat = bytes(msg[0].data)
+    if self.STEER_MESSAGE == MSG_LateralMotionControl2:
+      return (dat[6] << 3) | (dat[7] >> 5)
+    return ((dat[1] & 0x1F) << 8) | dat[2]
+
+  def _max_curvature_rate_can(self, speed):
+    """Mirrors the bound in ford_curvature_rate_check()."""
+    _, scale = self._curvature_rate_encoding()
+    fudged_speed = max(speed - 1.0, 1.0)
+    return int(MAX_LATERAL_JERK / (fudged_speed ** 3) / scale) + 1
+
+  def _curvature_rate_ok(self, msg, speed):
+    """Mirrors ford_curvature_rate_check(): the sentinel is always accepted."""
+    zero, _ = self._curvature_rate_encoding()
+    raw = self._curvature_rate_raw(msg)
+    if raw == zero:
+      return True
+    return abs(raw - zero) <= self._max_curvature_rate_can(speed)
 
   def _set_prev_desired_angle(self, t):
     t = round(t * self.DEG_TO_CAN)
@@ -301,17 +333,57 @@ class TestFordSafetyBase(common.CarSafetyTest):
                   self._set_prev_desired_angle(curvature)
                   self._reset_curvature_measurement(curvature, speed)
 
-                  should_tx = path_offset == 0 and path_angle == 0 and curvature_rate == 0
+                  should_tx = path_offset == 0 and path_angle == 0
                   # when request bit is 0, only allow curvature of 0 since the signal range
                   # is not large enough to enforce it tracking measured
                   should_tx = should_tx and (controls_allowed if steer_control_enabled else curvature == 0)
                   should_tx = should_tx and abs(round(curvature * self.DEG_TO_CAN)) <= max_curvature_can
+                  msg = self._lat_ctl_msg(steer_control_enabled, path_offset, path_angle, curvature, curvature_rate)
+                  should_tx = should_tx and self._curvature_rate_ok(msg, speed)
 
                   with self.subTest(controls_allowed=controls_allowed, steer_control_enabled=steer_control_enabled,
                                     path_offset=float(path_offset), path_angle=float(path_angle), curvature_rate=float(curvature_rate),
                                     curvature=float(curvature)):
-                    self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(steer_control_enabled, path_offset, path_angle, curvature, curvature_rate)))
+                    self.assertEqual(should_tx, self._tx(msg))
 
+  def test_curvature_rate_signal_limits(self):
+    """
+    The curvature rate field is bounded by the ISO lateral jerk limit instead of
+    being pinned to its sentinel. See ford_curvature_rate_check() in modes/ford.h.
+
+    The bound is the conservative one (jerk / v^3) so it holds whether the signal is
+    dcurvature/dt or dcurvature/ds.
+    """
+    self.safety.set_controls_allowed(True)
+
+    # the sentinel must be accepted at every speed: it disables the EPS-side rate term
+    for speed in (0.0, 5.0, 20.0, 30.0, 45.0):
+      self._reset_curvature_measurement(0, speed)
+      self.assertTrue(self._tx(self._lat_ctl_msg(True, 0, 0, 0.0, 0.0)))
+
+    zero, scale = self._curvature_rate_encoding()
+
+    # walk across the bound, one CAN unit either side
+    for speed in (15.0, 20.0, 30.0, 45.0):
+      limit = self._max_curvature_rate_can(speed)
+      self._reset_curvature_measurement(0, speed)
+      for delta in (limit - 2, limit - 1, limit, limit + 1, limit + 2):
+        msg = self._lat_ctl_msg(True, 0, 0, 0.0, delta * scale)
+        raw = self._curvature_rate_raw(msg)
+        # the packer rounds, so derive the expectation from the packed raw value
+        expected = abs(raw - zero) <= limit
+        self.assertEqual(expected, self._tx(msg), f"speed={speed} delta={delta} raw={raw} limit={limit}")
+
+    # a sweep of the field must agree with the bound everywhere
+    step = max(1, zero // 64)
+    for speed in (5.0, 20.0, 45.0):
+      limit = self._max_curvature_rate_can(speed)
+      self._reset_curvature_measurement(0, speed)
+      for raw_delta in range(-(zero // 2), (zero // 2) + 1, step):
+        msg = self._lat_ctl_msg(True, 0, 0, 0.0, raw_delta * scale)
+        raw = self._curvature_rate_raw(msg)
+        expected = (raw == zero) or (abs(raw - zero) <= limit)
+        self.assertEqual(expected, self._tx(msg), f"speed={speed} raw={raw} limit={limit}")
   def test_curvature_rate_limits(self):
     """
     When the curvature error is exceeded, commanded curvature must start moving towards meas respecting rate limits.

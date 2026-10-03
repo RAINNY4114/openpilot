@@ -34,7 +34,9 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.system import sentry
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LC_CONFIRM_DELAY_SEC
+from openpilot.selfdrive.controls.lib.auto_overtake import AutoOvertakeHelper, LANE_PREF_AUTO
+from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutState
 
@@ -58,6 +60,76 @@ from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeC
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
 BIG_MODEL_TIMEOUT = 60
+
+
+# ============================================================================
+# [AUTO_OVERTAKE_WIRING] configuration + diagnostics
+#
+# The prebuilt libparams_c.so of this fork does not know the custom
+# AutoOvertake* keys, so Params() raises UnknownKeyName for them.  Follow the
+# convention already used by card.py::read_param_direct and
+# selfdrived.py::_radar_loss_no_disable and read the param files directly.
+# ============================================================================
+AO_PARAM_DIRS = ("/dev/shm/params", "/data/params/d")
+AO_LOG_PATH = "/data/media/0/auto_overtake.log"
+AO_LOG_MAX_BYTES = 5_000_000
+
+AO_CFG_DEFAULTS = {
+  "enabled": 0,
+  "lane_preference": LANE_PREF_AUTO,
+  "confirm_delay_sec": AUTO_LC_CONFIRM_DELAY_SEC,
+  "min_cruise_kph": 75.0,
+  "lane_prob_min": 0.20,
+}
+
+
+def _ao_read_raw(key):
+  for d in AO_PARAM_DIRS:
+    try:
+      with open(os.path.join(d, key)) as f:
+        return f.read().strip()
+    except Exception:
+      continue
+  return None
+
+
+def _ao_read_num(key, default, cast=float):
+  raw = _ao_read_raw(key)
+  if not raw:
+    return default
+  try:
+    return cast(float(raw))
+  except (TypeError, ValueError):
+    return default
+
+
+def _ao_read_cfg():
+  cfg = dict(AO_CFG_DEFAULTS)
+  cfg["enabled"] = _ao_read_num("AutoOvertakeEnabled", cfg["enabled"], int) != 0
+  cfg["lane_preference"] = _ao_read_num("AutoOvertakeLanePref", cfg["lane_preference"], int)
+  cfg["confirm_delay_sec"] = _ao_read_num("AutoOvertakeConfirmSec", cfg["confirm_delay_sec"])
+  cfg["min_cruise_kph"] = _ao_read_num("AutoOvertakeMinCruiseKph", cfg["min_cruise_kph"])
+  cfg["lane_prob_min"] = _ao_read_num("AutoOvertakeLaneProbMin", cfg["lane_prob_min"])
+  return cfg
+
+
+_ao_log_t = [-1e9]
+
+
+def _ao_log(fields):
+  """Append one diagnostic line per second.  Never raises."""
+  now = time.monotonic()
+  if now - _ao_log_t[0] < 1.0:
+    return
+  _ao_log_t[0] = now
+  try:
+    if os.path.exists(AO_LOG_PATH) and os.path.getsize(AO_LOG_PATH) > AO_LOG_MAX_BYTES:
+      with open(AO_LOG_PATH, "w") as f:
+        f.write("")
+    with open(AO_LOG_PATH, "a") as f:
+      f.write(time.strftime("%H:%M:%S") + " " + " ".join(f"{k}={v}" for k, v in fields.items()) + "\n")
+  except Exception:
+    pass
 
 
 def _pkl_exists(path):
@@ -389,7 +461,7 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay", "radarState"])
 
   publish_state = PublishState()
   chestnut_state = ChestnutState(pm, model.chestnut) if CHESTNUT else None
@@ -420,6 +492,9 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  # [AUTO_OVERTAKE_WIRING]
+  AO = AutoOvertakeHelper()
+  ao_cfg = _ao_read_cfg()
   meta_constants = load_meta_constants()
   RELC = RoadEdgeLaneChangeController()
 
@@ -465,6 +540,7 @@ def main(demo=False):
       model.lat_delay = get_lat_delay(params, sm["lateralDelay"].lateralDelay)
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
+      ao_cfg = _ao_read_cfg()  # [AUTO_OVERTAKE_WIRING]
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
@@ -549,7 +625,90 @@ def main(demo=False):
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
       left_edge, right_edge = RELC.update_and_fill(modelv2_send.modelV2, mdv2sp_send.modelDataV2SP, v_ego)
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
+      # ------------------------------------------------------------------
+      # [AUTO_OVERTAKE_WIRING] automatic overtaking decision layer.
+      #
+      # OEM Delphi radar (radarState.leadOne) is the ONLY overtake trigger.
+      # The helper returns the LaneChangeDirection it wants to move to;
+      # DesireHelper turns that into a normal lane change after a confirmation
+      # delay, so the turn signal is visible and the driver can always cancel.
+      # ------------------------------------------------------------------
+      ao_dir = log.LaneChangeDirection.none
+      ao_fields = {"en": int(bool(ao_cfg["enabled"]))}
+      if ao_cfg["enabled"] and sm.seen['radarState']:
+        try:
+          cs = sm['carState']
+          lead = sm['radarState'].leadOne
+          lane_probs = list(modelv2_send.modelV2.laneLineProbs)
+          lp_left = float(lane_probs[0]) if len(lane_probs) > 0 else 1.0
+          lp_right = float(lane_probs[3]) if len(lane_probs) > 3 else 1.0
+          v_cruise = float(cs.cruiseState.speed) if cs.cruiseState.enabled else 0.0
+          # vRel is the most reliable field; vLead/vLeadK are noisy on this car.
+          v_lead = max(0.0, v_ego + float(lead.vRel))
+          left_ok = (not bool(left_edge)) and lp_left >= ao_cfg["lane_prob_min"]
+          right_ok = (not bool(right_edge)) and lp_right >= ao_cfg["lane_prob_min"]
+          # ------------------------------------------------------------
+          # [AO_SAFETY_TIGHTEN] rear approach zone from the Ford BSM
+          # payload (published by carstate.py as AOBsmZone / AOBsmFault).
+          # ------------------------------------------------------------
+          _lz, _rz, _rf = None, None, None
+          try:
+            _packed = _ao_read_raw("AOBsmZone")
+            if _packed:
+              _pv = int(float(_packed))
+              _lz = _pv // 100
+              _rz = _pv % 100
+            _f = _ao_read_raw("AOBsmFault")
+            if _f:
+              _fv = int(float(_f))
+              _rf = bool(_fv % 10) or bool(_fv // 10)
+          except Exception:
+            _lz, _rz, _rf = None, None, None
+
+          ao_dir = AO.update(
+            enabled=True,
+            lc_state=DH.lane_change_state,
+            v_ego=v_ego,
+            v_cruise=v_cruise,
+            lead_present=bool(lead.present),
+            lead_d=float(lead.dRel),
+            v_lead=v_lead,
+            left_ok=left_ok,
+            right_ok=right_ok,
+            is_rhd=bool(is_rhd),
+            manual_blinker=bool(cs.leftBlinker or cs.rightBlinker),
+            bsm_available=True,
+            left_bsm=bool(cs.leftBlindspot),
+            right_bsm=bool(cs.rightBlindspot),
+            left_rear_zone=_lz,
+            right_rear_zone=_rz,
+            rear_sensor_fault=_rf,
+            lane_preference=int(ao_cfg["lane_preference"]),
+            min_cruise_speed=float(ao_cfg["min_cruise_kph"]) * CV.KPH_TO_MS,
+            require_aux_sensors=False,
+          )
+          st = AO.get_state()
+          ao_fields.update({
+            "v": round(v_ego * 3.6, 1), "vc": round(v_cruise * 3.6, 1),
+            "lp": int(bool(lead.present)), "d": round(float(lead.dRel), 1), "vl": round(v_lead, 1),
+            "lok": int(left_ok), "rok": int(right_ok),
+            "lbsm": int(bool(cs.leftBlindspot)), "rbsm": int(bool(cs.rightBlindspot)),
+            "lp0": round(lp_left, 2), "lp3": round(lp_right, 2),
+            "ao": int(ao_dir), "mode": st["mode"], "why": st["last_reason"],
+            "dh": int(DH.lane_change_state), "dhd": int(DH.lane_change_direction),
+          })
+        except Exception:
+          cloudlog.exception("auto overtake update failed")
+          AO.reset()
+          ao_dir = log.LaneChangeDirection.none
+      else:
+        AO.reset()
+        ao_fields["why"] = "disabled" if not ao_cfg["enabled"] else "no_radarstate"
+      _ao_log(ao_fields)
+
+      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
+                auto_lane_change_direction=ao_dir,
+                auto_confirm_delay_sec=float(ao_cfg["confirm_delay_sec"]))
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid

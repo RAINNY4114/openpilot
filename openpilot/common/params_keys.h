@@ -50,6 +50,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"GithubSshKeys", {PERSISTENT | BACKUP, STRING}},
     {"GithubUsername", {PERSISTENT | BACKUP, STRING}},
     {"GitRemote", {PERSISTENT, STRING}},
+    {"GPSQualityOK", {CLEAR_ON_MANAGER_START, BOOL, "0"}},
     {"GsmApn", {PERSISTENT | BACKUP, STRING}},
     {"GsmMetered", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"GsmRoaming", {PERSISTENT | BACKUP, BOOL}},
@@ -295,4 +296,36 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TorqueParamsOverrideEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TorqueParamsOverrideFriction", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
     {"TorqueParamsOverrideLatAccelFactor", {PERSISTENT | BACKUP, FLOAT, "2.5"}},
+    // Ford/Lincoln curve speed control params
+    {"dp_lincoln_curve_speed", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_curve_window_m", {PERSISTENT, INT, "130"}},
+    {"dp_lincoln_curve_k_enter", {PERSISTENT, INT, "4"}},
+    {"dp_lincoln_curve_decel", {PERSISTENT, INT, "-320"}},
+    {"dp_lincoln_osm_realtime_cruise", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_stop_distance_m", {PERSISTENT, INT, "4"}},
+
+    // ------------------------------------------------------------------
+    // Custom keys for this fork.
+    //
+    // These MUST be listed here.  params.cc compiles this table into
+    // libparams_c.so, and Params::clearAll() unlinks any /data/params/d
+    // file whose name is not in the table (params.cc:217-220).  Missing
+    // keys were being wiped on manager start / onroad / offroad /
+    // ignition-on, which silently reverted dp_radar_loss_no_disable and
+    // the whole AutoOvertake* configuration.
+    // ------------------------------------------------------------------
+    {"dp_radar_loss_no_disable", {PERSISTENT, BOOL, "1"}},
+    {"dp_mr76_lane_enable", {PERSISTENT, BOOL, "0"}},
+    {"dp_mr76_log_enable", {PERSISTENT, BOOL, "0"}},
+    {"dp_amap_lidar_enable", {PERSISTENT, BOOL, "0"}},
+    {"dp_amap_lidar_mask", {PERSISTENT, INT, "5"}},
+    {"dp_bsm_voice_enabled", {PERSISTENT, BOOL, "1"}},
+    {"dp_bsm_voice_interval_sec", {PERSISTENT, INT, "3"}},
+    {"dp_bsm_voice_volume_pct", {PERSISTENT, INT, "100"}},
+    {"AutoOvertakeEnabled", {PERSISTENT, BOOL, "1"}},
+    {"AutoOvertakeLanePref", {PERSISTENT, INT, "0"}},
+    {"AutoOvertakeConfirmSec", {PERSISTENT, FLOAT, "3.0"}},
+    {"AutoOvertakeMinCruiseKph", {PERSISTENT, FLOAT, "90.0"}},
+    {"AutoOvertakeLaneProbMin", {PERSISTENT, FLOAT, "0.0"}},
+
 };

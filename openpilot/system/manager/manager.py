@@ -67,6 +67,16 @@ def manager_init() -> None:
   except PermissionError:
     print(f"WARNING: failed to make {Paths.shm_path()}")
 
+  # ===== added: purge stale cereal shm on start (fix hot-restart Lateral/Steering Fault) =====
+  # Solves the global race: edit any file -> hot restart -> controlsd/modeld attach to a
+  # stale /dev/shm cereal segment -> MPC first solve fails -> "Lateral/Steering Fault".
+  try:
+    from openpilot.system.manager.manager_shm_patch import cleanup_shared_memory_on_start
+    cleanup_shared_memory_on_start()
+  except Exception:
+    pass
+  # ===== added end =====
+
   # set params
   serial = HARDWARE.get_serial()
   params.put("Version", build_metadata.openpilot.version, block=True)

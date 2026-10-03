@@ -153,6 +153,45 @@ static void ford_rx_hook(const CANPacket_t *msg) {
   }
 }
 
+// Curvature rate signal scale, from the DBC:
+//   LatCtlCurv_NoRate_Actl  (BO_ 979 / 0x3D3) : 13 bits, 2.5E-007 per unit, zero point 4096
+//   LatCtlCrv_NoRate2_Actl  (BO_ 982 / 0x3D6) : 11 bits, 1E-006  per unit, zero point 1024
+// Note the two messages use different scales for the same physical quantity.
+#define FORD_CURVATURE_RATE_SCALE 2.5E-007f
+#define FORD_CANFD_CURVATURE_RATE_SCALE 1E-006f
+
+// Bound the redundant EPS-side curvature rate signal.
+//
+// Upstream pins this field to its sentinel because the signal is "not yet tested".
+// That is stronger than it needs to be: the field is small-signal (full scale
+// +/-0.001024, about 5% of the max curvature command), and the curvature command
+// itself is already limited by steer_curvature_cmd_checks() to the ISO 11270
+// lateral accel and jerk limits. A rate term can therefore only ask the EPS for
+// motion that the curvature command is already allowed to make.
+//
+// The bound is chosen to hold under BOTH possible readings of the signal
+// (dcurvature/dt, or dcurvature/ds as the "1/meter^2" unit in the DBC suggests):
+//   - read as dcurvature/dt, the physical rate is `rate`, and this permits 1/v of the ISO limit
+//   - read as dcurvature/ds, the physical rate is `v * rate`, and this permits exactly the ISO limit
+// Since v >= 1, MAX_LATERAL_JERK / v^3 <= MAX_LATERAL_JERK / v^2, so this is the
+// tighter of the two and never exceeds the ISO limit under either reading.
+// Revisit the exponent once the signal's time base is confirmed against factory CAN.
+//
+// The sentinel is always accepted: it disables the EPS-side rate term entirely.
+static bool ford_curvature_rate_check(unsigned int raw_curvature_rate, unsigned int inactive_curvature_rate,
+                                      float rate_scale) {
+  if (raw_curvature_rate == inactive_curvature_rate) {
+    return false;
+  }
+  static const float MAX_LATERAL_JERK = 3.0 + (EARTH_G * AVERAGE_ROAD_ROLL);  // ~3.6 m/s^3
+  const float fudged_speed = SAFETY_MAX((vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.0, 1.0);
+  const float max_rate_sec = MAX_LATERAL_JERK / (fudged_speed * fudged_speed * fudged_speed);
+  const int max_rate_can = (int)(max_rate_sec / rate_scale) + 1;
+  const int rate = (int)raw_curvature_rate - (int)inactive_curvature_rate;
+  return safety_max_limit_check(rate, max_rate_can, -max_rate_can);
+}
+
+
 static bool ford_tx_hook(const CANPacket_t *msg) {
   const LongitudinalLimits FORD_LONG_LIMITS = {
     // acceleration cmd limits (used for brakes)
@@ -235,8 +274,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     unsigned int raw_path_angle = (msg->data[3] << 3) | (msg->data[4] >> 5);
     unsigned int raw_path_offset = (msg->data[5] << 2) | (msg->data[6] >> 6);
 
-    // These signals are not yet tested with the current safety limits
-    bool violation = (raw_curvature_rate != FORD_INACTIVE_CURVATURE_RATE) || (raw_path_angle != FORD_INACTIVE_PATH_ANGLE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
+    // path_angle / path_offset are still unused by openpilot and must stay at their sentinels
+    bool violation = (raw_path_angle != FORD_INACTIVE_PATH_ANGLE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
+    // curvature_rate is bounded instead of pinned to its sentinel, see ford_curvature_rate_check()
+    violation |= ford_curvature_rate_check(raw_curvature_rate, FORD_INACTIVE_CURVATURE_RATE, FORD_CURVATURE_RATE_SCALE);
 
     // Check angle error and steer_control_enabled
     int desired_curvature = raw_curvature - FORD_INACTIVE_CURVATURE;  // /FORD_STEERING_LIMITS.curvature_to_can to get real curvature
@@ -256,8 +297,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     unsigned int raw_path_angle = ((msg->data[3] & 0x1FU) << 6) | (msg->data[4] >> 2);
     unsigned int raw_path_offset = ((msg->data[4] & 0x3U) << 8) | msg->data[5];
 
-    // These signals are not yet tested with the current safety limits
-    bool violation = (raw_curvature_rate != FORD_CANFD_INACTIVE_CURVATURE_RATE) || (raw_path_angle != FORD_INACTIVE_PATH_ANGLE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
+    // path_angle / path_offset are still unused by openpilot and must stay at their sentinels
+    bool violation = (raw_path_angle != FORD_INACTIVE_PATH_ANGLE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
+    // curvature_rate is bounded instead of pinned to its sentinel, see ford_curvature_rate_check()
+    violation |= ford_curvature_rate_check(raw_curvature_rate, FORD_CANFD_INACTIVE_CURVATURE_RATE, FORD_CANFD_CURVATURE_RATE_SCALE);
 
     // Check angle error and steer_control_enabled
     int desired_curvature = raw_curvature - FORD_INACTIVE_CURVATURE;  // /FORD_STEERING_LIMITS.curvature_to_can to get real curvature

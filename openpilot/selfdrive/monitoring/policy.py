@@ -31,9 +31,16 @@ class DRIVER_MONITOR_SETTINGS:
     self._WHEELTOUCH_POLICY_ALERT_1_TIMEOUT = 7.
     self._WHEELTOUCH_POLICY_ALERT_2_TIMEOUT = 20.
     self._WHEELTOUCH_POLICY_ALERT_3_TIMEOUT = 30.
-    self._VISION_POLICY_ALERT_1_TIMEOUT = 7.
-    self._VISION_POLICY_ALERT_2_TIMEOUT = 12.
-    self._VISION_POLICY_ALERT_3_TIMEOUT = 18.
+    # [RELAXED-DM 2026-09-30] 视觉分心告警放宽到"接近关闭"(用户要求)。
+    # 上游默认 7 / 12 / 18 s。这三项决定 awareness 从 1.0 衰减到
+    # alert_1 / alert_2 / alert_3 所需的【连续】分心时长:
+    #   step_change       = DT_DMON / T_3
+    #   threshold_alert_N = 1 - T_N / T_3
+    # 必须保持 T_1 <= T_2 <= T_3, 否则 threshold 非单调、级别会跳变。
+    # 改后 60 / 180 / 300 s: 连续分心满 1 分钟才第一次 "Pay Attention"。
+    self._VISION_POLICY_ALERT_1_TIMEOUT = 60.
+    self._VISION_POLICY_ALERT_2_TIMEOUT = 180.
+    self._VISION_POLICY_ALERT_3_TIMEOUT = 300.
 
     # no response = alert_3 sustained for certain amount of time
     self._NO_RESPONSE_TIMEOUT = 5.
@@ -75,7 +82,11 @@ class DRIVER_MONITOR_SETTINGS:
     self._DCAM_UNCERTAIN_RESET_COUNT = int(2  / DT_DMON)
     self._HI_STD_THRESHOLD = 0.3
     self._HI_STD_FALLBACK_TIME = int(10  / DT_DMON)  # fall back to wheel touch if model is uncertain for 10s
-    self._DISTRACTED_FILTER_TS = 0.25  # 0.6Hz
+    # [RELAXED-DM 2026-09-30] 上游 0.25 (0.6Hz)。
+    # alpha = dt/(rc+dt), dt=DT_DMON=0.05 -> rc=0.25 时 alpha≈0.167,
+    # rc=1.0 时 alpha≈0.048。filter.x 要越过 0.63("确定分心")需要连续分心
+    # 约 rc*ln(1/(1-0.63)) ≈ 1s, 于是 <1s 的一瞥/扫后视镜不再累积。
+    self._DISTRACTED_FILTER_TS = 1.0
 
     self._POSE_CALIB_MIN_SPEED = 13  # 30 mph
     self._POSE_OFFSET_MIN_COUNT = int(60 / DT_DMON)  # valid data counts before calibration completes, 1min cumulative

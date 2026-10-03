@@ -82,6 +82,11 @@ class HudRendererSP(HudRenderer):
     y = rect.y + 45
 
     set_speed_rect = rl.Rectangle(x, y, set_speed_width, UI_CONFIG.set_speed_height)
+    # [FIX] CURVE_SIGN_RECT_FIX: the base class stored this rect in
+    # self._set_speed_rect; this override only used a local, so
+    # HudRenderer._draw_curve_widget() bailed out on `self._set_speed_rect
+    # is None` every single frame and the curve sign was never drawn.
+    self._set_speed_rect = set_speed_rect
     rl.draw_rectangle_rounded(set_speed_rect, 0.35, 10, COLORS.BLACK_TRANSLUCENT)
     rl.draw_rectangle_rounded_lines_ex(set_speed_rect, 0.35, 10, 6, COLORS.BORDER_TRANSLUCENT)
 

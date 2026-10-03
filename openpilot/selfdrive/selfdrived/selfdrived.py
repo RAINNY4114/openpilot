@@ -34,6 +34,55 @@ from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.con
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
+
+# ============================================================================
+# [P3] radar-bus loss tolerance
+#
+# Mirrors the helper in opendbc/car/ford/radar_interface.py. opendbc must not
+# import openpilot, so the 20-line reader is duplicated rather than shared.
+#
+# libparams_c.so is stale on this device (new keys raise UnknownKeyName), so
+# read the param file directly. Hot reloaded, never raises.
+# ============================================================================
+
+RADAR_LOSS_PARAM = "dp_radar_loss_no_disable"
+RADAR_LOSS_PARAM_DIRS = ("/dev/shm/params", "/data/params/d")
+_RADAR_LOSS_REFRESH_SEC = 2.0
+_RADAR_LOSS_LOG_SEC = 10.0
+
+_radar_loss_cache = {"t": -1e9, "v": False, "log_t": -1e9}
+
+
+def _radar_loss_no_disable():
+  """True when a radar-bus CAN dropout must NOT disable openpilot."""
+  now = time.monotonic()
+  if now - _radar_loss_cache["t"] < _RADAR_LOSS_REFRESH_SEC:
+    return _radar_loss_cache["v"]
+
+  val = False
+  for d in RADAR_LOSS_PARAM_DIRS:
+    try:
+      with open(os.path.join(d, RADAR_LOSS_PARAM), "r") as f:
+        raw = f.read().strip()
+    except Exception:
+      continue
+    if raw:
+      val = raw == "1" or raw.lower() == "true"
+      break
+
+  _radar_loss_cache["t"] = now
+  _radar_loss_cache["v"] = val
+  return val
+
+
+def _log_radar_loss_suppressed(reason):
+  """Rate-limited breadcrumb so the next drive can be verified."""
+  now = time.monotonic()
+  if now - _radar_loss_cache["log_t"] < _RADAR_LOSS_LOG_SEC:
+    return
+  _radar_loss_cache["log_t"] = now
+  cloudlog.event("radar_loss_no_disable", reason=reason, error=False)
+
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
@@ -417,10 +466,26 @@ class SelfdriveD(CruiseHelper):
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
     if self.CP.openpilotLongitudinalControl:
+      # [P3] radar-bus loss tolerance
+      #
+      # radarErrors.canError / radarUnavailableTemporary are raised by the
+      # Ford radar interface when the private radar bus degrades. Both map to
+      # NO_ENTRY events (IMMEDIATE_DISABLE / SOFT_DISABLE), which is what made
+      # openpilot exit and refuse to re-engage until the bus recovered.
+      #
+      # radarFault is deliberately NOT gated: it means a real configuration
+      # problem (e.g. wrongConfig), which should keep blocking.
+      radar_loss_tolerated = _radar_loss_no_disable()
       if self.sm['radarState'].radarErrors.canError:
-        self.events.add(EventName.canError)
+        if radar_loss_tolerated:
+          _log_radar_loss_suppressed("canError")
+        else:
+          self.events.add(EventName.canError)
       elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
-        self.events.add(EventName.radarTempUnavailable)
+        if radar_loss_tolerated:
+          _log_radar_loss_suppressed("radarUnavailableTemporary")
+        else:
+          self.events.add(EventName.radarTempUnavailable)
       elif any(self.sm['radarState'].radarErrors.to_dict().values()):
         self.events.add(EventName.radarFault)
     if CS.canTimeout:

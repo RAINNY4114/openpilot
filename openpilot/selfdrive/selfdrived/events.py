@@ -751,13 +751,13 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # - CAN data is received, but some message are not received at the right frequency
   # If you're not writing a new car port, this is usually cause by faulty wiring
   EventName.canError: {
-    ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("Unknown Vehicle Variant"),
+    ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("CAN Bus Error: Restart the Car"),
     ET.PERMANENT: Alert(
-      "Unknown Vehicle Variant",
+      "CAN Bus Error: Likely Faulty Wiring",
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, 1., creation_delay=1.),
-    ET.NO_ENTRY: NoEntryAlert("Unknown Vehicle Variant"),
+    ET.NO_ENTRY: NoEntryAlert("CAN Bus Error: Check Wiring"),
   },
 
   EventName.canBusMissing: {

@@ -27,6 +27,10 @@ UBLOX_SOS_NACK = b"\xb5\x62\x09\x14\x08\x00\x02\x00\x00\x00\x00\x00\x00\x00"
 UBLOX_BACKUP_RESTORE_MSG = b"\xb5\x62\x09\x14\x08\x00\x03"
 UBLOX_ASSIST_ACK = b"\xb5\x62\x13\x60\x08\x00"
 
+# AssistNow Online GNSS request order.
+# Try adding BeiDou first for better performance in China.
+_ASSISTNOW_GNSS_CANDIDATES = ("gps,glo,bds", "gps,glo")
+
 def set_power(enabled: bool) -> None:
   gpio_init(GPIO.UBLOX_SAFEBOOT_N, True)
   gpio_init(GPIO.GNSS_PWR_EN, True)
@@ -47,20 +51,26 @@ def get_assistnow_messages() -> list[bytes]:
   params = Params()
   if token := params.get('AssistNowToken'):
     cloudlog.warning("Downloading AssistNow data directly from u-blox")
-    r = requests.get("https://online-live2.services.u-blox.com/GetOnlineData.ashx", params=urllib.parse.urlencode({
-      'token': token,
-      'gnss': 'gps,glo',
-      'datatype': 'eph,alm,aux',
-    }, safe=':,'), timeout=5)
+    for gnss in _ASSISTNOW_GNSS_CANDIDATES:
+      try:
+        r = requests.get("https://online-live2.services.u-blox.com/GetOnlineData.ashx", params=urllib.parse.urlencode({
+          'token': token,
+          'gnss': gnss,
+          'datatype': 'eph,alm,aux',
+        }, safe=':,'), timeout=5)
+        r.raise_for_status()
+        dat = r.content
+        break
+      except Exception:
+        continue
+    else:
+      raise RuntimeError("All AssistNow GNSS requests failed")
   elif dongle_id := params.get('DongleId'):
     cloudlog.warning("Downloading AssistNow data from comma's AGPS proxy")
     api = Api(dongle_id)
     r = api.get(f"v1/{dongle_id}/assist", access_token=api.get_token(), timeout=5)
   else:
     raise RuntimeError("Neither AssistNowToken nor DongleId is configured")
-
-  r.raise_for_status()
-  dat = r.content
 
   # split up messages
   msgs = []

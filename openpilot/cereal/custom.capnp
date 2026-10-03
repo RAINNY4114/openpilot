@@ -470,6 +470,11 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
+struct AmapNavi @0xb7c9e2a41d6f5831 {
+       leftBlind @0 :Int32;
+       rightBlind @1 :Int32;
+}
+
 struct CustomReserved10 @0xcb9fd56c7057593a {
 }
 

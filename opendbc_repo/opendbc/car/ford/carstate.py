@@ -7,191 +7,249 @@ from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.ford.mads import MadsCarState
 
+
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
 
+
 class CarState(CarStateBase, MadsCarState):
-def **init**(self, CP, CP_SP):
-CarStateBase.**init**(self, CP, CP_SP)
-MadsCarState.**init**(self, CP, CP_SP)
+  def __init__(self, CP, CP_SP):
+    CarStateBase.__init__(self, CP, CP_SP)
+    MadsCarState.__init__(self, CP, CP_SP)
 
-```
-can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
+    can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
 
-if CP.transmissionType == TransmissionType.automatic:
-  self.shifter_values = can_define.dv["TransGearData"]["GearLvrPos_D_Actl"]
+    if CP.transmissionType == TransmissionType.automatic:
+      self.shifter_values = can_define.dv["TransGearData"]["GearLvrPos_D_Actl"]
 
-self.distance_button = 0
-self.lc_button = 0
-```
+    self.distance_button = 0
+    self.lc_button = 0
 
-def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
-cp = can_parsers[Bus.pt]
-cp_cam = can_parsers[Bus.cam]
+  def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
+    cp = can_parsers[Bus.pt]
+    cp_cam = can_parsers[Bus.cam]
 
-```
-ret = structs.CarState()
-ret_sp = structs.CarStateSP()
+    ret = structs.CarState()
+    ret_sp = structs.CarStateSP()
 
-# Occasionally on startup, the ABS module recalibrates the steering pinion offset,
-# so we need to block engagement.
-# The vehicle usually recovers out of this state within a minute of normal driving.
-self.vehicle_sensors_valid = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"] < 32766
+    # Occasionally on startup, the ABS module recalibrates the steering pinion offset,
+    # so we need to block engagement.
+    # The vehicle usually recovers out of this state within a minute of normal driving.
+    self.vehicle_sensors_valid = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"] < 32766
 
-# car speed
-ret.vEgoRaw = cp.vl["BrakeSysFeatures"]["Veh_V_ActlBrk"] * CV.KPH_TO_MS
-ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
-ret.yawRate = cp.vl["Yaw_Data_FD1"]["VehYaw_W_Actl"]
-ret.standstill = cp.vl["DesiredTorqBrk"]["VehStop_D_Stat"] == 1
+    # car speed
+    ret.vEgoRaw = cp.vl["BrakeSysFeatures"]["Veh_V_ActlBrk"] * CV.KPH_TO_MS
+    ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
+    ret.yawRate = cp.vl["Yaw_Data_FD1"]["VehYaw_W_Actl"]
+    ret.standstill = cp.vl["DesiredTorqBrk"]["VehStop_D_Stat"] == 1
 
-# gas pedal
-ret.gasPressed = (
-  cp.vl["EngVehicleSpThrottle"]["ApedPos_Pc_ActlArb"] / 100. > 1e-6
-)
+    # gas pedal
+    ret.gasPressed = cp.vl["EngVehicleSpThrottle"]["ApedPos_Pc_ActlArb"] / 100. > 1e-6
 
-# brake pedal
-ret.brakePressed = cp.vl["EngBrakeData"]["BpedDrvAppl_D_Actl"] == 2
-ret.parkingBrake = cp.vl["DesiredTorqBrk"]["PrkBrkStatus"] in (1, 2)
+    # brake pedal
+    ret.brakePressed = cp.vl["EngBrakeData"]["BpedDrvAppl_D_Actl"] == 2
+    ret.parkingBrake = cp.vl["DesiredTorqBrk"]["PrkBrkStatus"] in (1, 2)
 
-# steering wheel
-ret.steeringAngleDeg = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"]
-ret.steeringTorque = cp.vl["EPAS_INFO"]["SteeringColumnTorque"]
-ret.steeringPressed = self.update_steering_pressed(
-  abs(ret.steeringTorque) > CarControllerParams.STEER_DRIVER_ALLOWANCE,
-  5,
-)
-ret.steerFaultTemporary = cp.vl["EPAS_INFO"]["EPAS_Failure"] == 1
-ret.steerFaultPermanent = cp.vl["EPAS_INFO"]["EPAS_Failure"] in (2, 3)
-ret.espDisabled = cp.vl["Cluster_Info1_FD1"]["DrvSlipCtlMde_D_Rq"] != 0
+    # steering wheel
+    ret.steeringAngleDeg = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"]
+    ret.steeringTorque = cp.vl["EPAS_INFO"]["SteeringColumnTorque"]
+    ret.steeringPressed = self.update_steering_pressed(
+      abs(ret.steeringTorque) > CarControllerParams.STEER_DRIVER_ALLOWANCE,
+      5,
+    )
+    ret.steerFaultTemporary = cp.vl["EPAS_INFO"]["EPAS_Failure"] == 1
+    ret.steerFaultPermanent = cp.vl["EPAS_INFO"]["EPAS_Failure"] in (2, 3)
+    ret.espDisabled = cp.vl["Cluster_Info1_FD1"]["DrvSlipCtlMde_D_Rq"] != 0
 
-if self.CP.flags & FordFlags.CANFD:
-  ret.steerFaultTemporary |= (
-    cp.vl["Lane_Assist_Data3_FD1"]["LatCtlSte_D_Stat"] not in (1, 2, 3)
-  )
+    if self.CP.flags & FordFlags.CANFD:
+      ret.steerFaultTemporary |= (
+        cp.vl["Lane_Assist_Data3_FD1"]["LatCtlSte_D_Stat"] not in (1, 2, 3)
+      )
 
-# cruise state
-is_metric = (
-  cp.vl["INSTRUMENT_PANEL"]["METRIC_UNITS"] == 1
-  if not self.CP.flags & FordFlags.CANFD
-  else False
-)
+    # cruise state
+    is_metric = (
+      cp.vl["INSTRUMENT_PANEL"]["METRIC_UNITS"] == 1
+      if not self.CP.flags & FordFlags.CANFD
+      else False
+    )
 
-ret.cruiseState.speed = cp.vl["EngBrakeData"]["Veh_V_DsplyCcSet"] * (
-  CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS
-)
-ret.cruiseState.enabled = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (4, 5)
-ret.cruiseState.available = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (3, 4, 5)
-ret.cruiseState.nonAdaptive = cp.vl["Cluster_Info1_FD1"]["AccEnbl_B_RqDrv"] == 0
-ret.cruiseState.standstill = cp.vl["EngBrakeData"]["AccStopMde_D_Rq"] == 3
-ret.accFaulted = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (1, 2)
+    ret.cruiseState.speed = cp.vl["EngBrakeData"]["Veh_V_DsplyCcSet"] * (
+      CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS
+    )
+    ret.cruiseState.enabled = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (4, 5)
+    ret.cruiseState.available = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (3, 4, 5)
+    ret.cruiseState.nonAdaptive = cp.vl["Cluster_Info1_FD1"]["AccEnbl_B_RqDrv"] == 0
+    ret.cruiseState.standstill = cp.vl["EngBrakeData"]["AccStopMde_D_Rq"] == 3
+    ret.accFaulted = cp.vl["EngBrakeData"]["CcStat_D_Actl"] in (1, 2)
 
-if not self.CP.openpilotLongitudinalControl:
-  ret.accFaulted = (
-    ret.accFaulted
-    or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
-  )
+    if not self.CP.openpilotLongitudinalControl:
+      ret.accFaulted = (
+        ret.accFaulted
+        or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
+      )
 
-# gear
-if self.CP.transmissionType == TransmissionType.automatic:
-  gear_lvr_pos = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
+    # gear
+    #
+    # GearLvrPos_D_Actl VAL_TABLE (ford_lincoln_base_pt.dbc):
+    #   1 = Reverse, 3 = Drive, 4 = Sport_DriveSport (S), 5 = Low
+    #
+    # S is reported as GearShifter.sport so openpilot can tell it apart from D
+    # (the FordCurveController Sport profile consumes it). This REQUIRES
+    # `GearShifter.sport` to be listed in Ford's `DRIVABLE_GEARS`
+    # (opendbc/car/ford/interface.py): car_events.py flags any gear that is
+    # neither `drive` nor in `DRIVABLE_GEARS` as EventName.wrongGear, and
+    # wrongGear carries a NO_ENTRY event ("Gear not D") that blocks cruise
+    # engagement outright.
+    if self.CP.transmissionType == TransmissionType.automatic:
+      gear_lvr_pos = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
 
-  if gear_lvr_pos in (3, 4, 5):
-    ret.gearShifter = GearShifter.drive
-  elif gear_lvr_pos == 1:
-    ret.gearShifter = GearShifter.reverse
+      if gear_lvr_pos == 4:
+        ret.gearShifter = GearShifter.sport
+      elif gear_lvr_pos in (3, 5):
+        ret.gearShifter = GearShifter.drive
+      elif gear_lvr_pos == 1:
+        ret.gearShifter = GearShifter.reverse
 
-elif self.CP.transmissionType == TransmissionType.manual:
-  ret.clutchPressed = (
-    cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
-  )
+    elif self.CP.transmissionType == TransmissionType.manual:
+      ret.clutchPressed = (
+        cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
+      )
 
-  if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-    ret.gearShifter = GearShifter.reverse
-  else:
-    ret.gearShifter = GearShifter.drive
+      if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
+        ret.gearShifter = GearShifter.reverse
+      else:
+        ret.gearShifter = GearShifter.drive
 
-# safety
-ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])
-ret.stockAeb = bool(cp_cam.vl["ACCDATA_2"]["CmbbBrkDecel_B_Rq"])
+    # safety
+    ret.stockFcw = bool(cp_cam.vl["ACCDATA_3"]["FcwVisblWarn_B_Rq"])
+    ret.stockAeb = bool(cp_cam.vl["ACCDATA_2"]["CmbbBrkDecel_B_Rq"])
 
-# button presses
-ret.leftBlinker = (
-  cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 1
-)
-ret.rightBlinker = (
-  cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 2
-)
-ret.genericToggle = bool(
-  cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"]
-)
+    # button presses
+    ret.leftBlinker = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 1
+    ret.rightBlinker = cp.vl["Steering_Data_FD1"]["TurnLghtSwtch_D_Stat"] == 2
+    ret.genericToggle = bool(
+      cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"]
+    )
 
-prev_distance_button = self.distance_button
-prev_lc_button = self.lc_button
+    prev_distance_button = self.distance_button
+    prev_lc_button = self.lc_button
 
-self.distance_button = (
-  cp.vl["Steering_Data_FD1"]["AccButtnGapTogglePress"]
-)
-self.lc_button = bool(
-  cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"]
-)
+    self.distance_button = cp.vl["Steering_Data_FD1"]["AccButtnGapTogglePress"]
+    self.lc_button = bool(
+      cp.vl["Steering_Data_FD1"]["TjaButtnOnOffPress"]
+    )
 
-# lock info
-ret.doorOpen = any([
-  cp.vl["BodyInfo_3_FD1"]["DrStatDrv_B_Actl"],
-  cp.vl["BodyInfo_3_FD1"]["DrStatPsngr_B_Actl"],
-  cp.vl["BodyInfo_3_FD1"]["DrStatRl_B_Actl"],
-  cp.vl["BodyInfo_3_FD1"]["DrStatRr_B_Actl"],
-])
+    # lock info
+    ret.doorOpen = any([
+      cp.vl["BodyInfo_3_FD1"]["DrStatDrv_B_Actl"],
+      cp.vl["BodyInfo_3_FD1"]["DrStatPsngr_B_Actl"],
+      cp.vl["BodyInfo_3_FD1"]["DrStatRl_B_Actl"],
+      cp.vl["BodyInfo_3_FD1"]["DrStatRr_B_Actl"],
+    ])
 
-ret.seatbeltUnlatched = (
-  cp.vl["RCMStatusMessage2_FD1"]["FirstRowBuckleDriver"] == 2
-)
+    ret.seatbeltUnlatched = (
+      cp.vl["RCMStatusMessage2_FD1"]["FirstRowBuckleDriver"] == 2
+    )
 
-# blindspot sensors
-if self.CP.enableBsm:
-  cp_bsm = cp_cam if self.CP.flags & FordFlags.CANFD else cp
+    # blindspot sensors
+    if self.CP.enableBsm:
+      cp_bsm = cp_cam if self.CP.flags & FordFlags.CANFD else cp
 
-  ret.leftBlindspot = (
-    cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
-  )
-  ret.rightBlindspot = (
-    cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
-  )
+      ret.leftBlindspot = (
+        cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
+      )
+      ret.rightBlindspot = (
+        cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
+      )
 
-self.buttons_stock_values = cp.vl["Steering_Data_FD1"]
-self.acc_tja_status_stock_values = cp_cam.vl["ACCDATA_3"]
-self.lkas_status_stock_values = cp_cam.vl["IPMA_Data"]
+      # ------------------------------------------------------------------
+      # [AO_SAFETY_TIGHTEN]
+      #
+      # Publish the full Ford cross-traffic / blind-spot payload so the
+      # automatic-overtake helper can require a real rear gap instead of a
+      # single boolean.
+      #
+      #   CtaAlrtLeft2_D_Stat : 0 Off, 1 Zone1(near) .. 4 Zone4(far)
+      #   CtaSnsLeft_D_Stat   : 0 Clear, 1 Blocked, 2 Failure, 3 Invalid
+      #   SodDetctLeft_D_Stat : 0 Clear, 1 Alert, 2 Flash, 3 Fault, 4 Blocked
+      #
+      # Packed as  left*100 + right   (0..499) into a single integer Param.
+      # ------------------------------------------------------------------
+      try:
+        import os as _ao_os
 
-MadsCarState.update_mads(self, ret, can_parsers)
+        _l_zone = int(cp_bsm.vl["Side_Detect_L_Stat"]["CtaAlrtLeft2_D_Stat"])
+        _r_zone = int(cp_bsm.vl["Side_Detect_R_Stat"]["CtaAlrtRight2_D_Stat"])
 
-ret.buttonEvents = [
-  *create_button_events(
-    self.distance_button,
-    prev_distance_button,
-    {1: ButtonType.gapAdjustCruise},
-  ),
-  *create_button_events(
-    self.lc_button,
-    prev_lc_button,
-    {1: ButtonType.lkas},
-  ),
-]
+        _l_sns = int(cp_bsm.vl["Side_Detect_L_Stat"]["CtaSnsLeft_D_Stat"])
+        _r_sns = int(cp_bsm.vl["Side_Detect_R_Stat"]["CtaSnsRight_D_Stat"])
 
-return ret, ret_sp
-```
+        _l_fault = 1 if (_l_sns != 0 or _l_zone > 4) else 0
+        _r_fault = 1 if (_r_sns != 0 or _r_zone > 4) else 0
 
-@staticmethod
-def get_can_parsers(CP, CP_SP):
-return {
-Bus.pt: CANParser(
-DBC[CP.carFingerprint][Bus.pt],
-[],
-CanBus(CP).main,
-),
-Bus.cam: CANParser(
-DBC[CP.carFingerprint][Bus.pt],
-[],
-CanBus(CP).camera,
-),
-}
+        if _l_zone > 4:
+          _l_zone = 4
+        if _r_zone > 4:
+          _r_zone = 4
+
+        _zone_val = _l_zone * 100 + _r_zone
+        _fault_val = _l_fault * 10 + _r_fault
+
+        # Write only on change: this runs at CAN rate (100 Hz), so an
+        # unconditional write would hammer the param files.
+        _cache = getattr(self, "_ao_bsm_cache", None)
+        if _cache != (_zone_val, _fault_val):
+          self._ao_bsm_cache = (_zone_val, _fault_val)
+
+          # This fork's libparams_c.so does not know custom keys, so publish
+          # through the same file channel modeld already reads.
+          for _k, _v in (
+            ("AOBsmZone", "%d" % _zone_val),
+            ("AOBsmFault", "%d" % _fault_val),
+          ):
+            for _d in ("/dev/shm/params", "/data/params/d"):
+              try:
+                with open(_ao_os.path.join(_d, _k), "w") as _f:
+                  _f.write(_v)
+                break
+              except Exception:
+                continue
+      except Exception:
+        pass
+
+    self.buttons_stock_values = cp.vl["Steering_Data_FD1"]
+    self.acc_tja_status_stock_values = cp_cam.vl["ACCDATA_3"]
+    self.lkas_status_stock_values = cp_cam.vl["IPMA_Data"]
+
+    MadsCarState.update_mads(self, ret, can_parsers)
+
+    ret.buttonEvents = [
+      *create_button_events(
+        self.distance_button,
+        prev_distance_button,
+        {1: ButtonType.gapAdjustCruise},
+      ),
+      *create_button_events(
+        self.lc_button,
+        prev_lc_button,
+        {1: ButtonType.lkas},
+      ),
+    ]
+
+    return ret, ret_sp
+
+  @staticmethod
+  def get_can_parsers(CP, CP_SP):
+    return {
+      Bus.pt: CANParser(
+        DBC[CP.carFingerprint][Bus.pt],
+        [],
+        CanBus(CP).main,
+      ),
+      Bus.cam: CANParser(
+        DBC[CP.carFingerprint][Bus.pt],
+        [],
+        CanBus(CP).camera,
+      ),
+    }

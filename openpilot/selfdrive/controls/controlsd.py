@@ -18,6 +18,9 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
+from openpilot.selfdrive.controls.lib.lateral_clearance import LateralClearance
+from openpilot.selfdrive.controls.lib.curve_lane_bias import CurveLaneBias
+from openpilot.selfdrive.controls.lib.ford_curve_controller import FordPlanLead
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
@@ -52,6 +55,14 @@ class Controls(ControlsExt):
     self.steer_limited_by_safety = False
     self.curvature = 0.0
     self.desired_curvature = 0.0
+
+    # lane-centering trim + lateral clearance bias (barrier / adjacent large vehicle)
+    # disabled by default -> zero behaviour change until /data/lateral_clearance.json enables it
+    self.lateral_clearance = LateralClearance()
+
+    # 弯道内圈偏移：直道居中、进弯后随曲率比例往内侧挪（默认开启，见 /data/curve_lane_bias.json）
+    self.curve_lane_bias = CurveLaneBias()
+    self.dp_ford_lead = FordPlanLead()
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -143,6 +154,19 @@ class Controls(ControlsExt):
       new_desired_curvature = self.sm['lateralManeuverPlan'].desiredCurvature if CC.latActive else self.curvature
     else:
       new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+    # dp_ford Tier 1: adaptive model-plan curvature lead. Default OFF (dp_ford_lead_enable).
+    # Inserted BEFORE the lateral_clearance / curve_lane_bias trims so those
+    # centering corrections are added at full strength afterwards, instead of
+    # being scaled by (1 - b) along with the planner term.
+    new_desired_curvature = self.dp_ford_lead.apply(
+      model_v2, CS.vEgo, new_desired_curvature, self.sm['lateralDelay'].lateralDelay,
+      active=bool(CC.latActive))
+    new_desired_curvature += self.lateral_clearance.update(CC.latActive, model_v2, CS.vEgo, DT_CTRL)
+    # 弯道内圈偏移：变道过程中不介入，避免跟变道抢方向
+    new_desired_curvature += self.curve_lane_bias.update(
+      CC.latActive, model_v2, CS.vEgo, DT_CTRL,
+      lane_change_active=model_v2.meta.laneChangeState != LaneChangeState.off,
+      steering_pressed=bool(CS.steeringPressed))
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 

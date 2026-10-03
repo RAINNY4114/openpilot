@@ -600,11 +600,11 @@ def ensure_running(
     # This is the main fix for:
     #
     #   child process exits
-    #       â†“
+    #       ¡ý
     #   self.proc remains non-None
-    #       â†“
+    #       ¡ý
     #   start() returns
-    #       â†“
+    #       ¡ý
     #   process never comes back
     #
     if p.proc is not None and p.proc.exitcode is not None:

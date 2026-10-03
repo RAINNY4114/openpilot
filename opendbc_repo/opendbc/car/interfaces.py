@@ -89,7 +89,7 @@ class RadarInterfaceBase(ABC):
     self.track_id: int = 0
     self.frame = 0
 
-  def update(self, can_packets: list[tuple[int, list[CanData]]]) -> structs.RadarDataT | None:
+  def update(self, can_packets: list[tuple[int, list[CanData]]], v_ego: float | None = None) -> structs.RadarDataT | None:
     self.frame += 1
     if (self.frame % 5) == 0:  # 20 Hz is very standard
       return structs.RadarData()
