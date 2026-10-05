@@ -91,20 +91,14 @@ class CarState(CarStateBase, MadsCarState):
 
     # gear
     if self.CP.transmissionType == TransmissionType.automatic:
-      gear_lvr_pos = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
-
-      if gear_lvr_pos in (3, 4, 5):
-        ret.gearShifter = GearShifter.drive
-      elif gear_lvr_pos == 1:
-        ret.gearShifter = GearShifter.reverse
-
+      if (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] in (3, 4, 5)):
+      ret.gearShifter = GearShifter.drive
+      elif (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] == 1):
+      ret.gearShifter = GearShifter.reverse
     elif self.CP.transmissionType == TransmissionType.manual:
-      ret.clutchPressed = (
-        cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
-      )
-
+      ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
       if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-        ret.gearShifter = GearShifter.reverse
+         ret.gearShifter = GearShifter.reverse
       else:
         ret.gearShifter = GearShifter.drive
 
