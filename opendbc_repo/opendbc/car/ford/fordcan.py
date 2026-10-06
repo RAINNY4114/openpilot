@@ -394,3 +394,85 @@ def create_button_msg(packer, bus: int, stock_values: dict, cancel=False, resume
     "TjaButtnOnOffPress": 1 if tja_toggle else 0,   # LCA/TJA toggle button
   })
   return packer.make_can_msg("Steering_Data_FD1", bus, values)
+
+
+# ===========================================================================
+# [C2_APA] Ford Active Park Assist (APA) steering command
+#
+# 移植来源: C2 (DragonPilot 0.8.1) fordcan.py create_steer_command()
+#   C2 原版:
+#       def create_steer_command(packer, angle_cmd, enabled, action, angleReq):
+#         values = {"ApaSys_D_Stat": action,
+#                   "EPASExtAngleStatReq": angleReq,
+#                   "ExtSteeringAngleReq2": angle_cmd}
+#         return packer.make_can_msg("ParkAid_Data", 2, values)
+#
+# 设备 DBC 实测 (ford_lincoln_base_pt.dbc BO_ 936) + CANPacker 往返验证:
+#   ExtSteeringAngleReq2 : 22|15@0+ (0.1,-1000)  -> raw = ((d[2]&0x7F)<<8)|d[3]
+#   EPASExtAngleStatReq  : 23|1@0+               -> d[2] bit7
+#   ApaSys_D_Stat        : 61|3@0+               -> d[7] bit3..5
+#
+# ⚠️ 总线路由: C2 硬编码 bus=2; 设备经 FINGERPRINTS 核对 0x3A8 在 main(0),
+#    且设备 carstate.py 用 cp (Bus.pt) 读 ParkAid_Data -> 用 CAN.main。
+# ===========================================================================
+
+APA_STEER_MSG_NAME = "ParkAid_Data"
+
+# ApaSys_D_Stat 取值 (设备 DBC VAL_ table)
+APA_STAT_NULL = 0            # Null
+APA_STAT_OFF = 1             # Off
+APA_STAT_ON = 2              # On
+APA_STAT_OVERSPEED = 3       # Overspeed
+APA_STAT_CANCELLED = 4       # ApaCancelled
+APA_STAT_NOT_ACCESSIBLE = 5  # NotAccessible
+APA_STAT_FINISHED = 6        # Finished
+APA_STAT_FAULTY = 7          # Faulty
+
+
+def create_apa_steer_msg(packer, CAN: CanBus, apa_stat: int,
+                         ext_angle_req: int, angle_deg: float):
+  """创建 Ford APA 转向指令 (ParkAid_Data, 0x3A8)
+
+  Args:
+    packer:         CANPacker
+    CAN:            设备 fordcan.CanBus 对象
+    apa_stat:       ApaSys_D_Stat, 推荐 0/1/2
+    ext_angle_req:  EPASExtAngleStatReq, 0=NoRequest 1=Request
+    angle_deg:      ExtSteeringAngleReq2, 方向盘绝对角度 (deg)
+
+  Returns: packer 结果 (可直接 append 到 can_sends)
+  频率: 20Hz
+  """
+  values = {
+    "ApaSys_D_Stat": int(apa_stat),
+    "EPASExtAngleStatReq": int(ext_angle_req),
+    "ExtSteeringAngleReq2": float(angle_deg),
+  }
+  return packer.make_can_msg(APA_STEER_MSG_NAME, CAN.main, values)
+
+
+def create_apa_steer_msg_raw(angle_deg: float, apa_stat: int = 2,
+                             ext_angle_req: int = 1):
+  """不依赖 packer 的原始字节打包 (离线验证 / 单元测试)
+
+  Returns: (0x3A8, bytes(8))
+  """
+  raw_angle = int(round((float(angle_deg) + 1000.0) / 0.1))
+  raw_angle = max(0, min(0x7FFF, raw_angle))   # 15 bit
+
+  data = bytearray(8)
+  data[2] = (raw_angle >> 8) & 0x7F            # raw 高 7 位
+  data[3] = raw_angle & 0xFF                   # raw 低 8 位
+  data[2] |= (int(ext_angle_req) & 0x01) << 7  # EPASExtAngleStatReq
+  data[7] = (int(apa_stat) & 0x07) << 3        # ApaSys_D_Stat
+
+  return 0x3A8, bytes(data)
+
+
+def apa_unpack_steer_msg(data):
+  """反解 ParkAid_Data 的 APA 三位 (与 panda ford.h 校验公式一致)
+
+  Returns: (angle_deg, ext_angle_req, apa_stat)
+  """
+  raw = ((data[2] & 0x7F) << 8) | data[3]
+  return raw * 0.1 - 1000.0, (data[2] >> 7) & 0x01, (data[7] >> 3) & 0x07

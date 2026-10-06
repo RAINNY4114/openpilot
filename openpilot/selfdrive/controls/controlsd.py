@@ -20,8 +20,10 @@ from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurv
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.lateral_clearance import LateralClearance
 from openpilot.selfdrive.controls.lib.curve_lane_bias import CurveLaneBias
+from openpilot.selfdrive.controls.lib.lateral_planner_avoid import ObstacleAvoidance
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordPlanLead
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.aa_brake_apply import AABrakeApply
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -62,7 +64,16 @@ class Controls(ControlsExt):
 
     # 弯道内圈偏移：直道居中、进弯后随曲率比例往内侧挪（默认开启，见 /data/curve_lane_bias.json）
     self.curve_lane_bias = CurveLaneBias()
+    # 通用静止障碍避让（故障车/落石/锥桶）：>80km/h 自动关闭，交给紧急转向避让
+    # disabled by default -> /data/lateral_planner_avoid.json 里 enabled=true 才生效
+    self.lateral_planner_avoid = ObstacleAvoidance()
     self.dp_ford_lead = FordPlanLead()
+
+    # [AA_BRAKE_FALLBACK] 紧急刹车纵向落地通道。
+    # 把 auto_avoidance.py 产出的 brake_request（经 modeld 镜像到
+    # /data/params/d/AvoidBrakeReq）转成 a_target 的负向修正量。
+    # disabled by default（/data/aa_brake_apply.json 里 enabled=true 才生效）
+    self.aa_brake_apply = AABrakeApply()
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -146,7 +157,34 @@ class Controls(ControlsExt):
 
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
-    actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
+
+    # ------------------------------------------------------------------
+    # [AA_BRAKE_FALLBACK] 紧急刹车纵向落地
+    #
+    # auto_avoidance.py 在「无安全逃逸车道 + 风险已达 emergency_active」
+    # 时会产出一个减速度请求，经 modeld 镜像到
+    # /data/params/d/AvoidBrakeReq。本模块把它转成 a_target 的负向修正：
+    #
+    #     a_target_final = a_target_plan + delta_a      (delta_a <= 0)
+    #
+    # 安全边界（务必保留）：
+    #   - delta_a 恒 <= 0：本通道**只能让目标更负（更接近刹车）**，
+    #     绝不会让车加速，因此不存在"误加速"风险。
+    #   - 仅当 CC.longActive 为真时介入；未使能纵向输出恒 0。
+    #   - 模块内部默认关闭（config 缺失即 enabled=false），另有
+    #     observe_only / 硬限幅 / 速率限制 / 请求超时守卫。
+    #   - 整个调用包 try/except，任何异常都回落为不介入。
+    #   - 结果再与 plan 的 aTarget 取 min，双保险。
+    # ------------------------------------------------------------------
+    _a_target_plan = float(long_plan.aTarget)
+    try:
+      _aa_delta_a = float(self.aa_brake_apply.update(v_ego=CS.vEgo, long_active=bool(CC.longActive)))
+    except Exception:
+      _aa_delta_a = 0.0
+    if _aa_delta_a < 0.0:
+      _a_target_plan = min(_a_target_plan, _a_target_plan + _aa_delta_a)
+
+    actuators.accel = float(self.LoC.update(CC.longActive, CS, _a_target_plan, long_plan.shouldStop, pid_accel_limits))
 
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
@@ -161,12 +199,19 @@ class Controls(ControlsExt):
     new_desired_curvature = self.dp_ford_lead.apply(
       model_v2, CS.vEgo, new_desired_curvature, self.sm['lateralDelay'].lateralDelay,
       active=bool(CC.latActive))
-    new_desired_curvature += self.lateral_clearance.update(CC.latActive, model_v2, CS.vEgo, DT_CTRL)
+    # 2026-10-05: 传入 steering_pressed, 与 curve_lane_bias 的让权判据对齐
+    new_desired_curvature += self.lateral_clearance.update(
+      CC.latActive, model_v2, CS.vEgo, DT_CTRL,
+      steering_pressed=bool(CS.steeringPressed))
     # 弯道内圈偏移：变道过程中不介入，避免跟变道抢方向
     new_desired_curvature += self.curve_lane_bias.update(
       CC.latActive, model_v2, CS.vEgo, DT_CTRL,
       lane_change_active=model_v2.meta.laneChangeState != LaneChangeState.off,
       steering_pressed=bool(CS.steeringPressed))
+    # 通用静止障碍避让：返回曲率修正量（1/m）；变道中不介入，避免抢方向
+    new_desired_curvature += self.lateral_planner_avoid.update(
+      CC.latActive, model_v2, CS.vEgo, DT_CTRL, sm=self.sm,
+      lane_change_active=model_v2.meta.laneChangeState != LaneChangeState.off)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 

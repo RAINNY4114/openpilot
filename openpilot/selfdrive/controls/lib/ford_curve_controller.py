@@ -5,48 +5,25 @@
 Ford / Lincoln Curve Controller
 RAINNY4114 Ford curvature-control adaptation for sunnypilot.
 
+Enhanced with BluePilot bp-7.0 angle control (path_angle / c1 signal):
+  - Path angle computation: kappa * v_ego * curvature_factor
+  - Variable lookup time (VLT): adaptive lookahead for curve entry/exit
+  - PSCM saturation handling: rate-limit angle decrease near DBC limits
+  - Soft ROC: speed-dependent path_angle rate-of-change limit
+
 Purpose
 -------
 Improve Ford / Lincoln non-CAN-FD EPS corner behavior by controlling
 curvature request rate, curvature error, entry/hold/exit behavior and
 driver-intervention reset.
 
-Important
----------
-This module ONLY modifies lateral curvature request.
-
-It does NOT:
-- control steering torque directly
-- create CAN messages
-- control longitudinal acceleration
-- control radar
-- control MR76
-- control LiDAR
-- control lane changes
-- modify radarState
-- modify longitudinalPlan
-
-Design
-------
-Model curvature
-      |
-      +--> Human Turn Detection
-      |
-      +--> Curve Entry / Hold / Exit
-      |
-      +--> Ford current-curvature error limit
-      |
-      +--> Ford curvature-rate / unwind limit
-      |
-      +--> lateral acceleration limit
-      |
-      +--> hard curvature limit
-      |
-      +--> final output
+The path_angle (c1) signal provides additional heading authority to the
+PSCM, especially beneficial for large turns and continuous curves where
+curvature alone may saturate or unwind too early.
 """
 
-import math
 import os
+import math
 import time
 from enum import Enum, auto
 
@@ -56,87 +33,12 @@ from openpilot.common.params import Params
 
 
 # ============================================================================
-# Runtime-tunable parameter access — direct file I/O
-#
-# The compiled C++ params library on this device (`libparams_c.so`) is STALE:
-# it does not contain this fork's custom keys, so `Params.get()/get_bool()`
-# raises UnknownKeyName for them. Anything here that needs a *custom* key
-# therefore reads the param file directly, exactly like
-# `ford_curve_speed.py` and `sunnypilot/mapd/live_map_data/osm_map_data.py`.
-#
-# Read order:  /dev/shm/params/<key>  ->  /data/params/d/<key>  ->  built-in default
-# A missing or unparsable file always falls back to the default, so an
-# unconfigured device behaves exactly as before.
-#
-# Values are re-read at most every PARAM_REFRESH_SEC seconds, so tuning takes
-# effect WITHOUT restarting controlsd.
-# ============================================================================
-
-# Read order: the fork-owned dir FIRST, then the volatile/persistent params dirs.
-#
-# `/data/ford_params` is a plain directory, NOT the params dir, so
-# Params::clearAll() never touches it.  That is the whole point: params_keys.h
-# cannot be recompiled on this device (no SConscript/SConstruct in the tree), so
-# every dp_ford_* / dp_htd_* key written into /data/params/d is unlinked on the
-# next manager start -- see params.cc:208-224.  Writing them here instead makes
-# them survive.  Same approach as curve_bend.py, which keeps its config in
-# /data/ford_curve.json for exactly this reason.
-PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
-
-
-def _read_param_direct(key):
-  """Return the raw string value of a param, or None. Never raises."""
-  for d in PARAM_DIRS:
-    try:
-      with open(os.path.join(d, key), "r") as f:
-        val = f.read().strip()
-      if val:
-        return val
-    except Exception:
-      continue
-  return None
-
-
-def _read_float(key, default, lo=None, hi=None):
-  """Read a float param, clamped to [lo, hi]. Falls back to `default`."""
-  try:
-    raw = _read_param_direct(key)
-    if raw is None:
-      return float(default)
-    val = float(raw)
-    if not math.isfinite(val):
-      return float(default)
-    if lo is not None:
-      val = max(float(lo), val)
-    if hi is not None:
-      val = min(float(hi), val)
-    return float(val)
-  except Exception:
-    return float(default)
-
-
-def _read_bool(key, default):
-  """Read a boolean param. Accepts '1' / 'true' (case-insensitive)."""
-  try:
-    raw = _read_param_direct(key)
-    if raw is None:
-      return bool(default)
-    return raw == "1" or raw.lower() == "true"
-  except Exception:
-    return bool(default)
-
-
-# ============================================================================
 # Ford limits
 # ============================================================================
 
 MAX_CURVATURE = 0.02
 
 # Ford EPS equivalent lateral acceleration limit.
-#
-# RAINNY's Ford controller uses ~2.2 m/s^2 for the CAN-FD path.
-# For the Q3/non-CANFD path we keep the existing SP tuning at 2.5 m/s^2,
-# while the curvature-rate limiter remains the primary EPS protection.
 MAX_LATERAL_ACCEL = 2.5
 
 MIN_SPEED = 8.0
@@ -157,76 +59,48 @@ MID_GAIN = 1.10
 EXIT_GAIN = 1.05
 
 # Output filter.
-#
-# Smaller value = stronger filtering of the previous value.
-# This is intentionally kept compatible with the user's previous controller.
 CURVATURE_FILTER = 0.15
 
 
 # ============================================================================
-# Low-speed lateral stabilizer (dp_ford_ls_*)
-#
-# Purpose: remove the low-speed "hunting" (画龙) seen in jam / crawl driving.
-#
-# On this fork BOTH hard protections in this file are disabled by their speed
-# gates at 12-26 km/h:
-#   _current_curvature_limit : speed <= CURRENT_CURVATURE_MIN_SPEED (9.0 m/s)
-#   _speed_limit             : speed <  MIN_SPEED (8.0 m/s)
-# leaving only the Ford rate table (lo = 0.00050/frame = 0.01 /s) and a final
-# IIR with alpha = 0.85 (tau ~ 0.33 s).  The model's own desired-curvature
-# hunting (Std up to 2.8e-3, Range 1.06e-2) therefore reaches the wheel.
-#
-# The stabilizer below acts ONLY below `ls_max_speed` and is DEFAULT OFF.
+# Path Angle (c1) Constants - Adapted from BluePilot bp-7.0
 # ============================================================================
 
-LS_ENABLE_DEFAULT = False      # dp_ford_ls_enable
-LS_MAX_SPEED = 8.0             # dp_ford_ls_max_speed   [m/s] 28.8 km/h
-LS_TETHER_ERROR = 0.0012       # dp_ford_ls_tether_err   [1/m] anti-hunt band
-LS_TETHER_LEAD = 6.0           # same-side lead multiplier (see _ls_tether)
-LS_HUNT_WINDOW = 8.0           # [s]   excursion-history window for the hunt detector
-LS_HUNT_REVERSALS = 2          # direction reversals inside the window -> hunting
-LS_RATE_SCALE = 0.55           # dp_ford_ls_rate_scale   rate-table multiplier
-LS_FILTER_HZ = 0.7             # dp_ford_ls_filter_hz    low-pass cutoff
+# PSCM short lookahead distance (d_ref) vs speed (m/s -> m)
+_PSCM_DREF_SPEEDS_MS = (0.0, 4.17, 27.78, 41.67, 50.0, 55.56)
+_PSCM_DREF_M = (0.5, 0.95, 1.4, 2.075, 2.75, 3.875)
 
+# Variable lookup time (VLT): adapts model lookahead to speed and curve depth.
+# Extra lookahead collapses toward zero at high speed (PSCM responds faster)
+# and at large curvature (prevents importing "start unwinding" signal too early).
+_VLT_T_EXTRA_MAX = 0.10              # max extra lookahead above t_base (s)
+_VLT_V_LOW_MS = 25.0 * 0.44704       # 25 mph -- full extra lookahead at or below
+_VLT_V_HIGH_MS = 55.0 * 0.44704      # 55 mph -- no extra lookahead at or above
+_VLT_KAPPA_FULL = 0.005              # 1/m -- full extra lookahead below this curvature
+_VLT_KAPPA_TAPER = 0.020             # 1/m -- no extra lookahead above this curvature
 
-# Anti-overshoot low-pass.
-#
-# NOTE: this controller is called at 20 Hz (CarControllerParams.STEER_STEP == 5
-# at a 100 Hz CarController), so the real step is 0.05 s. The legacy hardcoded
-# dt of 0.01 makes the effective time constant ~25 s instead of AO_TAU (~5 s),
-# i.e. the anti-overshoot filter is 5x slower than its docstring claims.
-#
-# `dp_ford_ao_dt` defaults to the legacy 0.01 so behaviour is unchanged; set it
-# to 0.05 on the device to get the intended AO_TAU.
-AO_TAU = 5.0
-AO_DT = 0.01
+# PSCM saturation handling: rate-limit path_angle decrease near DBC limits.
+# Prevents snap corrections when PSCM is released from authority limit.
+# Scaled for 20Hz lateral tick cadence (STEER_STEP=5, DT_CTRL=0.01).
+_PSCM_SAT_UNWIND_RATE = 0.02          # rad/call at 20Hz = 0.40 rad/s (23 deg/s)
+FORD_DBC_PATH_ANGLE_MIN = -0.5        # rad
+FORD_DBC_PATH_ANGLE_MAX = 0.5235      # rad (~30 degrees)
 
+# Soft ROC on path_angle (rad/call at 20Hz).
+# Scaled x5 from BluePilot 100Hz values to restore same real-world rate on 20Hz cadence.
+# At 9-10 m/s: 63 deg/s, at 15 m/s: 49 deg/s, at 25 m/s: 10 deg/s
+_SOFT_ROC_SPEEDS = [9., 10., 15., 25.]
+_SOFT_ROC_RATES = [0.055, 0.055, 0.0425, 0.009]
 
-# ============================================================================
-# S-gear (Sport) profile
-#
-# When `dp_ford_sport_enable` is set AND the car reports GearShifter.sport, the
-# controller overlays these values on top of the normal tuning. This is the
-# only place in the fork that consumes the Sport gear.
-#
-# The defaults are a deliberately modest step up from the base values, and
-# every upper bound is clamped to what the panda safety layer will actually
-# accept (`opendbc/safety/lateral.h::steer_curvature_cmd_checks` +
-# `modes/ford.h`), so the profile can never produce frames the panda drops:
-#
-#   max_lat_accel   <= 3.6 m/s^2  (ISO_LATERAL_ACCEL + g * AVERAGE_ROAD_ROLL)
-#   max_curvature   is NOT raised -- already at the 0.02 rad/m panda ceiling
-#   curvature_error is NOT raised -- already at the 0.002 panda ceiling
-#
-# With the switch off (the default) the effective values are identical to the
-# base ones, so behaviour is bit-for-bit unchanged.
-# ============================================================================
-
-SPORT_MAX_LATERAL_ACCEL = 3.0
-SPORT_ENTRY_GAIN = 1.20
-SPORT_MID_GAIN = 1.15
-SPORT_EXIT_GAIN = 1.10
-SPORT_RATE_SCALE = 1.25
+# Path angle gains for CAN (non-CANFD) vehicles, including Lincoln Nautilus.
+# Low-speed low-curvature gain is always 1.0 (no boost needed for gentle low-speed curves).
+# Low-speed high-curvature gain is 1.30 (30% boost for sharp low-speed turns).
+# High-speed low-curvature gain is 1.15 (15% boost for gentle highway curves).
+# High-speed high-curvature gain is 1.05 (5% boost; high-speed large curves are
+#   well-served by curvature alone, excessive path_angle could cause instability).
+_PA_GAIN_LOW_CURV_HIGH_SPEED = 1.15
+_PA_GAIN_HIGH_CURV_LOW_SPEED = 1.30
+_PA_GAIN_HIGH_CURV_HIGH_SPEED = 1.05
 
 
 # ============================================================================
@@ -250,191 +124,6 @@ HTD_TRIGGER_CONFIRM_SEC = 0.10
 
 HTD_MIN_RAMP_SEC = 0.50
 HTD_MAX_RAMP_SEC = 1.00
-
-# --- preturned criterion (hwh human_turn.py port) ---------------------------
-# If the driver had already pre-rotated the wheel before the takeover read as a
-# committed turn, hold automatic lateral control longer on release: the driver
-# is mid-manoeuvre and is still unwinding. dp_htd_preturn_factor doubles the
-# hold when set to 2.0; the default 1.0 leaves the existing timing untouched.
-HTD_PRETURN_ANGLE_DEG = 45.0     # wheel must already be past this before trigger
-HTD_PRETURN_DWELL_SEC = 0.40     # ... and held there for at least this long
-HTD_PRETURN_FACTOR_DEFAULT = 1.0
-
-
-# ============================================================================
-# Runtime-tunable limits
-# ============================================================================
-
-class FordLimits:
-  """Runtime-tunable mirror of the constants above.
-
-  Every default equals the module constant, so with no param files present the
-  behaviour is identical to the previously hardcoded version.
-
-  The upper bounds are deliberately capped at what the panda safety layer will
-  actually accept (`opendbc/safety/lateral.h::steer_curvature_cmd_checks` +
-  `modes/ford.h`):
-
-    max_curvature     <= 0.02 rad/m   (FORD_STEERING_LIMITS.max_curvature = 1250)
-    max_lateral_accel <= 3.6  m/s^2   (ISO_LATERAL_ACCEL + EARTH_G * AVERAGE_ROAD_ROLL)
-
-  Requesting more than that would only produce blocked CAN frames -- the panda
-  would flag a violation and drop the message, so it is not a usable authority
-  increase.
-  """
-
-  def __init__(self):
-    self.last_read = 0.0
-
-    # S-gear (Sport) state. Updated every frame by `set_sport()`.
-    self.sport_active = False
-
-    self.refresh(force=True)
-
-  def refresh(self, force=False):
-    now = time.monotonic()
-
-    if not force and (now - self.last_read) < PARAM_REFRESH_SEC:
-      return
-
-    self.last_read = now
-
-    # --- hard limits ---
-    self.max_curvature = _read_float(
-      "dp_ford_max_curvature", MAX_CURVATURE, 0.002, 0.02,
-    )
-
-    self.max_lateral_accel = _read_float(
-      "dp_ford_max_lat_accel", MAX_LATERAL_ACCEL, 0.5, 3.6,
-    )
-
-    self.min_speed = _read_float(
-      "dp_ford_min_speed", MIN_SPEED, 0.0, 20.0,
-    )
-
-    # --- current-curvature tether ---
-    self.curvature_error = _read_float(
-      "dp_ford_curvature_error", CURVATURE_ERROR, 0.0, 0.01,
-    )
-
-    self.cc_min_speed = _read_float(
-      "dp_ford_cc_min_speed", CURRENT_CURVATURE_MIN_SPEED, 0.0, 30.0,
-    )
-
-    # --- curvature rate table, per 20 Hz frame ---
-    self.windup_lo = _read_float("dp_ford_rate_windup_lo", 0.00050, 0.00005, 0.005)
-    self.windup_hi = _read_float("dp_ford_rate_windup_hi", 0.00011, 0.00005, 0.005)
-    self.unwind_lo = _read_float("dp_ford_rate_unwind_lo", 0.00055, 0.00005, 0.005)
-    self.unwind_hi = _read_float("dp_ford_rate_unwind_hi", 0.00020, 0.00005, 0.005)
-
-    # --- curve gains ---
-    self.entry_gain = _read_float("dp_ford_entry_gain", ENTRY_GAIN, 0.5, 1.5)
-    self.mid_gain = _read_float("dp_ford_mid_gain", MID_GAIN, 0.5, 1.5)
-    self.exit_gain = _read_float("dp_ford_exit_gain", EXIT_GAIN, 0.5, 1.5)
-
-    # --- anti-overshoot ---
-    self.ao_tau = _read_float("dp_ford_ao_tau", AO_TAU, 0.1, 60.0)
-    self.ao_dt = _read_float("dp_ford_ao_dt", AO_DT, 0.001, 0.2)
-
-    # When set, restrict `_anti_overshoot()` to the curve EXIT phase, which is
-    # the only phase its docstring claims to protect. Default 0 preserves the
-    # legacy behaviour, where it also throttles ENTRY and HOLD and -- because
-    # `dp_ford_ao_dt` defaults to 0.01 against a real 0.05 s step -- pins the
-    # commanded curvature at roughly its 0.002 rad/m gate.
-    self.ao_exit_only = _read_bool("dp_ford_ao_exit_only", False)
-    self.ao_enable = _read_bool("dp_ford_ao_enable", True)
-
-    # --- human turn detection ---
-    self.htd_enabled = _read_bool("dp_htd_enabled", False)
-
-    self.htd_angle_threshold_deg = _read_float(
-      "dp_htd_turn_angle_threshold", HTD_DEFAULT_ANGLE_THRESHOLD_DEG, 20.0, 120.0,
-    )
-
-    # --- S-gear (Sport) profile ---
-    self.sport_enable = _read_bool("dp_ford_sport_enable", False)
-
-    self.sport_max_lateral_accel = _read_float(
-      "dp_ford_sport_max_lat_accel", SPORT_MAX_LATERAL_ACCEL, 0.5, 3.6,
-    )
-
-    self.sport_entry_gain = _read_float(
-      "dp_ford_sport_entry_gain", SPORT_ENTRY_GAIN, 0.5, 1.5,
-    )
-
-    self.sport_mid_gain = _read_float(
-      "dp_ford_sport_mid_gain", SPORT_MID_GAIN, 0.5, 1.5,
-    )
-
-    self.sport_exit_gain = _read_float(
-      "dp_ford_sport_exit_gain", SPORT_EXIT_GAIN, 0.5, 1.5,
-    )
-
-    self.sport_rate_scale = _read_float(
-      "dp_ford_sport_rate_scale", SPORT_RATE_SCALE, 1.0, 3.0,
-    )
-
-    # --- low-speed lateral stabilizer (default OFF) ---
-    self.ls_enable = _read_bool("dp_ford_ls_enable", LS_ENABLE_DEFAULT)
-
-    self.ls_max_speed = _read_float(
-      "dp_ford_ls_max_speed", LS_MAX_SPEED, 0.0, 15.0,
-    )
-
-    self.ls_tether_err = _read_float(
-      "dp_ford_ls_tether_err", LS_TETHER_ERROR, 0.0, 0.01,
-    )
-
-    self.ls_rate_scale = _read_float(
-      "dp_ford_ls_rate_scale", LS_RATE_SCALE, 0.05, 1.0,
-    )
-
-    self.ls_filter_hz = _read_float(
-      "dp_ford_ls_filter_hz", LS_FILTER_HZ, 0.05, 5.0,
-    )
-
-    # Resolve the effective values = base, overlaid by Sport when enabled.
-    self._refresh_sport()
-
-  def set_sport(self, active):
-    """Tell the limiter whether the car is in Sport.
-
-    Called once per controller frame. Cheap: the overlay is only recomputed
-    when the state actually flips.
-    """
-    active = bool(active)
-
-    if active == self.sport_active:
-      return
-
-    self.sport_active = active
-
-    self._refresh_sport()
-
-  def _refresh_sport(self):
-    """Effective values = base tuning, overlaid by the Sport profile.
-
-    With `dp_ford_sport_enable` unset (default) these are identical to the base
-    values, so the controller behaves exactly as before.
-    """
-    on = bool(self.sport_enable and self.sport_active)
-
-    self.sport_on = on
-
-    self.lat_accel_limit = (
-      self.sport_max_lateral_accel if on else self.max_lateral_accel
-    )
-
-    self.gain_entry = self.sport_entry_gain if on else self.entry_gain
-    self.gain_mid = self.sport_mid_gain if on else self.mid_gain
-    self.gain_exit = self.sport_exit_gain if on else self.exit_gain
-
-    self.rate_scale = self.sport_rate_scale if on else 1.0
-
-
-def now_mono():
-  """Monotonic seconds. Thin wrapper so the HTD additions stay readable."""
-  return time.monotonic()
 
 
 class HTDState(Enum):
@@ -477,12 +166,6 @@ class HumanTurnDetection:
     self.max_turn_angle = 0.0
     self.dynamic_delay = HTD_MIN_RAMP_SEC
 
-    # preturned latch: set when the trigger fires with the wheel already
-    # pre-rotated, consumed by the RAMPING branch to extend the hold.
-    self.preturned = False
-    self.preturn_since = 0.0
-    self.preturn_factor = HTD_PRETURN_FACTOR_DEFAULT
-
   def _read_params(self):
     now = time.monotonic()
 
@@ -491,23 +174,27 @@ class HumanTurnDetection:
 
     self.last_params_read = now
 
-    # Direct file I/O: `dp_htd_*` are NOT present in the stale libparams_c.so,
-    # so `Params.get_bool("dp_htd_enabled")` raised UnknownKeyName, the bare
-    # `except` swallowed it, and HTD was therefore permanently disabled.
-    self.enabled = _read_bool("dp_htd_enabled", False)
+    try:
+      value = self.params.get_bool("dp_htd_enabled")
+      self.enabled = bool(value)
+    except Exception:
+      self.enabled = False
 
-    self.angle_threshold_deg = _read_float(
-      "dp_htd_turn_angle_threshold",
-      HTD_DEFAULT_ANGLE_THRESHOLD_DEG,
+    try:
+      value = self.params.get("dp_htd_turn_angle_threshold")
+
+      if value is not None:
+        if isinstance(value, bytes):
+          value = value.decode("utf-8", errors="ignore")
+
+        self.angle_threshold_deg = float(value)
+
+    except Exception:
+      self.angle_threshold_deg = HTD_DEFAULT_ANGLE_THRESHOLD_DEG
+
+    self.angle_threshold_deg = max(
       20.0,
-      120.0,
-    )
-
-    self.preturn_factor = _read_float(
-      "dp_htd_preturn_factor",
-      HTD_PRETURN_FACTOR_DEFAULT,
-      1.0,
-      3.0,
+      min(self.angle_threshold_deg, 120.0),
     )
 
   def reset(self):
@@ -516,8 +203,6 @@ class HumanTurnDetection:
     self.trigger_start_time = 0.0
     self.max_turn_angle = 0.0
     self.dynamic_delay = HTD_MIN_RAMP_SEC
-    self.preturned = False
-    self.preturn_since = 0.0
 
   def _transition(self, state):
     if state == self.state:
@@ -588,18 +273,8 @@ class HumanTurnDetection:
 
     self.last_pressed = bool(steering_pressed)
 
-    # --- preturn dwell tracking -------------------------------------------
-    # Measured BEFORE the invalid gate so the timer runs on the same samples
-    # the trigger sees. Cleared whenever the wheel drops back below the
-    # preturn angle, so only a *sustained* pre-rotation counts.
-    if abs(self.last_angle_raw) >= HTD_PRETURN_ANGLE_DEG:
-      if self.preturn_since == 0.0:
-        self.preturn_since = now_mono()
-    else:
-      self.preturn_since = 0.0
-
     invalid = (
-      not self.enabled      
+      not self.enabled
       or not lat_active
       or not (
         HTD_MIN_SPEED_MS
@@ -616,13 +291,6 @@ class HumanTurnDetection:
 
       if self._should_trigger():
         self.max_turn_angle = self.last_angle
-
-        # hwh preturned criterion: was the wheel already pre-rotated and held
-        # there long enough before this takeover read as a committed turn?
-        self.preturned = (
-          self.preturn_since > 0.0
-          and (now_mono() - self.preturn_since) >= HTD_PRETURN_DWELL_SEC
-        )
 
         self._transition(
           HTDState.MANUAL_TURN
@@ -645,13 +313,6 @@ class HumanTurnDetection:
           HTD_MIN_RAMP_SEC,
           min(delay, HTD_MAX_RAMP_SEC),
         )
-
-        # preturned hold extension: no-op at the default factor of 1.0.
-        if self.preturned and self.preturn_factor > 1.0:
-          self.dynamic_delay = min(
-            self.dynamic_delay * self.preturn_factor,
-            HTD_MAX_RAMP_SEC * self.preturn_factor,
-          )
 
         self._transition(
           HTDState.RAMPING
@@ -708,9 +369,6 @@ class FordCurveController:
 
     self.params = Params()
 
-    # Runtime-tunable limits (direct file I/O, hot-reloaded every 2 s).
-    self.limits = FordLimits()
-
     self.last_curvature = 0.0
 
     self.last_requested_curvature = 0.0
@@ -752,13 +410,11 @@ class FordCurveController:
     self.anti_overshoot_curvature_last = 0.0
 
     # ------------------------------------------------------------------------
-    # Low-speed lateral stabilizer (dp_ford_ls_*)
+    # Path angle (c1) state -- BluePilot bp-7.0 angle control
     # ------------------------------------------------------------------------
 
-    self.ls_filtered = 0.0
-    self.ls_hunt_t = 0.0
-    self.ls_hunt_hist = []
-    self.ls_hunt_reversals = 0
+    self.path_angle = 0.0
+    self.path_angle_last = 0.0
 
   # ==========================================================================
   # Reset
@@ -769,11 +425,6 @@ class FordCurveController:
     self.last_curvature = 0.0
 
     self.last_requested_curvature = 0.0
-
-    self.ls_filtered = 0.0
-    self.ls_hunt_t = 0.0
-    self.ls_hunt_hist = []
-    self.ls_hunt_reversals = 0
 
     self.current_curvature = 0.0
 
@@ -792,142 +443,23 @@ class FordCurveController:
     self.apply_curvature_last = 0.0
     self.anti_overshoot_curvature_last = 0.0
 
+    # Reset path angle state
+    self.path_angle = 0.0
+    self.path_angle_last = 0.0
+
     self.htd.reset()
 
   # ==========================================================================
   # Lateral acceleration limit
   # ==========================================================================
 
-  # ==========================================================================
-  # Low-speed lateral stabilizer (dp_ford_ls_*)
-  # ==========================================================================
-
-  def _ls_active(self, speed):
-    """True when the stabilizer should act at this speed."""
-    lim = self.limits
-    return (
-      bool(lim.ls_enable)
-      and float(speed) < float(lim.ls_max_speed)
-    )
-
-  def _ls_hunting(self, curvature):
-    """True when the incoming command is HUNTING rather than turning.
-
-    A genuine low-speed turn holds ONE sign for many seconds (a whole
-    intersection).  Hunting on this car is a SLOW saw at 6-8 s period, i.e.
-    one direction reversal every 3-4 s.  Over an 8 s window that is >= 2
-    reversals; a genuine turn has 0.
-
-    NOTE: an earlier version counted sign flips inside a 2 s window with a
-    threshold of 3 -- the period (6-8 s) is far longer than that, so the
-    detector almost never fired and the stabilizer was inert.
-    """
-    s = 1 if curvature > 0.0008 else (-1 if curvature < -0.0008 else 0)
-
-    now = getattr(self, 'ls_hunt_t', 0.0) + 0.05   # 20 Hz call cadence
-    self.ls_hunt_t = now
-
-    hist = getattr(self, 'ls_hunt_hist', None)
-    if hist is None:
-      hist = []
-      self.ls_hunt_hist = hist
-    hist.append((now, s))
-    while hist and (now - hist[0][0]) > LS_HUNT_WINDOW:
-      hist.pop(0)
-
-    # collapse consecutive identical non-zero signs -> excursion sequence
-    seq = []
-    for (_, ss) in hist:
-      if ss != 0 and (not seq or seq[-1] != ss):
-        seq.append(ss)
-    reversals = max(0, len(seq) - 1)
-
-    self.ls_hunt_reversals = reversals
-    return (reversals >= LS_HUNT_REVERSALS) and (len(seq) >= LS_HUNT_REVERSALS + 1)
-
-  def _ls_tether(self, curvature, current_curvature, speed):
-    """L1: suppress the low-speed command that OPPOSES the measured curvature.
-
-    Reuses the RAINNY idea of _current_curvature_limit, but with its own
-    (much lower) speed gate so it is active in the jam band where the stock
-    gate (CURRENT_CURVATURE_MIN_SPEED = 9.0 m/s) has already switched it off.
-
-    IMPORTANT -- why this is NOT a plain |cmd - measured| clip:
-    a naive symmetric clip at 0.0012 broke REAL low-speed turns.  Offline
-    replay of genuine turns (ls_replay.py --turn-only) showed the tracking
-    gain (peak command / peak request) collapsing from ~0.99 to 0.33, i.e.
-    2/3 of the steering needed for a crawl-speed turn was clipped away ->
-    understeer / lane runout.
-
-    The asymmetry that makes it safe:
-      * command KEEPS the measured sign  -> it is a real turn (the command
-        legitimately LEADS the measured value while the car is still
-        turning in).  Allow a generous lead (tether_err * LS_TETHER_LEAD).
-      * command FLIPS against the measured sign -> the model is hunting past
-        centre; that half is what makes the wheel saw.  Clamp it tightly to
-        the measured value +/- tether_err.
-    """
-    if not self._ls_active(speed):
-      return curvature
-
-    err = float(self.limits.ls_tether_err)
-    meas = float(current_curvature)
-    cmd = float(curvature)
-
-    if cmd * meas >= 0.0:
-      # SAME side as measured -> the car really is turning this way.
-      # Do NOT cap the lead at all: capping it is exactly what understeers
-      # (offline replay showed a 6x band still cost ~35% on mixed segments,
-      # and a symmetric clip cost 66%).  Passing it through untouched keeps
-      # the tracking gain at 1.000.
-      return cmd
-
-    # opposite side: hunting across centre -- clamp tightly
-    return float(np.clip(cmd, meas - err, meas + err))
-
-  def _ls_rate_scale_factor(self, speed):
-    """L2: multiplier applied to the Ford rate table while hunting."""
-    if not self._ls_active(speed):
-      return 1.0
-    if not bool(getattr(self, 'ls_hunt_reversals', 0) >= LS_HUNT_REVERSALS):
-      return 1.0
-    return float(self.limits.ls_rate_scale)
-
-  def _ls_filter(self, curvature, speed):
-    """L3: first-order low-pass, active only at low speed WHILE HUNTING.
-
-    The wobble period is 6-8 s (~0.15 Hz); the default cutoff is 0.7 Hz,
-    so a real lane change / turn at crawl speed is not slowed at all
-    (the gate also excludes it outright), while the hunting is strongly
-    attenuated.
-    """
-    lim = self.limits
-
-    if not self._ls_active(speed) or not bool(getattr(self, 'ls_hunt_reversals', 0) >= LS_HUNT_REVERSALS):
-      # keep the filter state tracking so re-entry does not kick
-      self.ls_filtered = float(curvature)
-      return curvature
-
-    fc = max(float(lim.ls_filter_hz), 0.01)
-    dt = 0.05                     # FordCurveController runs at 20 Hz
-    alpha = 1.0 - math.exp(-2.0 * math.pi * fc * dt)
-
-    self.ls_filtered = (
-      alpha * float(curvature)
-      + (1.0 - alpha) * self.ls_filtered
-    )
-
-    return float(self.ls_filtered)
-
   def _speed_limit(self, curvature, speed):
 
-    lim = self.limits
-
-    if speed < lim.min_speed:
+    if speed < MIN_SPEED:
       return curvature
 
     max_curvature = (
-      lim.lat_accel_limit
+      MAX_LATERAL_ACCEL
       / max(speed * speed, 1.0)
     )
 
@@ -958,16 +490,14 @@ class FordCurveController:
     This prevents abrupt EPS changes and reduces high-speed ping-pong.
     """
 
-    if speed <= self.limits.cc_min_speed:
+    if speed <= CURRENT_CURVATURE_MIN_SPEED:
       return curvature
-
-    err = self.limits.curvature_error
 
     return float(
       np.clip(
         curvature,
-        current_curvature - err,
-        current_curvature + err,
+        current_curvature - CURVATURE_ERROR,
+        current_curvature + CURVATURE_ERROR,
       )
     )
 
@@ -1005,29 +535,21 @@ class FordCurveController:
 
     v = max(float(speed), 0.1)
 
-    lim = self.limits
-
-    # S-gear (Sport) scales the whole rate table; 1.0 when not in Sport.
-    rate_scale = lim.rate_scale
-
-    # L2: tighten the whole table below the low-speed gate.
-    rate_scale = rate_scale * self._ls_rate_scale_factor(v)
-
     windup_rate = float(
       np.interp(
         v,
         [5.0, 25.0],
-        [lim.windup_lo, lim.windup_hi],
+        [0.00050, 0.00011],
       )
-    ) * rate_scale
+    )
 
     unwind_rate = float(
       np.interp(
         v,
         [5.0, 25.0],
-        [lim.unwind_lo, lim.unwind_hi],
+        [0.00055, 0.00020],
       )
-    ) * rate_scale
+    )
 
     delta = target - previous
 
@@ -1116,15 +638,13 @@ class FordCurveController:
     if abs(curvature) <= 0.002:
       return curvature
 
-    lim = self.limits
-
     if self.curve_phase == "ENTRY":
 
-      gain = lim.gain_entry
+      gain = ENTRY_GAIN
 
     elif self.curve_phase == "HOLD":
 
-      gain = lim.gain_mid
+      gain = MID_GAIN
 
     elif self.curve_phase == "EXIT":
 
@@ -1137,11 +657,11 @@ class FordCurveController:
     else:
 
       if speed < 15.0:
-        gain = lim.gain_entry
+        gain = ENTRY_GAIN
       elif speed < 28.0:
-        gain = lim.gain_mid
+        gain = MID_GAIN
       else:
-        gain = lim.gain_exit
+        gain = EXIT_GAIN
 
     return curvature * gain
 
@@ -1178,9 +698,9 @@ class FordCurveController:
     if abs(lat_accel - last_lat_accel) < diff:
       lat_accel = last_lat_accel
 
-    tau = self.limits.ao_tau
+    tau = 5.0
 
-    dt = self.limits.ao_dt
+    dt = 0.01
 
     alpha = 1.0 - math.exp(
       -dt / tau
@@ -1228,6 +748,186 @@ class FordCurveController:
     return self.apply_curvature_last
 
   # ==========================================================================
+  # Path Angle (c1) computation -- BluePilot bp-7.0 angle control
+  # ==========================================================================
+
+  def _pscm_d_ref_m(self, v_ego):
+    """
+    PSCM short lookahead distance (d_ref) vs speed.
+
+    Returns the PSCM's internal short lookahead distance in meters.
+    This is used for VLT computation and as a reference for path_angle.
+    """
+    v = max(float(v_ego), 0.0)
+    d = float(np.interp(v, _PSCM_DREF_SPEEDS_MS, _PSCM_DREF_M))
+    if v > _PSCM_DREF_SPEEDS_MS[-1]:
+      # Doc: d_ref table ends at 3.875 m; cap at 5 m for high speed.
+      d = min(5.0, d)
+    return d
+
+  def _compute_path_angle(self, curvature, v_ego):
+    """
+    Compute path_angle (c1) from curvature.
+
+    Adapted from BluePilot bp-7.0 lateral_angle_ext.py.
+
+    Formula: path_angle = kappa * v_ego * curvature_factor
+
+    Where curvature_factor is a speed and curvature-magnitude-dependent
+    gain that provides additional heading authority for large and
+    continuous turns.
+
+    The VLT (Variable Lookup Time) adjustment provides:
+    - Full extra lookahead at low speed + curve entry (gradual pre-steering)
+    - Tapered lookahead at high speed or large curvature (prevent early unwind)
+    - Zero extra lookahead on curve exit (let planner unwind naturally)
+
+    This is especially beneficial for:
+    - Large turns: path_angle provides heading authority beyond curvature
+    - Continuous turns: VLT prevents premature unwind between curves
+    """
+    # Speed-dependent gains
+    low_gain = float(np.interp(
+      v_ego, [13.5, 26.82],
+      [1.0, _PA_GAIN_LOW_CURV_HIGH_SPEED]
+    ))
+    high_gain = float(np.interp(
+      v_ego, [13.5, 26.82],
+      [_PA_GAIN_HIGH_CURV_LOW_SPEED, _PA_GAIN_HIGH_CURV_HIGH_SPEED]
+    ))
+
+    # Curvature-dependent factor: boost for larger curvatures (bigger turns)
+    curvature_factor = float(np.interp(
+      abs(curvature), [0.0007, 0.001],
+      [low_gain, high_gain]
+    ))
+
+    # Base path_angle = kappa * v_ego * curvature_factor
+    path_angle = curvature * v_ego * curvature_factor
+
+    # Variable lookup time (VLT): adapt lookahead to speed and curve phase
+    speed_factor = float(np.interp(
+      v_ego, [_VLT_V_LOW_MS, _VLT_V_HIGH_MS], [1.0, 0.0]
+    ))
+
+    if self.curve_phase == "ENTRY":
+      # On curve entry: keep full extra lookahead for gradual pre-steering.
+      # This is critical for large turns -- early pre-steering helps the PSCM
+      # build up steering authority before the curve peak.
+      kappa_factor = 1.0
+    elif self.curve_phase == "EXIT":
+      # On curve exit: no extra lookahead -- let the planner's natural unwind
+      # dominate. This prevents the path_angle from holding the car in the
+      # curve too long, which would cause overshoot on exit.
+      kappa_factor = 0.0
+    else:
+      # HOLD or STRAIGHT: taper by curvature magnitude.
+      # Small curvature (gentle curve): full extra lookahead.
+      # Large curvature (sharp curve): no extra lookahead (PSCM already engaged).
+      kappa_factor = float(np.interp(
+        abs(curvature),
+        [_VLT_KAPPA_FULL, _VLT_KAPPA_TAPER],
+        [1.0, 0.0]
+      ))
+
+    extra_lookahead = _VLT_T_EXTRA_MAX * speed_factor * kappa_factor
+    # Apply VLT as a multiplicative boost to path_angle
+    path_angle *= (1.0 + extra_lookahead)
+
+    return path_angle
+
+  def _pscm_saturation_handle(self, path_angle, path_angle_last):
+    """
+    PSCM saturation handling.
+
+    When path_angle is near DBC limits (PSCM at authority limit):
+    - Block magnitude increases (can't steer more)
+    - Rate-limit decreases to _PSCM_SAT_UNWIND_RATE (prevent snap on release)
+
+    Without this, the desired angle drops rapidly at a sharp curve apex while
+    the PSCM is physically pinned, causing a snap correction the moment the
+    PSCM is released. This is a critical improvement for large turns.
+
+    Adapted from BluePilot bp-7.0 lateral_angle_ext.py.
+    """
+    # Check if path_angle is near DBC limits (PSCM saturation proxy)
+    dbc_sat = (
+      path_angle_last >= FORD_DBC_PATH_ANGLE_MAX * 0.90 or
+      path_angle_last <= FORD_DBC_PATH_ANGLE_MIN * 0.90
+    )
+
+    if dbc_sat:
+      last_mag = abs(path_angle_last)
+      curr_mag = abs(path_angle)
+
+      if curr_mag > last_mag:
+        # Magnitude growing while saturated -- block (can't exceed PSCM authority)
+        path_angle = path_angle_last
+      elif last_mag - curr_mag > _PSCM_SAT_UNWIND_RATE:
+        # Decreasing too fast -- rate-limit to prevent snap correction on release.
+        # This holds the car slightly more in the curve during saturation, at the
+        # cost of a smoother release transition.
+        limited_mag = last_mag - _PSCM_SAT_UNWIND_RATE
+        path_angle = float(limited_mag if path_angle_last >= 0 else -limited_mag)
+
+    return path_angle
+
+  def _soft_roc_limit(self, path_angle, path_angle_last, v_ego):
+    """
+    Soft rate-of-change (ROC) limit on path_angle.
+
+    Speed-dependent ROC prevents abrupt path_angle changes, ensuring
+    smooth transitions between curves and during curve entry/exit.
+
+    Scaled for 20Hz lateral tick cadence (STEER_STEP=5, DT_CTRL=0.01).
+    Values are x5 of BluePilot's 100Hz originals to restore same real-world rate.
+
+    At 9-10 m/s: 63 deg/s (generous, for low-speed maneuvering)
+    At 15 m/s:  49 deg/s (moderate)
+    At 25 m/s:  10 deg/s (conservative, for highway stability)
+    """
+    roc = float(np.interp(v_ego, _SOFT_ROC_SPEEDS, _SOFT_ROC_RATES))
+    return float(np.clip(
+      path_angle,
+      path_angle_last - roc,
+      path_angle_last + roc
+    ))
+
+  def _finalize_path_angle(self, curvature, v_ego):
+    """
+    Compute and apply all path_angle processing.
+
+    Called after curvature is finalized (rate-limited, filtered, clamped).
+    This is the single entry point for path_angle computation.
+
+    Pipeline:
+    1. Compute path_angle from curvature (speed/curvature-dependent gain + VLT)
+    2. PSCM saturation handling (rate-limit near DBC limits)
+    3. Soft ROC limit (speed-dependent rate-of-change)
+    4. Clamp to DBC limits
+    """
+    # Step 1: Compute path_angle from curvature
+    path_angle = self._compute_path_angle(curvature, v_ego)
+
+    # Step 2: PSCM saturation handling
+    path_angle = self._pscm_saturation_handle(path_angle, self.path_angle_last)
+
+    # Step 3: Soft ROC limit
+    path_angle = self._soft_roc_limit(path_angle, self.path_angle_last, v_ego)
+
+    # Step 4: Clamp to DBC limits
+    path_angle = min(
+      FORD_DBC_PATH_ANGLE_MAX,
+      max(FORD_DBC_PATH_ANGLE_MIN, path_angle)
+    )
+
+    # Store state
+    self.path_angle_last = path_angle
+    self.path_angle = path_angle
+
+    return path_angle
+
+  # ==========================================================================
   # Main update
   # ==========================================================================
 
@@ -1242,10 +942,9 @@ class FordCurveController:
       lat_active=None,
       cruise_enabled=False,
       current_curvature=None,
-      sport_gear=False,
   ):
     """
-    Main Ford curvature controller.
+    Main Ford curvature controller with path_angle (c1) computation.
 
     Required legacy arguments:
       desired_curvature
@@ -1259,16 +958,14 @@ class FordCurveController:
       lat_active
       cruise_enabled
       current_curvature
-      sport_gear        -- True when the car reports GearShifter.sport.
-                           Only has an effect when `dp_ford_sport_enable` is set.
 
     Returns:
-      final curvature
-    """
+      final curvature (float)
 
-    # S-gear (Sport) profile state. Kept current even while inactive, because
-    # the gear can change at any time and the limiter is shared.
-    self.limits.set_sport(sport_gear)
+    Side effects:
+      self.path_angle -- computed path_angle (c1) signal for the PSCM.
+      CarController reads this attribute after calling update().
+    """
 
     if not active:
 
@@ -1277,9 +974,6 @@ class FordCurveController:
       return 0.0
 
     self.active = True
-
-    # Hot-reload the tunables (throttled to PARAM_REFRESH_SEC).
-    self.limits.refresh()
 
     speed = max(
       float(v_ego),
@@ -1348,6 +1042,10 @@ class FordCurveController:
 
       self.last_curvature = 0.0
 
+      # Reset path_angle during human turn override
+      self.path_angle = 0.0
+      self.path_angle_last = 0.0
+
       return 0.0
 
     # ------------------------------------------------------------------------
@@ -1374,11 +1072,11 @@ class FordCurveController:
       )
 
       target = max(
-        -self.limits.max_curvature,
+        -MAX_CURVATURE,
         min(
-          self.limits.max_curvature,
+          MAX_CURVATURE,
           target,
-        ),
+        )
       )
 
       output = self._apply_htd_ramp(
@@ -1387,6 +1085,10 @@ class FordCurveController:
       )
 
       self.last_curvature = output
+
+      # Compute path_angle from the rate-limited curvature during HTD ramp.
+      # This ensures path_angle ramps back in smoothly alongside curvature.
+      self._finalize_path_angle(output, speed)
 
       return float(output)
 
@@ -1420,6 +1122,9 @@ class FordCurveController:
 
         self.last_curvature = output
 
+        # Compute path_angle from the rate-limited curvature during post-reset ramp.
+        self._finalize_path_angle(output, speed)
+
         return float(output)
 
     # ------------------------------------------------------------------------
@@ -1451,24 +1156,6 @@ class FordCurveController:
     )
 
     # ------------------------------------------------------------------------
-    # Low-speed hunting stabilizer (L1 + hunt gate)
-    #
-    # Active only below dp_ford_ls_max_speed AND only while the incoming
-    # command is actually hunting (sign flips inside the window).  A real
-    # low-speed turn is left completely untouched, so the tracking gain
-    # stays ~1.0 and there is no understeer.  Where the stock RAINNY gate
-    # (CURRENT_CURVATURE_MIN_SPEED = 9.0 m/s) has already disabled its own
-    # protection, this keeps the command near the MEASURED curvature.
-    # ------------------------------------------------------------------------
-
-    if self._ls_active(speed) and self._ls_hunting(curvature):
-      curvature = self._ls_tether(
-        curvature,
-        current_curvature,
-        speed,
-      )
-
-    # ------------------------------------------------------------------------
     # RAINNY current-curvature error protection
     # ------------------------------------------------------------------------
 
@@ -1482,15 +1169,7 @@ class FordCurveController:
     # Anti overshoot
     # ------------------------------------------------------------------------
 
-    ao_phase_ok = (
-      self.limits.ao_enable
-      and (
-        (not self.limits.ao_exit_only)
-        or (self.curve_phase == "EXIT")
-      )
-    )
-
-    if abs(curvature) > 0.002 and ao_phase_ok:
+    if abs(curvature) > 0.002:
 
       curvature = self._anti_overshoot(
         curvature,
@@ -1517,11 +1196,11 @@ class FordCurveController:
     # ------------------------------------------------------------------------
 
     curvature = max(
-      -self.limits.max_curvature,
+      -MAX_CURVATURE,
       min(
-        self.limits.max_curvature,
+        MAX_CURVATURE,
         curvature,
-      ),
+      )
     )
 
     # ------------------------------------------------------------------------
@@ -1563,24 +1242,34 @@ class FordCurveController:
       ),
     )
 
-    # ------------------------------------------------------------------------
-    # L3: low-speed hunting low-pass (gated on the hunt detector)
-    # ------------------------------------------------------------------------
-
-    filtered = self._ls_filter(filtered, speed)
-
     # Final clamp.
     filtered = max(
-      -self.limits.max_curvature,
+      -MAX_CURVATURE,
       min(
-        self.limits.max_curvature,
+        MAX_CURVATURE,
         filtered,
-      ),
+      )
     )
 
     self.last_curvature = float(
       filtered
     )
+
+    # ------------------------------------------------------------------------
+    # Path Angle (c1) computation -- BluePilot bp-7.0 angle control
+    #
+    # Compute path_angle from the final filtered curvature.
+    # This provides additional heading authority to the PSCM, especially
+    # beneficial for large turns and continuous curves.
+    #
+    # The full pipeline:
+    #   1. Compute path_angle from curvature (speed/curvature gain + VLT)
+    #   2. PSCM saturation handling (rate-limit near DBC limits)
+    #   3. Soft ROC limit (speed-dependent rate-of-change)
+    #   4. Clamp to DBC limits [-0.5, 0.5235] rad
+    # ------------------------------------------------------------------------
+
+    self._finalize_path_angle(filtered, speed)
 
     return float(
       filtered
@@ -1588,12 +1277,62 @@ class FordCurveController:
 
 
 # ============================================================================
-# dp_ford Tier 1 -- adaptive model-plan curvature lead (VLT + entry/exit lead)
+# Adaptive model-plan lead (FordPlanLead)
 #
-# Ported from hwh-kavin/openpilot sp-master-bp-260825 (curvature_lead.py and the
-# VLT block of lateral_angle_ext.py). Everything below is inert unless
-# dp_ford_lead_enable is set, and apply() can never raise into the caller.
+# RESTORED 2026-10-06: the trimmed ford_curve_controller.py dropped this class
+# while controlsd.py still imports it, which crashed controlsd with
+#   ImportError: cannot import name 'FordPlanLead'
+# and made cruise control unavailable.
+#
+# Ported from hwh-kavin/openpilot sp-master-bp-260825. Everything below is
+# inert unless dp_ford_lead_enable is set, and apply() can never raise into
+# the caller (all exceptions fall back to base_curvature).
 # ============================================================================
+
+PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
+
+
+def _read_param_direct(key):
+  """Return the raw string value of a param, or None. Never raises."""
+  for d in PARAM_DIRS:
+    try:
+      with open(os.path.join(d, key), "r") as f:
+        val = f.read().strip()
+      if val:
+        return val
+    except Exception:
+      continue
+  return None
+
+
+def _read_float(key, default, lo=None, hi=None):
+  """Read a float param, clamped to [lo, hi]. Falls back to `default`."""
+  try:
+    raw = _read_param_direct(key)
+    if raw is None:
+      return float(default)
+    val = float(raw)
+    if not math.isfinite(val):
+      return float(default)
+    if lo is not None:
+      val = max(float(lo), val)
+    if hi is not None:
+      val = min(float(hi), val)
+    return float(val)
+  except Exception:
+    return float(default)
+
+
+def _read_bool(key, default):
+  """Read a boolean param. Accepts '1' / 'true' (case-insensitive)."""
+  try:
+    raw = _read_param_direct(key)
+    if raw is None:
+      return bool(default)
+    return raw == "1" or raw.lower() == "true"
+  except Exception:
+    return bool(default)
+
 
 _LEAD_DT_MDL = 0.05
 _LEAD_MODEL_ACTION_EXTRA = _LEAD_DT_MDL + _LEAD_DT_MDL / 2.0   # 0.075 s
@@ -1610,8 +1349,7 @@ _VLT_KAPPA_FULL = 0.005
 _VLT_KAPPA_TAPER = 0.020
 _VLT_ENTERING_FACTOR = 0.8
 
-# liveDelay clamp. Lower bound is hwh's; upper bound is slightly above this car's
-# measured 0.2822 s instead of hwh's 0.15 (see the patch docstring).
+# liveDelay clamp
 _LEAD_DELAY_LO = 0.10
 _LEAD_DELAY_HI = 0.32
 
@@ -1713,8 +1451,7 @@ class FordPlanLead:
         return base
 
       # capnp _DynamicListReader does NOT support slicing -- `z[:n]` raises
-      # TypeError: an integer is required. Materialise with list() first, the
-      # same way the lane-line readers are handled elsewhere.
+      # TypeError: an integer is required. Materialise with list() first.
       yaws = np.asarray(list(model_v2.orientation.z)[:n], dtype=float)
       yaw_rates = np.asarray(list(model_v2.orientationRate.z)[:n], dtype=float)
       t = np.asarray(t_all[:n], dtype=float)
@@ -1735,9 +1472,6 @@ class FordPlanLead:
       entering = kappa_at_base > abs(base)
 
       # ---- extra lookahead above t_base -----------------------------------
-      # hwh splits this into two schedulers: VLT (speed x kappa) for the blend,
-      # and the entry-lead schedule (peak kappa / kappa limit) for the resample.
-      # Both are the same physical quantity, so take the more aggressive one.
       speed_factor = float(np.interp(v, (_VLT_V_LOW_MS, _VLT_V_HIGH_MS), (1.0, 0.0)))
       if entering:
         vlt_extra = self.extra_max * _VLT_ENTERING_FACTOR * speed_factor
@@ -1782,10 +1516,6 @@ class FordPlanLead:
         return base
 
       # ---- blend, ANCHORED on the planner value ---------------------------
-      # `base` carries the lane-centering trim (curve_lane_bias / lateral_clearance)
-      # which does not exist in the model plan, so it must never be replaced --
-      # only biased toward the lead-adjusted model term. b is capped at 0.60, so
-      # the planner always keeps at least 40 % weight.
       b = float(np.clip(self.blend, 0.0, 1.0))
       if b <= 1e-6:
         return base
@@ -1799,9 +1529,6 @@ class FordPlanLead:
         return base
       return float(out)
     except Exception as e:
-      # Was a bare `except Exception: return base`, which silently disabled the
-      # whole stage when the capnp slice bug above was present. Keep the safe
-      # fallback, but surface the first few failures.
       n_err = getattr(self, "_err_logged", 0)
       if n_err < 5:
         self._err_logged = n_err + 1

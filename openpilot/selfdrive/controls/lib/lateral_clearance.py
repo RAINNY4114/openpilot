@@ -258,8 +258,16 @@ class LateralClearance:
         return net, ("veh_L" + ("_large" if large else "")) if net > 0 else ("veh_R" + ("_large" if large else ""))
 
     # ------------------------------------------------------------------ update
-    def update(self, active: bool, model_v2, v_ego: float, dt: float) -> float:
-        """返回要加到 desired_curvature 上的曲率修正量 (1/m)。"""
+    def update(self, active: bool, model_v2, v_ego: float, dt: float,
+               steering_pressed: bool = False) -> float:
+        """返回要加到 desired_curvature 上的曲率修正量 (1/m)。
+
+        steering_pressed: 司机是否正在打方向 (CS.steeringPressed)。
+          2026-10-05: 本模块此前**没有**这条让权判据, 而 curve_lane_bias 有,
+          导致弯道里司机扶方向盘时 curve_lane_bias 归零、本模块却继续输出,
+          两个环方向不一致 -> 手感'抢方向'、车被推向右。
+          默认 False, 保持旧调用方行为不变; 由 cfg 的 steer_override_gate 控制。
+        """
         try:
             self._load_config()
             cfg_enabled = self._b(None, "enabled", False)
@@ -271,6 +279,17 @@ class LateralClearance:
                 self.last_trim = 0.0
                 self.last_bias = 0.0
                 self.last_reason = "off"
+                return 0.0
+
+            # 人工转向让权：与 curve_lane_bias.steer_override_gate 对齐。
+            # 司机正在打方向时不介入，避免与人工输入抢方向。
+            if self._b(None, "steer_override_gate", True) and steering_pressed:
+                self.integral = 0.0
+                self.bias_filtered = 0.0
+                self.lead_dwell = 0.0
+                self.last_trim = 0.0
+                self.last_bias = 0.0
+                self.last_reason = "steer_override"
                 return 0.0
 
             lane_center_y, ok = self._lane_center_y(model_v2, self._f(None, "lane_prob_thr", 0.50))

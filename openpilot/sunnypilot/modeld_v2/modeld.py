@@ -36,6 +36,8 @@ from openpilot.system import sentry
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LC_CONFIRM_DELAY_SEC
 from openpilot.selfdrive.controls.lib.auto_overtake import AutoOvertakeHelper, LANE_PREF_AUTO
+# [AUTO_AVOIDANCE_WIRING] 紧急转向避让（>80km/h 段的安全兜底通道）
+from openpilot.selfdrive.controls.lib.auto_avoidance import AutoAvoidanceHelper
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutState
@@ -78,7 +80,7 @@ AO_CFG_DEFAULTS = {
   "enabled": 0,
   "lane_preference": LANE_PREF_AUTO,
   "confirm_delay_sec": AUTO_LC_CONFIRM_DELAY_SEC,
-  "min_cruise_kph": 75.0,
+  "min_cruise_kph": 60.0,  # [AO_CITY_60] 与 AutoOvertakeMinCruiseKph / OVERTAKE_MIN_SPEED_FLOOR_MS 对齐
   "lane_prob_min": 0.20,
 }
 
@@ -101,6 +103,161 @@ def _ao_read_num(key, default, cast=float):
     return cast(float(raw))
   except (TypeError, ValueError):
     return default
+
+
+# ============================================================================
+# [AUTO_AVOIDANCE_WIRING] config + diagnostics
+#
+# 与 AO 同一套约定：fork 的 libparams_c.so 不认识自定义键，
+# 因此直接读参数文件，避免 Params() 抛 UnknownKeyName。
+# ============================================================================
+AA_LOG_PATH = "/data/media/0/auto_avoidance.log"
+AA_LOG_MAX_BYTES = 5_000_000
+
+AA_CFG_DEFAULTS = {
+  "enabled": 1,
+  # ------------------------------------------------------------------
+  # [AA_STABLE_RATIO] 逃逸车道稳定性判定模式。
+  #
+  # strict : 要求逃逸车道"连续 stable_sec 秒"安全，任何一帧不合格即归零。
+  #          实测在隧道内 laneLineProbs / BSM 抖动时，计时器只能累积
+  #          到 ~0.03s 便被反复打断，导致 left_stable 恒为 False，
+  #          紧急转向避让永远无法从 idle 进入 avoiding。
+  # ratio  : 滑动窗口容抖模式，窗口内 OK 占比 >= ratio 即可通过。
+  #          这是这次修复要验证的路径。
+  # ------------------------------------------------------------------
+  "stable_mode": "ratio",
+  "stable_ratio": 0.60,
+  "stable_window_sec": 0.60,
+  # ------------------------------------------------------------------
+  # [AA_OBS_HOLD] 障碍物输入短时保持（秒）。
+  #
+  # 背景：本机 radarTracks 只有约 8.3 Hz，而 AA 跑在 modeld ~20 Hz。
+  # 更糟的是接线侧 abs(y) <= 1.8 的筛选在点云漂移帧会返回 None，
+  # 使 obstacle_in_path 频繁掉到 False → AA 内部 _critical_frames
+  # 被反复清零，永远攒不满 CRITICAL_CONFIRM_FRAMES=3。
+  # 实测后果：障碍物 t=27.5s 就出现（TTC 0.125s），AA 却迟到
+  # t=32.5s 才触发，晚了约 5 秒。
+  #
+  # 这里做的是"保持最近一次有效障碍读数 hold_sec 秒"，覆盖 3-4 个
+  # 雷达周期，从而让 CRITICAL 确认能够连续累积。
+  # 0 == 关闭（行为与旧版完全一致）。
+  # ------------------------------------------------------------------
+  "obs_hold_sec": 0.45,
+  # ------------------------------------------------------------------
+  # [AA_BRAKE_FALLBACK] 纵向兜底（刹车）参数。
+  #
+  # brake_max  ：请求减速度硬上限（m/s^2）。0 == 完全关闭，
+  #              行为与旧版（纵向不介入）完全一致。默认 0.0。
+  # brake_gain ：需求缩放系数，1.0 为标准。
+  # brake_ttc_ref：TTC 参考值（秒）。TTC >= 该值时不请求刹车；
+  #                TTC 越小请求越大，TTC<=0 时达到 brake_max。
+  #
+  # 注意：本会话只做"接口预留"，该请求值目前**不会**被转发到
+  #       任何执行器，仅用于日志与 /data/params/d/AvoidBrakeReq 观察。
+  # ------------------------------------------------------------------
+  "brake_gain": 1.0,
+  "brake_max": 0.0,
+  "brake_ttc_ref": 3.0,
+}
+
+
+def _aa_read_cfg():
+  cfg = dict(AA_CFG_DEFAULTS)
+  cfg["enabled"] = _ao_read_num("AutoAvoidanceEnabled", cfg["enabled"], int) != 0
+  # 允许通过 /data/params/d/AvoidStableMode 热切换 strict / ratio，
+  # 便于不改代码就回滚到旧行为做 A/B 对比。
+  try:
+    _raw = _ao_read_raw("AvoidStableMode")
+    if _raw:
+      _m = str(_raw).strip().lower()
+      if _m in ("strict", "ratio"):
+        cfg["stable_mode"] = _m
+  except Exception:
+    pass
+  # 障碍物保持秒数，可通过 /data/params/d/AvoidObsHold 热调（0 == 关闭）。
+  try:
+    _raw = _ao_read_raw("AvoidObsHold")
+    if _raw:
+      _v = float(_raw)
+      if _v >= 0.0:
+        cfg["obs_hold_sec"] = _v
+  except Exception:
+    pass
+  # [AA_BRAKE_FALLBACK] 纵向兜底参数热读。
+  # AvoidBrakeMax 默认未创建 -> 保持 0.0（完全关闭，与旧版一致）。
+  try:
+    _raw = _ao_read_raw("AvoidBrakeMax")
+    if _raw:
+      _v = float(_raw)
+      if _v >= 0.0:
+        cfg["brake_max"] = _v
+  except Exception:
+    pass
+  try:
+    _raw = _ao_read_raw("AvoidBrakeGain")
+    if _raw:
+      _v = float(_raw)
+      if _v >= 0.0:
+        cfg["brake_gain"] = _v
+  except Exception:
+    pass
+  try:
+    _raw = _ao_read_raw("AvoidBrakeTtcRef")
+    if _raw:
+      _v = float(_raw)
+      if _v > 0.0:
+        cfg["brake_ttc_ref"] = _v
+  except Exception:
+    pass
+  return cfg
+
+
+_aa_log_state = {"t": 0.0}
+
+
+def _ao_write_param(key, value):
+  """把字符串写入 /data/params/d（与 AvoidObsHold 等自定义参数同目录）。
+
+  注意：不用 AO_PARAM_DIRS[0]（/dev/shm/params 是 tmpfs，重启即丢），
+  直接写持久目录，便于外部取证时与其它自定义参数并列查看。
+  fork 的 libparams_c.so 不认识自定义键，因此直接写文件，
+  避免 Params().put 抛 UnknownKeyName。写失败静默忽略。
+  """
+  for _d in ("/data/params/d", "/dev/shm/params"):
+    try:
+      if not os.path.isdir(_d):
+        continue
+      _p = os.path.join(_d, str(key))
+      with open(_p, "w") as f:
+        f.write(str(value))
+      return True
+    except Exception:
+      continue
+  return False
+
+
+# [AA_BRAKE_FALLBACK] 上次发布的刹车请求值（避免每帧都写盘）
+_aa_brake_pub = {"v": -1.0}
+
+
+def _aa_log(fields):
+  """把 AA 的每帧状态写入 /data/media/0/auto_avoidance.log（1Hz）。"""
+  try:
+    import json as _json
+    now = time.monotonic()
+    if now - _aa_log_state["t"] < 1.0:
+      return
+    _aa_log_state["t"] = now
+    try:
+      if os.path.getsize(AA_LOG_PATH) > AA_LOG_MAX_BYTES:
+        os.replace(AA_LOG_PATH, AA_LOG_PATH + ".1")
+    except Exception:
+      pass
+    with open(AA_LOG_PATH, "a") as f:
+      f.write(_json.dumps(fields, separators=(",", ":")) + "\n")
+  except Exception:
+    pass
 
 
 def _ao_read_cfg():
@@ -461,7 +618,7 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay", "radarState"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay", "radarState", "radarTracks"])  # [AUTO_AVOIDANCE_WIRING] 订阅障碍物点云
 
   publish_state = PublishState()
   chestnut_state = ChestnutState(pm, model.chestnut) if CHESTNUT else None
@@ -494,6 +651,12 @@ def main(demo=False):
   DH = DesireHelper()
   # [AUTO_OVERTAKE_WIRING]
   AO = AutoOvertakeHelper()
+  # [AUTO_AVOIDANCE_WIRING] 紧急转向避让 helper（输出 lane_request -> DesireHelper）
+  AA = AutoAvoidanceHelper()
+  # [AA_OBS_HOLD] 障碍物短时保持状态（跨帧），用于对抗 radarTracks 8.3Hz 稀疏性。
+  # 结构：{"d": float|None, "vr": float|None, "y": float|None, "t": float}
+  _aa_obs_hold = {"d": None, "vr": None, "y": None, "t": 0.0}
+  aa_cfg = _aa_read_cfg()
   ao_cfg = _ao_read_cfg()
   meta_constants = load_meta_constants()
   RELC = RoadEdgeLaneChangeController()
@@ -541,6 +704,7 @@ def main(demo=False):
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
       ao_cfg = _ao_read_cfg()  # [AUTO_OVERTAKE_WIRING]
+      aa_cfg = _aa_read_cfg()  # [AUTO_AVOIDANCE_WIRING]
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
@@ -665,6 +829,26 @@ def main(demo=False):
           except Exception:
             _lz, _rz, _rf = None, None, None
 
+          # ------------------------------------------------------------
+          # [AO_MR76_WIRE] 读取 card.py 发布的 MR76 相邻车道占用。
+          #
+          # card.py 与 modeld.py 是两个进程，跨进程用 params 文件传递
+          # （与 AOBsmZone 同一套约定）。语义：
+          #   AOMr76Fresh = 0  未接入 / stale / 未使能
+          #   AOMr76Fresh = 1  数据可用 -> AOMr76Lane 十位=左 个位=右
+          #
+          # ★ 传参约定（与 auto_overtake 的门逻辑严格对应）：
+          #   available=None  -> 该侧"根本未接入"，门必须放行（不阻断）
+          #   available=True  -> 已接入且可用，valid/age 参与严格判定
+          #   available=False -> 已接入但当前不可用 -> fail-closed 否决
+          # 因此 AOMr76Fresh=0 时传 available=None（未接入语义），
+          # 而不是传 False —— 后者会被 _sensor_fresh 直接判死并 veto。
+          # ------------------------------------------------------------
+          _mr76_fresh = _ao_read_num("AOMr76Fresh", 0.0) != 0.0
+          _mr76_lane = int(_ao_read_num("AOMr76Lane", 0.0))
+          _mr76_left_occ = bool((_mr76_lane // 10) % 10) if _mr76_fresh else False
+          _mr76_right_occ = bool(_mr76_lane % 10) if _mr76_fresh else False
+
           ao_dir = AO.update(
             enabled=True,
             lc_state=DH.lane_change_state,
@@ -685,7 +869,44 @@ def main(demo=False):
             rear_sensor_fault=_rf,
             lane_preference=int(ao_cfg["lane_preference"]),
             min_cruise_speed=float(ao_cfg["min_cruise_kph"]) * CV.KPH_TO_MS,
-            require_aux_sensors=False,
+            # ----------------------------------------------------------
+            # [AO_LANE_CONF_GATE] 把原始车道线概率与本车参数下限交给 AO，
+            # 让 AO 内部那道不可绕过的硬门能与参数取较严者。
+            # 背景：AutoOvertakeLaneProbMin 在设备上被设成 0.0，导致
+            # 上面的 lp >= ao_cfg["lane_prob_min"] 恒真、筛选完全失效。
+            # ----------------------------------------------------------
+            left_lane_prob=lp_left,
+            right_lane_prob=lp_right,
+            lane_prob_min=float(ao_cfg["lane_prob_min"]),
+            # ----------------------------------------------------------
+            # [AO_JUNCTION_GATE] 路口/红绿灯距离（米），None = 未知。
+            # 当前 Custom.AmapNavi 没有路口字段，故传 None；
+            # AO 内部回落到"车道线断段"启发式。一旦 capnp 增加该字段，
+            # 只需在此处改为真实值即可，AO 侧无需改动。
+            # ----------------------------------------------------------
+            junction_dist=None,
+            # ----------------------------------------------------------
+            # [AO_MR76_WIRE] MR76 相邻车道占用（来自 card.py 的 params）。
+            #   fresh=1 -> available=True, age=0.0, obstacle=真实占用位
+            #   fresh=0 -> available=None（"未接入"语义，门放行不阻断）
+            #
+            # LiDAR 当前未接入，lidar_* 一律不传（available=None 默认值
+            # 即为 None，天然走"无数据不阻断"）。
+            # ----------------------------------------------------------
+            mr76_left_available=(True if _mr76_fresh else None),
+            mr76_right_available=(True if _mr76_fresh else None),
+            mr76_left_valid=(True if _mr76_fresh else None),
+            mr76_right_valid=(True if _mr76_fresh else None),
+            mr76_left_age=(0.0 if _mr76_fresh else None),
+            mr76_right_age=(0.0 if _mr76_fresh else None),
+            mr76_left_obstacle=(_mr76_left_occ if _mr76_fresh else None),
+            mr76_right_obstacle=(_mr76_right_occ if _mr76_fresh else None),
+            # [AO_AUX_SENSOR_STRICT] 原为 False，会绕过 MR76/LiDAR 健康门，
+            # 使变道安全退化为"仅 BSM 布尔量"。改回 True（fail closed）。
+            # [AO_MR76_WIRE] 现在 MR76 数据已真正接入，此门不再空转：
+            #   available=None -> 未接入，门内放行；
+            #   available=False/stale -> 已接入但异常，fail-closed 否决。
+            require_aux_sensors=True,
           )
           st = AO.get_state()
           ao_fields.update({
@@ -696,6 +917,10 @@ def main(demo=False):
             "lp0": round(lp_left, 2), "lp3": round(lp_right, 2),
             "ao": int(ao_dir), "mode": st["mode"], "why": st["last_reason"],
             "dh": int(DH.lane_change_state), "dhd": int(DH.lane_change_direction),
+            # [AO_LANE_CONF_GATE] / [AO_JUNCTION_GATE] 诊断字段
+            "cf": int(bool(st.get("lane_conf_L"))) * 2 + int(bool(st.get("lane_conf_R"))),
+            "jb": int(bool(st.get("junction_ban"))),
+            "js": str(st.get("junction_source") or "-"),
           })
         except Exception:
           cloudlog.exception("auto overtake update failed")
@@ -706,8 +931,143 @@ def main(demo=False):
         ao_fields["why"] = "disabled" if not ao_cfg["enabled"] else "no_radarstate"
       _ao_log(ao_fields)
 
+      # [AUTO_AVOIDANCE_WIRING] 紧急避让优先于自动超车：AA 是安全兜底，AO 是舒适性
+      aa_dir = log.LaneChangeDirection.none
+      aa_fields = {"en": int(bool(aa_cfg["enabled"]))}
+      if aa_cfg["enabled"]:
+        try:
+          _cs_aa = sm['carState']
+          _lead_aa = sm['radarState'].leadOne if sm.seen['radarState'] else None
+          # 用 radarTracks 提供障碍物位姿（本机唯一可用的障碍物点云源）
+          # [AA_OBS_HOLD] 本帧若未取到有效点，则在 obs_hold_sec 内沿用最近一次读数，
+          # 以对抗 8.3Hz 稀疏性与点云漂移，保证 AA 内部 _critical_frames 能连续累积。
+          _obs_d, _obs_vr, _obs_in_path = None, None, False
+          _best = None
+          if sm.seen.get('radarTracks', False):
+            _rt = sm['radarTracks']
+            for _p in _rt.points:
+              _d = float(_p.dRel); _y = float(_p.yRel); _vr = float(_p.vRel)
+              if _d < 1.0 or _d > 60.0:
+                continue
+              # [AA_LANE_TIGHTEN] 横向筛选从 1.8m 收窄到 1.0m：
+              # 1.8m 会选中相邻车道的车（半个车道宽 ≈ 1.8m），导致
+              # AA 把旁车当成本车道障碍物并触发自动变道语音。
+              # 1.0m 只保留真正位于本车道内的目标。
+              if abs(_y) > 1.0:
+                continue
+              if _best is None or _d < _best[0]:
+                _best = (_d, _y, _vr)
+
+          _now_aa = time.monotonic()
+          _hold_s = float(aa_cfg.get("obs_hold_sec", 0.0))
+          if _best is not None:
+            # 有效读数：刷新保持状态
+            _aa_obs_hold["d"] = _best[0]
+            _aa_obs_hold["y"] = _best[1]
+            _aa_obs_hold["vr"] = _best[2]
+            _aa_obs_hold["t"] = _now_aa
+            _obs_d, _obs_vr, _obs_in_path = _best[0], _best[2], True
+          elif (
+            _hold_s > 0.0
+            and _aa_obs_hold["d"] is not None
+            and (_now_aa - _aa_obs_hold["t"]) <= _hold_s
+          ):
+            # 保持窗口内：沿用最近读数
+            _obs_d = _aa_obs_hold["d"]
+            _obs_vr = _aa_obs_hold["vr"]
+            _obs_in_path = True
+          else:
+            # 超出保持窗口：彻底清空
+            _aa_obs_hold["d"] = None
+            _aa_obs_hold["vr"] = None
+            _aa_obs_hold["y"] = None
+          aa_dir, _aa_brake, _aa_hazard, _aa_off = AA.update(
+            enabled=True,
+            obstacle_in_path=_obs_in_path,
+            lc_state=DH.lane_change_state,
+            v_ego=v_ego,
+            left_ok=left_ok,
+            right_ok=right_ok,
+            is_rhd=bool(is_rhd),
+            manual_blinker=bool(_cs_aa.leftBlinker or _cs_aa.rightBlinker),
+            bsm_available=True,
+            left_bsm_blocked=bool(_cs_aa.leftBlindspot),
+            right_bsm_blocked=bool(_cs_aa.rightBlindspot),
+            obstacle_dist=_obs_d,
+            obstacle_rel_speed=_obs_vr,
+            lead_dist=float(_lead_aa.dRel) if _lead_aa is not None else None,
+            lead_rel_speed=float(_lead_aa.vRel) if _lead_aa is not None else None,
+            require_aux_sensors=False,
+            # [AA_STABLE_RATIO] 逃逸车道稳定性容抖模式（默认 ratio）。
+            avoid_stable_mode=str(aa_cfg["stable_mode"]),
+            avoid_stable_ratio=float(aa_cfg["stable_ratio"]),
+            avoid_stable_window_sec=float(aa_cfg["stable_window_sec"]),
+            # [AA_BRAKE_FALLBACK] 纵向兜底（默认 brake_max=0.0 == 关闭）
+            avoid_brake_gain=float(aa_cfg["brake_gain"]),
+            avoid_brake_max=float(aa_cfg["brake_max"]),
+            avoid_brake_ttc_ref=float(aa_cfg["brake_ttc_ref"]),
+          )
+          _aa_st = AA.get_state()
+          aa_fields.update({
+            "dir": int(aa_dir), "mode": _aa_st["mode"], "why": _aa_st["last_reason"],
+            "risk": int(_aa_st["risk_level"]),
+            "od": round(_obs_d, 1) if _obs_d is not None else -1,
+            "ovr": round(_obs_vr, 1) if _obs_vr is not None else 0,
+            "v": round(v_ego * 3.6, 1),
+            "sm": str(aa_cfg["stable_mode"]),
+            "oh": round(float(aa_cfg.get("obs_hold_sec", 0.0)), 2),
+            "brk": round(float(_aa_brake), 3),
+            "bmax": round(float(aa_cfg.get("brake_max", 0.0)), 2),
+          })
+        except Exception:
+          cloudlog.exception("auto avoidance update failed")
+          AA.reset()
+          _aa_obs_hold["d"] = None
+          _aa_obs_hold["vr"] = None
+          _aa_obs_hold["y"] = None
+          aa_dir = log.LaneChangeDirection.none
+          _aa_brake = 0.0
+      else:
+        AA.reset()
+        _aa_obs_hold["d"] = None
+        _aa_obs_hold["vr"] = None
+        _aa_obs_hold["y"] = None
+        aa_fields["why"] = "disabled"
+        _aa_brake = 0.0
+      _aa_log(aa_fields)
+      # ------------------------------------------------------------------
+      # [AA_BRAKE_FALLBACK] 镜像 AA 的刹车请求到 /data/params/d/AvoidBrakeReq
+      #
+      # ★ 心跳语义：只要请求值 > 0（刹车生效中），**每帧都重写文件**，
+      #   即使内容与上帧完全相同（靠写入推进 mtime）。消费侧
+      #   （controlsd -> aa_brake_apply.py）用 mtime 是否推进判断
+      #   "写入侧是否还活着"，从而正确区分：
+      #     - 持续请求（内容恒定但 mtime 一直走）-> 刹车保持
+      #     - 写入侧已死 / 请求过期（mtime 停住）  -> 刹车在 0.5s 内释放
+      #   若沿用"仅当值变化才写"的节流，恒定请求会因 mtime 不再推进
+      #   而被误判为过期并释放 —— 这是必须避免的安全缺陷。
+      #
+      # 安全声明：此处**不**直接把该值转发到 CarControl / actuators，
+      # 纵向落地统一由 controlsd 侧的 aa_brake_apply 模块受控消费。
+      # ------------------------------------------------------------------
+      try:
+        _brk_val = float(_aa_brake)
+        _brk_val = 0.0 if (_brk_val != _brk_val) else max(0.0, _brk_val)
+        _changed = abs(_brk_val - _aa_brake_pub["v"]) >= 0.01
+        if _changed or _brk_val > 0.0:
+          _aa_brake_pub["v"] = _brk_val
+          # ★ 写入格式 "<值>:<monotonic秒>"。时间戳即心跳：只要本进程
+          #   还在写，消费侧（aa_brake_apply）就能确认"请求仍然新鲜"，
+          #   从而正确区分【持续请求】与【写入侧已死】。
+          #   用 monotonic 而非 mtime，避免跨时钟域与高频重写不推进 mtime
+          #   的问题（实测踩过：会造成正在生效的刹车被 staleness 误杀）。
+          _ao_write_param("AvoidBrakeReq", f"{_brk_val:.3f}:{time.monotonic():.3f}")
+      except Exception:
+        pass
+      # 紧急避让优先；AA 未介入时回落到 AO
+      _merged_dir = aa_dir if aa_dir != log.LaneChangeDirection.none else ao_dir
       DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
-                auto_lane_change_direction=ao_dir,
+                auto_lane_change_direction=_merged_dir,
                 auto_confirm_delay_sec=float(ao_cfg["confirm_delay_sec"]))
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction

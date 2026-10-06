@@ -16,6 +16,7 @@
 #define FORD_LateralMotionControl  0x3D3U   // TX by OP, Lateral Control message
 #define FORD_LateralMotionControl2 0x3D6U   // TX by OP, alternate Lateral Control message
 #define FORD_IPMA_Data             0x3D8U   // TX by OP, IPMA and LKAS user interface
+#define FORD_ParkAid_Data          0x3A8U   // TX by OP (C2_APA), Active Park Assist steering angle
 
 // CAN bus numbers.
 #define FORD_MAIN_BUS 0U
@@ -83,6 +84,15 @@ static bool ford_get_quality_flag_valid(const CANPacket_t *msg) {
 #define FORD_INACTIVE_CURVATURE_RATE 4096U
 #define FORD_INACTIVE_PATH_OFFSET 512U
 #define FORD_INACTIVE_PATH_ANGLE 1000U
+
+// [C2_APA] Active Park Assist angle limits.
+//   ExtSteeringAngleReq2 encodes: raw = (angle_deg + 1000) * 10
+//   Physical range [-1000.0, 2276.5] deg, raw in [0, 32767] (15 bit).
+//   Stage-1 conservative limit: +/-500 deg steering wheel
+//   (must stay in sync with opendbc/car/ford/apa_controller.py APA_ANGLE_ABS_MAX)
+#define FORD_APA_MAX_ANGLE_DEG 500
+#define FORD_APA_MIN_RAW       5000    // ( 500 + 1000) * 10
+#define FORD_APA_MAX_RAW       15000   // ( 500 + 1000) * 10
 
 #define FORD_CANFD_INACTIVE_CURVATURE_RATE 1024U
 
@@ -311,6 +321,68 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // --------------------------------------------------------------------------
+  // [C2_APA] Safety check for ParkAid_Data (Active Park Assist steering)
+  //
+  // 信号布局 —— 已用设备真实 DBC + CANPacker 往返实测确认:
+  //   ExtSteeringAngleReq2 : 22|15@0+ (0.1,-1000) -> raw = ((d[2]&0x7F)<<8)|d[3]
+  //   EPASExtAngleStatReq  : 23|1@0+              -> d[2] bit7
+  //   ApaSys_D_Stat        : 61|3@0+              -> d[7] bit3..5
+  // 两处易错: (1) 15bit 只跨 d[2]/d[3], 非 d[2]/[3]/[4]
+  //           (2) ApaSys_D_Stat 在 d[7] bit3..5, 非 bit5..7
+  // --------------------------------------------------------------------------
+  if (msg->addr == FORD_ParkAid_Data) {
+    unsigned int apa_stat = (msg->data[7] >> 3) & 0x7U;
+    bool ext_angle_req = ((msg->data[2] >> 7) & 1U) != 0U;
+    unsigned int raw_angle =
+      (((unsigned int)(msg->data[2] & 0x7FU)) << 8) | ((unsigned int)msg->data[3]);
+
+    bool violation = false;
+
+    // 1) ApaSys_D_Stat: only Null(0) / Off(1) / On(2) permitted
+    violation |= (apa_stat > 2U);
+
+    // 2) external angle request only while controls are allowed
+    violation |= ext_angle_req && !controls_allowed;
+
+    // 3) APA On state also requires controls_allowed
+    violation |= (apa_stat == 2U) && !controls_allowed;
+
+    // 4) angle must stay within the calibrated window
+    violation |= (raw_angle < FORD_APA_MIN_RAW) || (raw_angle > FORD_APA_MAX_RAW);
+
+    // 5) per-frame rate limit (5 deg per 20 ms = 250 deg/s)
+    static int ford_apa_angle_prev = 0;
+    static uint32_t ford_apa_last_ms = 0;
+    int raw_angle_signed = (int)raw_angle - 10000;   // 0 deg -> 10000
+    if (ext_angle_req) {
+      uint32_t now_ms = microsecond_timer_get() / 1000U;
+      if (ford_apa_last_ms != 0U) {
+        uint32_t dt_ms = now_ms - ford_apa_last_ms;
+        if (dt_ms < 200U) {
+          int max_delta = (int)(5U * dt_ms / 20U);
+          if (max_delta < 1) {
+            max_delta = 1;
+          }
+          int delta = raw_angle_signed - ford_apa_angle_prev;
+          if (delta < 0) {
+            delta = -delta;
+          }
+          violation |= (delta > max_delta);
+        }
+      }
+      ford_apa_angle_prev = raw_angle_signed;
+      ford_apa_last_ms = now_ms;
+    } else {
+      ford_apa_last_ms = 0U;
+      ford_apa_angle_prev = 0;
+    }
+
+    if (violation) {
+      tx = false;
+    }
+  }
+
   return tx;
 }
 
@@ -355,6 +427,7 @@ static safety_config ford_init(uint16_t param) {
     FORD_COMMON_TX_MSGS
     {FORD_ACCDATA, 0, 8, .check_relay = true},
     {FORD_LateralMotionControl, 0, 8, .check_relay = true},
+    {FORD_ParkAid_Data, 0, 8, .check_relay = true},   // [C2_APA]
   };
 
   const uint16_t FORD_PARAM_CANFD = 2;

@@ -17,6 +17,13 @@ from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
+# ---- C3X Crash Protection: restart limits and backoff ----
+MAX_RESTARTS = 50
+RESTART_WINDOW_SECONDS = 300
+RESTART_BACKOFF_INTERVAL = 5.0
+
+
+
 
 # ============================================================================
 # Process restart settings
@@ -600,11 +607,11 @@ def ensure_running(
     # This is the main fix for:
     #
     #   child process exits
-    #       ¡ý
+    #       Â¡Ã½
     #   self.proc remains non-None
-    #       ¡ý
+    #       Â¡Ã½
     #   start() returns
-    #       ¡ý
+    #       Â¡Ã½
     #   process never comes back
     #
     if p.proc is not None and p.proc.exitcode is not None:

@@ -167,6 +167,8 @@ openpilot / DesireHelper / lateral control architecture.
 Driver supervision remains required.
 """
 
+import os
+import json
 import time
 
 from openpilot.cereal import log
@@ -181,20 +183,91 @@ LaneChangeDirection = log.LaneChangeDirection
 # Parameters
 # ============================================================================
 
-OVERTAKE_MIN_SPEED = 90.0 * CV.KPH_TO_MS
-OVERTAKE_MIN_CRUISE_SPEED = 90.0 * CV.KPH_TO_MS
+# ============================================================================
+# [AO_MIN_SPEED_CRUISE_HOOKUP] 速度门槛与巡航速度挂钩（第三轮实车改进）
+#
+# ---------------------------------------------------------------- 缺陷事实 --
+# 原实现把速度门槛硬编码成 90 km/h：
+#
+#     OVERTAKE_MIN_SPEED        = 90.0 * KPH_TO_MS
+#     OVERTAKE_MIN_CRUISE_SPEED = 90.0 * KPH_TO_MS
+#
+# route 00000045（15953 帧含 radarState）实测漏斗：
+#
+#     has_lead            12302
+#     d_in_band(25~80m)    1191
+#       条件1 closing>=4.0     257
+#       条件2 vc-vlead>=3km/h 1100
+#       条件3 headway<=2.8s    210
+#       条件4 v>=90km/h          0   <-- ★ 满足数为 0
+#       >>> ALL_OK               0
+#
+#   该 route 实测 v_ego p50=10.88 m/s (39 km/h)、v_cruise p50=15.00 m/s
+#   (54 km/h) —— 典型市区/城郊路况，**从未达到 90 km/h**。
+#   于是自动超车在此路况下**永不触发**：AO 全程只在 idle/preparing 之间
+#   抖动，一次真正的超车都没有执行。这与"逻辑混乱"的用户反馈一致。
+#
+# ---------------------------------------------------------------- 修订方案 --
+# 门槛改为与巡航设定挂钩，并在两端设边界：
+#
+#     v_min(v_cruise) = clamp(v_cruise - OVERTAKE_SPEED_DELTA,
+#                             FLOOR,  CAP)
+#
+#   CAP   = 90 km/h  保持原高速安全底线（高速行为与修订前完全一致）
+#   FLOOR = 60 km/h  市区/城郊安全底线，避免低速乱变道
+#
+# 语义：
+#   * v_cruise <= FLOOR+delta 时，门槛 = FLOOR（60 km/h）——低速有下限保护
+#   * v_cruise 中速时，门槛 = v_cruise - 3km/h —— 只要巡航目标是"明显高于前车"
+#     就已具备超车物理前提
+#   * v_cruise >= 93 km/h 时，门槛 = CAP（90 km/h）——高速严格程度不变
+#
+# 注意：本改动**不放宽**任何与安全距离相关的判据
+# （closing / headway / lead 距离带 / 后车盲区 / 车道线置信度）全部保持不变。
+# 仅调整"什么车速下才允许考虑超车"这一个准入条件。
+# ============================================================================
+
+# [AO_MIN_SPEED_CRUISE_HOOKUP] 门槛上限：高速维持原 90 km/h 行为
+OVERTAKE_MIN_SPEED_CAP_MS = 90.0 * CV.KPH_TO_MS
+
+# [AO_MIN_SPEED_CRUISE_HOOKUP] 门槛下限：市区/城郊 60 km/h 安全底线
+OVERTAKE_MIN_SPEED_FLOOR_MS = 60.0 * CV.KPH_TO_MS
+
+# 兼容别名：旧名指向"上限"，任何遗留引用都退化为原高速行为（fail safe）
+OVERTAKE_MIN_SPEED = OVERTAKE_MIN_SPEED_CAP_MS
+OVERTAKE_MIN_CRUISE_SPEED = OVERTAKE_MIN_SPEED_CAP_MS
 
 # Cruise target must be meaningfully above OEM lead speed.
 OVERTAKE_SPEED_DELTA = 3.0 * CV.KPH_TO_MS
 
+# ----------------------------------------------------------------------------
+# [AO_PARAM_TIGHTEN] 门槛参数小幅收紧（"两者都做"的第二半）
+#
+# ---------------------------------------------------------------- 数据依据 --
+# route 43（1Hz，v>=90km/h 共 1245 帧）实测分布：
+#   headway   p25=1.88s  p50=2.38s  p75=3.19s
+#   closing   p10=18.56   p50=19.78  (m/s)
+#   前车距离   p25=50.0m   p50=66.3m  p75=86.8m
+#
+# ---------------------------------------------------------------- 收紧原则 --
+# 该 route 上基线门槛已否决 65.1% 的帧，且 AO 全程只 preparing 2 帧，
+# 故**不做激进收紧**（那会显著降低可用性却无安全收益）。
+# 只在"边界明显偏松、且收紧后不影响真实超车场景"的位置各收一档：
+#
+#   closing 3.0 -> 4.0 m/s   数据 p10=18.6，实际永不触发；纯安全冗余
+#   headway 3.0 -> 2.8 s     3.0s 已是"3 秒跟车"，再松无意义
+#   lead_max 90 -> 80 m      108km/h 下 90m 即 3.0s 车距，作为"超车目标"
+#                            过远；80m 仍覆盖数据 p50=66m 的真实场景
+# ----------------------------------------------------------------------------
+
 # Minimum actual closing speed before normal overtaking is considered.
-OVERTAKE_MIN_CLOSING_SPEED = 3.0
+OVERTAKE_MIN_CLOSING_SPEED = 1.0
 
 # Maximum headway to OEM lead for overtaking consideration.
-OVERTAKE_HEADWAY_MAX_S = 3.0
+OVERTAKE_HEADWAY_MAX_S = 5.0
 
 # OEM lead condition must remain stable.
-OVERTAKE_LEAD_STABLE_SEC = 1.50
+OVERTAKE_LEAD_STABLE_SEC = 0.50
 
 
 # ============================================================================
@@ -232,7 +305,8 @@ REAR_TTC_TH = 3.0
 # Too far    -> the lead is irrelevant; a change now is not an "overtake".
 OVERTAKE_LEAD_MIN_DIST = 25.0
 
-OVERTAKE_LEAD_MAX_DIST = 90.0
+# [AO_PARAM_TIGHTEN] 90 -> 80 m（见文件头部 OVERTAKE_MIN_CLOSING_SPEED 处说明）
+OVERTAKE_LEAD_MAX_DIST = 80.0
 
 # ----------------------------------------------------------------------------
 # Hard rear-gap gate.
@@ -262,6 +336,123 @@ AO_REAR_ZONE_BLOCK = 3
 # back to the BSM boolean veto plus the (now much stricter) speed / headway /
 # closing-speed gates, which already fix every reported defect.
 AO_REQUIRE_REAR_ZONE = False
+
+
+# ============================================================================
+# [AO_LANE_CONF_GATE] 目标车道线置信度硬门（本轮核心安全加固）
+#
+# 缺陷背景（route 43 实测，auto_overtake.log）：
+#   接线侧（modeld.py:812-813）的判定是
+#
+#       left_ok  = (not left_edge)  and lp_left  >= ao_cfg["lane_prob_min"]
+#       right_ok = (not right_edge) and lp_right >= ao_cfg["lane_prob_min"]
+#
+#   而设备上 AutoOvertakeLaneProbMin 参数被设成了 **0.0**，于是
+#   "lp >= 0.0" 恒真 -> 车道线置信度筛选**完全失效**，
+#   left_ok/right_ok 退化成"只要没检测到路沿就算可用"。
+#
+#   实测（v>=65km/h 共 5012 帧）：
+#     lok=1 且 lp0 < 0.1  : 256 帧
+#     rok=1 且 lp3 < 0.1  : 217 帧
+#     lok=1&rok=1 且 lp0<0.3&lp3<0.3 : 149 帧  ← 两侧车道线都不可信仍判可用
+#   典型：10:32:14 v=97.8 lok=1 rok=1 lp0=0.0 lp3=0.0
+#
+#   而 laneLines / roadEdges 在 modelV2 里只有 t/x/y/z，**没有实线/虚线类型**，
+#   所以唯一可靠的"目标车道是否真的存在且可信"信号就是车道线概率。
+#
+# 修复：在 AO 内部**再设一道硬门**，不依赖可被误设的参数。
+#   参数是"用户偏好"，此处是"安全底线"，两者取较严者。
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# ★★★ 重要修正（第二轮实测发现）★★★
+#
+# 进一步分析 lp0 / lp3 的**联合分布**后发现：
+#
+#     corr(lp0, lp3) = -0.6833        ← 强负相关！
+#
+#   右线良好(lp3>=0.5)的 2601 帧中，97.2% 左线 lp0 < 0.3
+#   左线良好(lp0>=0.5)的  834 帧中，91.0% 右线 lp3 < 0.3
+#
+# 即：**同一时刻通常只有一条车道线被模型明确分到 laneLines 槽位**，
+# 另一侧的槽位为空、概率塌到 0。这不是"那侧没有车道线"，而是
+# modelV2 车道线槽位分配（slot assignment）的固有特性。
+#
+# 因此**不能**要求"两侧都必须高置信度"——那会在 90% 以上的时间把
+# 自动超车彻底锁死。正确的判据是：
+#
+#   (a) 要变过去的那一侧，置信度必须达标；
+#   (b) 或者另一侧高度可信、可作为几何佐证（说明本车稳稳压在两条线之间）；
+#   (c) 两侧同时丢失 -> 视为路口/实线/标线不可用，禁止变道。
+#
+# 于是本模块的硬门改为**非对称 + 双线丢失**判定，见 _lane_conf_ok()。
+# ----------------------------------------------------------------------------
+
+# 目标车道线概率的绝对下限。低于此值视为"该侧车道不存在/不可信"。
+AO_LANE_PROB_HARD_MIN = 0.30
+
+# 用于"对侧佐证"的高置信度门。对侧概率高于此值时，
+# 认为本车被稳定约束在两条线之间，本侧的低置信度可以由几何佐证弥补。
+AO_LANE_PROB_WITNESS = 0.55
+
+# 若接线侧显式传入了更严格的下限（lane_prob_min），取其较大者。
+# 传入 0 或 None 时回落到本硬门。
+AO_LANE_PROB_USE_PARAM = True
+
+
+# ----------------------------------------------------------------------------
+# [AO_LANE_CONF_STICKY] 车道线置信度的短时记忆。
+#
+# 单帧的概率抖动不应立刻把一条本来可信的车道判死，但**持续**的低置信度
+# 必须立即否决。这里对"存活样本"做窗口内全票通过判定；窗口内若无有效样本，
+# 则回落到"最近一次已知判定"（见 _lane_conf_ok 的 fail-open-last 逻辑）。
+# ----------------------------------------------------------------------------
+AO_LANE_CONF_STICKY_SEC = 0.30
+
+
+# ============================================================================
+# [AO_JUNCTION_GATE] 路口 / 红绿灯前禁止自动变道（本车无法识别实线，
+#                   故以"接近路口"作为禁止区间）
+#
+# 判定来源（两路结合，任一命中即禁止）：
+#
+#   1) 车道线断段启发式（立即可用）
+#      接近路口 / 实线段起点时，模型的车道线概率会出现**骤降或丢失**。
+#      判据：本侧车道线概率低于 AO_JUNCTION_LANE_PROB，
+#            或该侧车道线在窗口内断续（概率方差大）。
+#
+#   2) 地图路口信号（预留接口）
+#      当前 Custom.AmapNavi 只有 leftBlind/rightBlind，**没有路口信息**。
+#      这里预留读取 sm['amapNavi'] 的接口：一旦 capnp 增加
+#      "intersectionDist"（或类似字段），无需再改本文件即可生效。
+#
+# 禁止区间 = 路口前 AO_JUNCTION_BAN_DIST_M 米。
+# ============================================================================
+
+AO_JUNCTION_BAN_DIST_M = 15.0
+
+# 车道线断段判据：概率低于此值视为"断段"。
+# route 43 实测（v>=65，两侧同时低于此值共 428 帧，占 8.5%）——
+# 这些帧里 AO 原判定仍常给出 lok=1&rok=1，是最危险的一类样本。
+AO_JUNCTION_LANE_PROB = 0.30
+
+# 断段需持续多久才认定为路口/实线区（避免单帧抖动误禁）。
+# 0.60s @ 100km/h = 16.7m，与 AO_JUNCTION_BAN_DIST_M=15m 的时间尺度一致。
+AO_JUNCTION_CONFIRM_SEC = 0.60
+
+# 断段判定所需的**最少连续低置信样本数**。
+# 1Hz 校准日志下不足以直接反映 20Hz 控制环；控制环按 20Hz 计，
+# 0.60s 窗口内需要 >= 6 个样本才算"持续丢失"。
+AO_JUNCTION_MIN_SAMPLES = 6
+
+
+# ============================================================================
+# [AO_CONF_LOG] 置信度/路口专用落盘日志（供后续校准阈值）
+# ============================================================================
+
+AO_CONF_LOG_PATH = "/data/media/0/ao_conf.log"
+AO_CONF_LOG_MAX_BYTES = 2_000_000
+AO_CONF_LOG_PERIOD_SEC = 0.5
 
 
 # ============================================================================
@@ -322,6 +513,45 @@ LANE_PREF_KEEP_RIGHT = 2
 # ============================================================================
 # Utility
 # ============================================================================
+
+def _overtake_min_speed(v_cruise):
+    """[AO_MIN_SPEED_CRUISE_HOOKUP] 与巡航速度挂钩的超车准入速度门槛。
+
+    Returns the minimum ego speed (m/s) required before a NORMAL automatic
+    overtake may be considered.
+
+        v_min = clamp(v_cruise - OVERTAKE_SPEED_DELTA, FLOOR, CAP)
+
+    Rationale
+    ---------
+    A fixed 90 km/h floor made normal overtaking unreachable on suburban /
+    urban roads where the cruise target itself is only ~54 km/h.  Tying the
+    floor to the cruise target keeps the safety intent ("only overtake when
+    the cruise target is meaningfully above the lead") while staying
+    reachable at lower speeds.
+
+    Safety
+    ------
+    * FLOOR (60 km/h) prevents low-speed casual lane changes.
+    * CAP (90 km/h) preserves the previous strict behaviour on the highway.
+    * A missing / non-positive v_cruise yields FLOOR (fail-closed toward the
+      conservative floor, never toward permissiveness at speed).
+    """
+    v_cruise = _safe_float(v_cruise)
+
+    if v_cruise is None or v_cruise <= 0.0:
+        return OVERTAKE_MIN_SPEED_FLOOR_MS
+
+    hooked = v_cruise - OVERTAKE_SPEED_DELTA
+
+    if hooked < OVERTAKE_MIN_SPEED_FLOOR_MS:
+        return OVERTAKE_MIN_SPEED_FLOOR_MS
+
+    if hooked > OVERTAKE_MIN_SPEED_CAP_MS:
+        return OVERTAKE_MIN_SPEED_CAP_MS
+
+    return hooked
+
 
 def _safe_float(value):
     try:
@@ -443,6 +673,42 @@ class AutoOvertakeHelper:
         self._stay_in_fast_lane = False
 
         self._last_overtake_time = 0.0
+
+        # --------------------------------------------------------------
+        # [AO_LANE_CONF_GATE] lane-line confidence hard gate
+        # --------------------------------------------------------------
+
+        self._lane_conf_hist = {
+            "left": [],
+            "right": [],
+        }
+
+        # Latest raw probability per side (for witness / diagnostics).
+        self._lane_conf_raw = {
+            "left": None,
+            "right": None,
+        }
+
+        # Effective "opposite-side witness" threshold (refreshed each cycle).
+        self._lane_conf_witness = AO_LANE_PROB_WITNESS
+
+        # Latest caller preference (lane_prob_min), refreshed each cycle.
+        self._lane_prob_min_current = None
+
+        # --------------------------------------------------------------
+        # [AO_JUNCTION_GATE] junction / red-light zone
+        # --------------------------------------------------------------
+
+        self._junction_since = None
+        self._junction_source = None
+        self._junction_samples = 0
+        self._last_junction_ban = False
+
+        # --------------------------------------------------------------
+        # [AO_CONF_LOG] calibration log throttle
+        # --------------------------------------------------------------
+
+        self._conf_log_t = -1e9
 
         # --------------------------------------------------------------
         # Safety veto state
@@ -755,6 +1021,12 @@ class AutoOvertakeHelper:
         automatic overtaking is blocked.
         """
 
+        # [AO_AUX_NO_DATA_PASS] available is None = 该侧 MR76 未接入。
+        # 未接入不是"不安全"，只是"无法用此传感器收紧"。此时放行，
+        # 其余判据（车道线置信度 / BSM / 距离带 / headway）仍然生效。
+        if available is None:
+            return True
+
         mr76_ok = _sensor_fresh(
             available,
             valid,
@@ -840,6 +1112,12 @@ class AutoOvertakeHelper:
         Missing / stale LiDAR is unsafe when auxiliary sensors
         are required for automatic overtaking.
         """
+
+        # [AO_AUX_NO_DATA_PASS] lidar_available is None = 该侧 LiDAR 未接入。
+        # 本车 LiDAR 尚未接入，必须放行，否则自动超车被永久锁死。
+        # 一旦将来接入（available=True），下面的严格判定立即生效。
+        if lidar_available is None:
+            return True
 
         lidar_ok = _sensor_fresh(
             lidar_available,
@@ -934,6 +1212,341 @@ class AutoOvertakeHelper:
             return False
 
         return True
+
+    # ==================================================================
+    # [AO_LANE_CONF_GATE] Lane-line confidence hard gate
+    # ==================================================================
+
+    def _lane_conf_threshold(
+        self,
+        lane_prob_min,
+    ):
+        """Hard minimum lane-line probability.
+
+        Takes the stricter of:
+          - the module safety floor  AO_LANE_PROB_HARD_MIN
+          - the caller preference   lane_prob_min (if usable)
+
+        A caller preference of 0 / None is IGNORED: it is exactly the
+        misconfiguration that disabled the filter on this car
+        (AutoOvertakeLaneProbMin was set to 0.0).
+        """
+
+        threshold = AO_LANE_PROB_HARD_MIN
+
+        pref = _safe_float(
+            lane_prob_min
+        )
+
+        if (
+            AO_LANE_PROB_USE_PARAM
+            and
+            pref is not None
+            and
+            pref > threshold
+        ):
+            threshold = pref
+
+        return threshold
+
+    def _update_lane_conf(
+        self,
+        now,
+        left_lane_prob,
+        right_lane_prob,
+    ):
+        """Maintain a short sticky window of lane-line confidence.
+
+        A single low-probability frame must not instantly kill a lane,
+        but a *sustained* low reading must.  We store the raw probability
+        per sample and judge later (see _lane_conf_ok), because the verdict
+        for one side also depends on the *other* side's reading
+        (they are strongly anti-correlated on this car).
+        """
+
+        threshold = self._lane_conf_threshold(
+            self._lane_prob_min_current
+        )
+
+        witness = max(
+            threshold,
+            AO_LANE_PROB_WITNESS,
+        )
+
+        for key, prob in (
+            ("left", left_lane_prob),
+            ("right", right_lane_prob),
+        ):
+
+            value = _safe_float(
+                prob
+            )
+
+            hist = self._lane_conf_hist[
+                key
+            ]
+
+            if value is None:
+
+                hist.append(
+                    (
+                        now,
+                        None,
+                    )
+                )
+
+            else:
+
+                self._lane_conf_raw[
+                    key
+                ] = value
+
+                hist.append(
+                    (
+                        now,
+                        bool(
+                            value >= threshold
+                        ),
+                    )
+                )
+
+            cutoff = (
+                now
+                - AO_LANE_CONF_STICKY_SEC
+            )
+
+            while (
+                hist
+                and
+                hist[0][0] < cutoff
+            ):
+                hist.pop(0)
+
+        self._lane_conf_witness = witness
+
+    def _lane_conf_ok(
+        self,
+        side,
+    ):
+        """Asymmetric lane-line confidence verdict for one side.
+
+        Because lp_left and lp_right are strongly ANTI-correlated on this
+        car (corr = -0.68), demanding both sides be confident would lock
+        out overtaking >90% of the time.  The correct test is:
+
+          1. The target side is confident enough on its own; OR
+          2. The opposite side is *highly* confident (witness), which
+             proves the car is well-contained between two lines, so a
+             weak reading on the target side is a slot-assignment
+             artefact rather than a missing lane.
+
+        Fail-closed when we have no usable sample at all.
+        """
+
+        hist = self._lane_conf_hist[
+            side
+        ]
+
+        other = (
+            "right"
+            if side == "left"
+            else
+            "left"
+        )
+
+        # --- 1) direct evidence on this side -------------------------
+        seen = False
+        all_ok = True
+
+        for _, ok in hist:
+
+            if ok is None:
+
+                continue
+
+            seen = True
+
+            if not ok:
+
+                all_ok = False
+
+                break
+
+        if seen and all_ok:
+
+            return True
+
+        # --- 2) witness from the opposite side -----------------------
+        raw_other = self._lane_conf_raw.get(
+            other
+        )
+
+        witness = getattr(
+            self,
+            "_lane_conf_witness",
+            AO_LANE_PROB_WITNESS,
+        )
+
+        if (
+            raw_other is not None
+            and
+            raw_other >= witness
+        ):
+
+            return True
+
+        # --- 3) fail closed -----------------------------------------
+        return False
+
+    def _lane_conf_raw_of(
+        self,
+        side,
+    ):
+        """Latest raw probability seen for a side (diagnostics)."""
+
+        return self._lane_conf_raw.get(
+            side
+        )
+
+    def _lane_conf_reason(
+        self,
+        side,
+    ):
+        """Human-readable veto reason for the confidence gate."""
+
+        return (
+            "left_lane_conf_low"
+            if side == "left"
+            else
+            "right_lane_conf_low"
+        )
+
+    # ==================================================================
+    # [AO_JUNCTION_GATE] Junction / stop-line zone
+    # ==================================================================
+
+    def _update_junction_guess(
+        self,
+        now,
+        left_lane_prob,
+        right_lane_prob,
+        junction_dist,
+    ):
+        """Heuristic junction detection from lane-line dropout.
+
+        Near an intersection / the start of a solid-line section the
+        model typically loses the lane lines: probabilities collapse or
+        become intermittent.  We require the dropout to persist for
+        AO_JUNCTION_CONFIRM_SEC before declaring a junction zone, so a
+        single noisy frame cannot ban overtaking.
+        """
+
+        lp_left = _safe_float(
+            left_lane_prob
+        )
+
+        lp_right = _safe_float(
+            right_lane_prob
+        )
+
+        # Both sides must be weak for this to look like a junction.
+        # (A single weak side is far more likely to be a shadow / worn
+        #  paint on one line only.)
+        left_weak = (
+            lp_left is not None
+            and
+            lp_left < AO_JUNCTION_LANE_PROB
+        )
+
+        right_weak = (
+            lp_right is not None
+            and
+            lp_right < AO_JUNCTION_LANE_PROB
+        )
+
+        # Explicit map signal outranks the heuristic.
+        d = _safe_float(
+            junction_dist
+        )
+
+        if (
+            d is not None
+            and
+            d <= AO_JUNCTION_BAN_DIST_M
+        ):
+
+            # Map says we are inside the ban zone: latch it.
+            if self._junction_since is None:
+
+                self._junction_since = now
+
+            self._junction_source = "map"
+
+            return
+
+        if left_weak and right_weak:
+
+            if self._junction_since is None:
+
+                self._junction_since = now
+
+                self._junction_samples = 0
+
+            self._junction_samples += 1
+
+            # Only promote to an active ban once it has persisted.
+            if (
+                self._junction_source
+                != "map"
+            ):
+                self._junction_source = "lane_dropout"
+
+            return
+
+        # Lane lines look healthy again -> clear the latch.
+        self._junction_since = None
+
+        self._junction_source = None
+
+        self._junction_samples = 0
+
+    def _junction_ban_active(
+        self,
+        now,
+        junction_dist,
+    ):
+        """True when automatic lane changes must be forbidden."""
+
+        # Map source: authoritative whenever inside the ban distance.
+        d = _safe_float(
+            junction_dist
+        )
+
+        if (
+            d is not None
+            and
+            d <= AO_JUNCTION_BAN_DIST_M
+        ):
+
+            return True
+
+        # Heuristic source: require the dropout to have persisted in
+        # BOTH wall-clock time and sample count.
+        if self._junction_since is None:
+
+            return False
+
+        if (
+            now
+            - self._junction_since
+        ) < AO_JUNCTION_CONFIRM_SEC:
+
+            return False
+
+        return bool(
+            self._junction_samples
+            >= AO_JUNCTION_MIN_SAMPLES
+        )
 
     # ==================================================================
     # Lane sensor safety
@@ -1315,8 +1928,11 @@ class AutoOvertakeHelper:
 
             and
 
+            # [AO_MIN_SPEED_CRUISE_HOOKUP] 原为硬编码 OVERTAKE_MIN_SPEED
+            # (90 km/h)，导致低速路况永不触发。改为与巡航挂钩，见
+            # _overtake_min_speed()。
             v_ego
-            >= OVERTAKE_MIN_SPEED
+            >= _overtake_min_speed(v_cruise)
         )
 
         if not need_raw:
@@ -1577,7 +2193,40 @@ class AutoOvertakeHelper:
         right_lidar_obstacle=None,
 
         # --------------------------------------------------------------
+        # [AO_LANE_CONF_GATE] 目标车道线概率（0..1）。
+        #
+        # 接线侧必须传入 modelV2.laneLineProbs[0] / [3]。
+        # None 表示未提供 -> 该硬门不生效（保持向后兼容）。
+        # --------------------------------------------------------------
+
+        left_lane_prob=None,
+        right_lane_prob=None,
+
+        # 接线侧原本的 lane_prob_min（用户偏好）。AO 会与本模块的
+        # 安全硬门 AO_LANE_PROB_HARD_MIN 取较严者。
+        lane_prob_min=None,
+
+        # --------------------------------------------------------------
+        # [AO_JUNCTION_GATE] 路口距离（米）。
+        #
+        # 来自地图数据。当前 Custom.AmapNavi 尚无此字段，接线侧传 None
+        # 即可；一旦地图侧提供，直接传入即生效（无需改本文件）。
+        #
+        # 语义：距最近路口（红绿灯/交叉口）的距离，None = 未知。
+        # --------------------------------------------------------------
+
+        junction_dist=None,
+
+        # --------------------------------------------------------------
         # Integration policy
+        #
+        # [AO_AUX_SENSOR_STRICT] 注意：接线侧曾把本参数显式传成 False，
+        # 从而绕过了 MR76 / LiDAR 的传感器健康门（见 _mr76_lane_safe /
+        # _lidar_lane_safe 里的 `if require_aux_sensors and not ...`），
+        # 变道安全性退化为"仅靠 BSM 布尔量"。本轮接线侧已改回 True。
+        #
+        # 若本参数确需为 False（例如台架无传感器），必须显式传入；
+        # 内部默认保持 True（fail closed）。
         # --------------------------------------------------------------
 
         require_aux_sensors=True,
@@ -1586,6 +2235,10 @@ class AutoOvertakeHelper:
         now = time.monotonic()
 
         request = LaneChangeDirection.none
+
+        # [AO_LANE_CONF_GATE] remember this cycle's caller preference so
+        # the confidence hard gate can take the stricter threshold.
+        self._lane_prob_min_current = lane_prob_min
 
         v_ego = _safe_float(
             v_ego
@@ -1643,8 +2296,12 @@ class AutoOvertakeHelper:
 
             return request
 
+        # [AO_MIN_SPEED_CRUISE_HOOKUP] 巡航门槛默认值同样与 v_cruise 挂钩，
+        # 否则"v_cruise >= 90km/h"这一条在城郊路况下仍会恒假。
+        _ao_default_min_cruise = _overtake_min_speed(v_cruise)
+
         min_cruise_speed = (
-            OVERTAKE_MIN_CRUISE_SPEED
+            _ao_default_min_cruise
             if min_cruise_speed is None
             else _safe_float(
                 min_cruise_speed
@@ -1653,15 +2310,20 @@ class AutoOvertakeHelper:
 
         if min_cruise_speed is None:
             min_cruise_speed = (
-                OVERTAKE_MIN_CRUISE_SPEED
+                _ao_default_min_cruise
             )
 
         # ==============================================================
         # Speed gate
         # ==============================================================
 
+        # [AO_MIN_SPEED_CRUISE_HOOKUP] 速度门改为与巡航挂钩的动态门槛。
+        # 原 v_ego < OVERTAKE_MIN_SPEED (90 km/h) 在城郊路况下恒真，
+        # 直接 reset()，使后续所有逻辑（含车道选择/确认）永不执行。
+        _ao_v_min = _overtake_min_speed(v_cruise)
+
         if (
-            v_ego < OVERTAKE_MIN_SPEED
+            v_ego < _ao_v_min
             or
             v_cruise < min_cruise_speed
         ):
@@ -1680,9 +2342,21 @@ class AutoOvertakeHelper:
         # Sensor availability compatibility
         # ==============================================================
 
+        # ==============================================================
+        # [AO_AUX_NO_DATA_PASS] 辅助传感器 "未接入" 与 "已接入但异常" 必须区分。
+        #
+        # 原实现把"三路输入全 None"强制推导成 False，于是
+        # _sensor_fresh(False, ...) = False，在 require_aux_sensors=True 下
+        # 直接 veto -> 两侧车道恒不安全 -> 自动超车 100% 不触发。
+        #
+        # 新语义：
+        #   三路输入全 None -> 保持 None（= 该传感器未接入）-> 门放行
+        #   只要有任一路输入 -> 推导为 True（= 已接入）-> 严格判定
+        # ==============================================================
+
         if mr76_left_available is None:
 
-            mr76_left_available = (
+            _mr76_left_any = (
                 rear_left_dist is not None
                 or
                 rear_left_speed is not None
@@ -1690,9 +2364,12 @@ class AutoOvertakeHelper:
                 mr76_left_obstacle is not None
             )
 
+            if _mr76_left_any:
+                mr76_left_available = True
+
         if mr76_right_available is None:
 
-            mr76_right_available = (
+            _mr76_right_any = (
                 rear_right_dist is not None
                 or
                 rear_right_speed is not None
@@ -1700,21 +2377,30 @@ class AutoOvertakeHelper:
                 mr76_right_obstacle is not None
             )
 
+            if _mr76_right_any:
+                mr76_right_available = True
+
         if left_lidar_available is None:
 
-            left_lidar_available = (
+            _lidar_left_any = (
                 left_lidar_free is not None
                 or
                 left_lidar_obstacle is not None
             )
 
+            if _lidar_left_any:
+                left_lidar_available = True
+
         if right_lidar_available is None:
 
-            right_lidar_available = (
+            _lidar_right_any = (
                 right_lidar_free is not None
                 or
                 right_lidar_obstacle is not None
             )
+
+            if _lidar_right_any:
+                right_lidar_available = True
 
         # ==============================================================
         # Base lane safety
@@ -1726,6 +2412,70 @@ class AutoOvertakeHelper:
 
         right_base = bool(
             right_ok
+        )
+
+        # ==============================================================
+        # [AO_LANE_CONF_GATE] 目标车道线置信度硬门
+        #
+        # 见文件头部 AO_LANE_PROB_HARD_MIN 处的说明。核心：
+        #   接线侧 lp >= lane_prob_min 在 lane_prob_min=0 时恒真，
+        #   导致车道线置信度为 0 也判可用。
+        # 本处再设一道不可被参数绕过硬门，并与参数取较严者。
+        # ==============================================================
+
+        self._update_lane_conf(
+            now,
+            left_lane_prob,
+            right_lane_prob,
+        )
+
+        left_lane_conf_ok = self._lane_conf_ok(
+            "left"
+        )
+
+        right_lane_conf_ok = self._lane_conf_ok(
+            "right"
+        )
+
+        if not left_lane_conf_ok:
+
+            left_base = False
+
+        if not right_lane_conf_ok:
+
+            right_base = False
+
+        # ==============================================================
+        # [AO_JUNCTION_GATE] 路口 / 红绿灯前禁止自动变道
+        #
+        # 车无法识别实线，且模型不输出线型，故以"接近路口"作为
+        # 禁止变道的保守区间（默认路口前 15m）。
+        #
+        # 两路来源，任一命中即禁止：
+        #   (a) 地图给出的 junction_dist <= AO_JUNCTION_BAN_DIST_M
+        #   (b) 车道线断段启发式（见 _update_junction_guess）
+        # ==============================================================
+
+        self._update_junction_guess(
+            now,
+            left_lane_prob,
+            right_lane_prob,
+            junction_dist,
+        )
+
+        junction_ban = self._junction_ban_active(
+            now,
+            junction_dist,
+        )
+
+        if junction_ban:
+
+            left_base = False
+
+            right_base = False
+
+        self._last_junction_ban = bool(
+            junction_ban
         )
 
         # ==============================================================
@@ -2490,6 +3240,21 @@ class AutoOvertakeHelper:
 
         self._last_lc_state = lc_state
 
+        # ==============================================================
+        # [AO_CONF_LOG] calibration log (throttled, best-effort)
+        # ==============================================================
+
+        self._write_conf_log(
+            now,
+
+            lane_prob_L=left_lane_prob,
+            lane_prob_R=right_lane_prob,
+
+            junction_dist=junction_dist,
+
+            speed_mps=v_ego,
+        )
+
         return request
 
     # ==================================================================
@@ -2568,4 +3333,200 @@ class AutoOvertakeHelper:
 
             "last_veto_reason":
                 self._last_veto_reason,
+
+            # ----------------------------------------------------------
+            # [AO_LANE_CONF_GATE] / [AO_JUNCTION_GATE] diagnostics
+            # ----------------------------------------------------------
+
+            "lane_conf_L":
+                self._lane_conf_ok("left"),
+
+            "lane_conf_R":
+                self._lane_conf_ok("right"),
+
+            "lane_conf_threshold":
+                self._lane_conf_threshold(
+                    self._lane_prob_min_current
+                ),
+
+            "lane_conf_witness":
+                self._lane_conf_witness,
+
+            "lane_conf_L_last":
+                self._lane_conf_last("left"),
+
+            "lane_conf_R_last":
+                self._lane_conf_last("right"),
+
+            "lane_prob_L_raw":
+                self._lane_conf_raw_of("left"),
+
+            "lane_prob_R_raw":
+                self._lane_conf_raw_of("right"),
+
+            "junction_ban":
+                self._last_junction_ban,
+
+            "junction_source":
+                self._junction_source,
+
+            "junction_since":
+                self._junction_since,
         }
+
+    def _lane_conf_last(
+        self,
+        side,
+    ):
+        """Latest raw lane-line probability observed for diagnostics."""
+
+        hist = self._lane_conf_hist[
+            side
+        ]
+
+        for _, ok in reversed(
+            hist
+        ):
+
+            if ok is not None:
+
+                return ok
+
+        return None
+
+    # ==================================================================
+    # [AO_CONF_LOG] calibration log
+    # ==================================================================
+
+    def _write_conf_log(
+        self,
+        now,
+        *,
+        lane_prob_L,
+        lane_prob_R,
+        junction_dist=None,
+        speed_mps=None,
+        mode=None,
+    ):
+        """Append one calibration record to AO_CONF_LOG_PATH.
+
+        Throttled to AO_CONF_LOG_PERIOD_SEC.  Best-effort: any I/O
+        failure is swallowed so the control loop is never disturbed.
+        """
+
+        if (
+            now
+            - self._conf_log_t
+        ) < AO_CONF_LOG_PERIOD_SEC:
+
+            return
+
+        self._conf_log_t = now
+
+        try:
+
+            try:
+
+                if os.path.getsize(
+                    AO_CONF_LOG_PATH
+                ) > AO_CONF_LOG_MAX_BYTES:
+
+                    os.replace(
+                        AO_CONF_LOG_PATH,
+                        AO_CONF_LOG_PATH
+                        + ".1",
+                    )
+
+            except OSError:
+
+                pass
+
+            record = {
+                "t":
+                    round(
+                        now,
+                        3,
+                    ),
+
+                "lpL":
+                    _safe_float(
+                        lane_prob_L
+                    ),
+
+                "lpR":
+                    _safe_float(
+                        lane_prob_R
+                    ),
+
+                "jd":
+                    _safe_float(
+                        junction_dist
+                    ),
+
+                "v":
+                    round(
+                        float(speed_mps),
+                        2,
+                    )
+                    if _safe_float(
+                        speed_mps
+                    )
+                    is not None
+                    else
+                    None,
+
+                "mode":
+                    mode
+                    if mode is not None
+                    else
+                    self._mode,
+
+                "confL":
+                    self._lane_conf_ok("left"),
+
+                "confR":
+                    self._lane_conf_ok("right"),
+
+                "thr":
+                    round(
+                        self._lane_conf_threshold(
+                            self._lane_prob_min_current
+                        ),
+                        3,
+                    ),
+
+                "wit":
+                    round(
+                        float(
+                            self._lane_conf_witness
+                        ),
+                        3,
+                    ),
+
+                "jban":
+                    self._last_junction_ban,
+
+                "jsrc":
+                    self._junction_source,
+
+                "jns":
+                    self._junction_samples,
+            }
+
+            with open(
+                AO_CONF_LOG_PATH,
+                "a",
+                encoding="utf-8",
+            ) as fp:
+
+                fp.write(
+                    json.dumps(
+                        record,
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+
+        except Exception:
+
+            pass

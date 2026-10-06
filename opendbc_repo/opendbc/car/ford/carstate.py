@@ -26,6 +26,25 @@ class CarState(CarStateBase, MadsCarState):
     self.distance_button = 0
     self.lc_button = 0
 
+    # ========================================================================
+    # [C2_APA] APA / SAPP 握手探针 (只读)
+    # ========================================================================
+    self.apa_sapp_state = 0
+    self.apa_eps_assist_limited = False
+    self.apa_veh_speed_kph = 0.0
+    self._apa_probe_frame = 0
+    self._apa_probe_prev = None
+    self._apa_probe_fh = None
+
+    # ========================================================================
+    # [C2_APA][R2] 方向盘角度源
+    #   True  : ActiveFrontStrg_Stat_FD1.SteWhlOffst_An_TotActl (真实角度)
+    #   False : ParkAid_Data.ExtSteeringAngleReq2 (APA 请求值, 旧行为)
+    # ========================================================================
+    self.apa_use_true_steer_angle = False   # [R2] 临时关闭: 疑似导致 canError
+    self._apa_true_steer_angle_deg = 0.0
+    self._apa_true_steer_valid = False
+
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
@@ -37,10 +56,69 @@ class CarState(CarStateBase, MadsCarState):
     # so we need to block engagement.
     # The vehicle usually recovers out of this state within a minute of normal driving.
     self.vehicle_sensors_valid = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"] < 32766
+    # [C2_APA][R2] 交叉校验 —— 只在 0x89 已确认存在时才做。
+    #
+    # ⚠️ 绝不能用 cp.vl[...] 直接探测: 那会**懒加载注册**该报文,
+    #    而未指定频率的报文默认按 1Hz 计 (timeout 10s), 一旦 0x89 不在
+    #    总线上, MessageState.valid() 恒为 False -> canValid=False ->
+    #    触发 "CAN Bus Error"! 必须先查 addresses / ts_nanos 判断存在性。
+    _totactl = 0.0
+    _totactl_ts = 0
+    try:
+      if 0x89 in cp.addresses:
+        _totactl = float(cp.vl["ActiveFrontStrg_Stat_FD1"]["SteWhlOffst_An_TotActl"])
+        _totactl_ts = cp.ts_nanos["ActiveFrontStrg_Stat_FD1"]["SteWhlOffst_An_TotActl"]
+    except (KeyError, ValueError, TypeError, AttributeError):
+      _totactl_ts = 0
+    if _totactl_ts > 0 and abs(_totactl) >= 1600.0:
+      self.vehicle_sensors_valid = False
+
+    # ========================================================================
+    # [C2_APA] SAPP 握手状态读取 (只读, 不参与任何控制)
+    #   来源: C2 carstate.py
+    #     self.sappHandshake = cp_cam.vl["EPAS_INFO"]["SAPPAngleControlStat1"]
+    #     self.epsAssistLimited = cp_cam.vl["EPAS_INFO"]["SteMdule_D_Stat"] == 1
+    # ========================================================================
+    # ❗ 只能在主总线 cp 上读 EPAS_INFO。
+    #   cp_cam 对应 Bus.cam (相机总线), 本车该总线上没有 0x82
+    #   → 一旦在 cam parser 上注册, can_valid 恒为 False
+    #   → interfaces.py: ret.canValid = all(pt, cam) = False → canError!
+    try:
+      self.apa_sapp_state = int(cp.vl["EPAS_INFO"]["SAPPAngleControlStat1"])
+    except Exception:
+      self.apa_sapp_state = 0
+
+    try:
+      self.apa_eps_assist_limited = int(cp.vl["EPAS_INFO"]["SteMdule_D_Stat"]) == 1
+    except Exception:
+      self.apa_eps_assist_limited = False
+
+    try:
+      self.apa_veh_speed_kph = float(cp.vl["EngVehicleSpThrottle2"]["Veh_V_ActlEng"])
+    except Exception:
+      self.apa_veh_speed_kph = 0.0
 
     # car speed
     ret.vEgoRaw = cp.vl["BrakeSysFeatures"]["Veh_V_ActlBrk"] * CV.KPH_TO_MS
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
+
+    # ---- [C2_APA] 探针日志: 状态变化时或每 100 帧写一次 ----
+    #   修正: 必须在 vEgo 计算**之后**写日志, 否则 ret.vEgo 还是 structs 默认值 0.0
+    self._apa_probe_frame += 1
+    _apa_now = (self.apa_sapp_state, self.apa_eps_assist_limited)
+    if (_apa_now != self._apa_probe_prev) or ((self._apa_probe_frame % 100) == 0):
+      self._apa_probe_prev = _apa_now
+      try:
+        if self._apa_probe_fh is None:
+          self._apa_probe_fh = open("/data/media/0/apa_probe.log", "a", buffering=1)
+        self._apa_probe_fh.write(
+          "sapp=%d limited=%d veh_kph=%.1f vego=%.2f vegoRaw=%.2f steer=%.1f\n"
+          % (self.apa_sapp_state, 1 if self.apa_eps_assist_limited else 0,
+             self.apa_veh_speed_kph, float(ret.vEgo), float(ret.vEgoRaw),
+             float(ret.steeringAngleDeg))
+        )
+      except Exception:
+        pass
     ret.yawRate = cp.vl["Yaw_Data_FD1"]["VehYaw_W_Actl"]
     ret.standstill = cp.vl["DesiredTorqBrk"]["VehStop_D_Stat"] == 1
 
@@ -52,7 +130,41 @@ class CarState(CarStateBase, MadsCarState):
     ret.parkingBrake = cp.vl["DesiredTorqBrk"]["PrkBrkStatus"] in (1, 2)
 
     # steering wheel
-    ret.steeringAngleDeg = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"]
+    # [C2_APA][R2] 角度源切换 (APA 接管 0x3A8 后旧源会被自己污染)
+    #
+    # ⚠️ 盲点防护: CANParser 的 VLDict 是**懒加载**的, 首次访问会自动注册
+    #    报文, 但此时信号值初值为 0.0 —— 且 0.0 落在合法范围内!
+    #    若 0x89 根本不在总线上, 天真实现会把 "恒为 0" 误判为有效角度,
+    #    结果比旧源更糟。因此额外用 ts_nanos 判定"真的收到过报文"。
+    if self.apa_use_true_steer_angle:
+      _r2_ok = False
+      try:
+        # ⚠️ 必须先确认 0x89 已注册且真的收到过, 否则**绝不能**访问
+        #    cp.vl[...] —— 那会懒加载注册一条不存在的报文, 使其在
+        #    can_valid 检查中永远超时, 直接触发 "CAN Bus Error"。
+        if 0x89 in cp.addresses:
+          _ts = cp.ts_nanos["ActiveFrontStrg_Stat_FD1"]["SteWhlOffst_An_TotActl"]
+          if _ts > 0:
+            _true_angle = float(
+              cp.vl["ActiveFrontStrg_Stat_FD1"]["SteWhlOffst_An_TotActl"]
+            )
+            if -1601.0 <= _true_angle <= 1677.0:
+              self._apa_true_steer_angle_deg = _true_angle
+              self._apa_true_steer_valid = True
+              ret.steeringAngleDeg = _true_angle
+              _r2_ok = True
+      except (KeyError, ValueError, TypeError, AttributeError):
+        pass
+
+      if not _r2_ok:
+        if self._apa_true_steer_valid:
+          # 降级 2: 用缓存, 不跳变
+          ret.steeringAngleDeg = self._apa_true_steer_angle_deg
+        else:
+          # 降级 3: 冷启动回落旧源
+          ret.steeringAngleDeg = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"]
+    else:
+      ret.steeringAngleDeg = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"]
     ret.steeringTorque = cp.vl["EPAS_INFO"]["SteeringColumnTorque"]
     ret.steeringPressed = self.update_steering_pressed(
       abs(ret.steeringTorque) > CarControllerParams.STEER_DRIVER_ALLOWANCE,
@@ -90,34 +202,16 @@ class CarState(CarStateBase, MadsCarState):
       )
 
     # gear
-    #
-    # GearLvrPos_D_Actl VAL_TABLE (ford_lincoln_base_pt.dbc):
-    #   1 = Reverse, 3 = Drive, 4 = Sport_DriveSport (S), 5 = Low
-    #
-    # S is reported as GearShifter.sport so openpilot can tell it apart from D
-    # (the FordCurveController Sport profile consumes it). This REQUIRES
-    # `GearShifter.sport` to be listed in Ford's `DRIVABLE_GEARS`
-    # (opendbc/car/ford/interface.py): car_events.py flags any gear that is
-    # neither `drive` nor in `DRIVABLE_GEARS` as EventName.wrongGear, and
-    # wrongGear carries a NO_ENTRY event ("Gear not D") that blocks cruise
-    # engagement outright.
     if self.CP.transmissionType == TransmissionType.automatic:
-      gear_lvr_pos = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
-
-      if gear_lvr_pos == 4:
-        ret.gearShifter = GearShifter.sport
-      elif gear_lvr_pos in (3, 5):
+      if (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] in (3, 4, 5)):
         ret.gearShifter = GearShifter.drive
-      elif gear_lvr_pos == 1:
-        ret.gearShifter = GearShifter.reverse
+      elif (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] == 1):
+        ret.gearShifter = GearShifter.reverse      
 
     elif self.CP.transmissionType == TransmissionType.manual:
-      ret.clutchPressed = (
-        cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
-      )
-
+      ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
       if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-        ret.gearShifter = GearShifter.reverse
+        ret.gearShifter = GearShifter.reverse      
       else:
         ret.gearShifter = GearShifter.drive
 

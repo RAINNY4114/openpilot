@@ -6,6 +6,7 @@ from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, apply_hystere
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
+from opendbc.car.ford.apa_controller import FordAPAController
 
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordCurveController
 
@@ -77,6 +78,61 @@ class CarController(CarControllerBase):
     # CarController itself only supplies vehicle state and sends the
     # resulting curvature to the Ford CAN message.
     self.curve_controller = FordCurveController(CP)
+
+    # ------------------------------------------------------------------
+    # Dual-source curvature telemetry
+    #
+    # Records CC.currentCurvature (steering-angle / vehicle-model source,
+    # as used by bluepilot bp-7.0) against the legacy -yawRate/vEgo source.
+    #
+    # Written at ~1 Hz to:
+    #     /data/media/0/curv_src.log
+    #
+    # Format (comma separated):
+    #     t,vEgo,cc_curv_steer_vm,yaw_curv,diff
+    # ------------------------------------------------------------------
+    self._curv_src_path = "/data/media/0/curv_src.log"
+    self._curv_src_frame = 0
+    self._curv_src_fh = None
+
+    # ========================================================================
+    # [C2_APA][路线A] Ford APA 角度域支路 (ParkAid_Data, 0x3A8)
+    #
+    # 与既有 FordCurveController 并存:
+    #   - 既有: curvature -> LatCtl_D_Rq (0x3D3 / 0x3D6)  不受影响
+    #   - APA : curvature -> ParkAid_Data (0x3A8)          本支路
+    #
+    # 默认全程静默 (dp_ford_apa_enable 缺省 0), 不产生任何 CAN。
+    # ========================================================================
+    self.apa_controller = FordAPAController(CP)
+
+  # ======================================================================
+  # Dual-source curvature telemetry
+  # ======================================================================
+
+  def _curv_src_log(self, v_ego, cc_curv, yaw_curv):
+    """Append one dual-source curvature sample at ~1 Hz.
+
+    Fails silently: telemetry must never break lateral control.
+    """
+    try:
+      # CarController runs at 100 Hz; STEER_STEP gates us to ~20 Hz, so
+      # every 20th call here is ~1 Hz.
+      self._curv_src_frame += 1
+      if self._curv_src_frame % 20 != 0:
+        return
+
+      if self._curv_src_fh is None:
+        self._curv_src_fh = open(self._curv_src_path, "a", buffering=1)
+
+      import time as _time
+      diff = cc_curv - yaw_curv
+      self._curv_src_fh.write(
+        "%.3f,%.3f,%.8f,%.8f,%.8f\n"
+        % (_time.monotonic(), v_ego, cc_curv, yaw_curv, diff)
+      )
+    except Exception:
+      pass
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -180,10 +236,55 @@ class CarController(CarControllerBase):
       #
       # FordCurveController uses this for the RAINNY-style
       # current-curvature error protection.
+      #
+      # BLUEPILOT-STYLE STEERING-ANGLE SOURCE
+      # -------------------------------------
+      # bluepilot bp-7.0 (commit 26030f3cb) measures "current curvature"
+      # from the steering angle through the vehicle model instead of the
+      # RCM yaw-rate signal:
+      #
+      #     -VM.calc_curvature(radians(steer - angleOffset), vEgo, roll)
+      #
+      # On this device that exact quantity is already computed once per
+      # controlsd cycle and published as `CC.currentCurvature`
+      # (controlsd.py: steer_angle_without_offset -> self.VM.calc_curvature,
+      #  with VehicleModel fed by lp.stiffnessFactor and lp.steerRatio).
+      #
+      # We therefore consume CC.currentCurvature directly so that BOTH
+      # curvature consumers share a single measurement source. This keeps
+      # the online-learned steerRatio (vehicleParameters.steerRatio,
+      # ~15.014 on this car) consistent between controlsd and the Ford
+      # curvature controller.
+      #
+      # The yaw-rate estimate is retained purely as a fallback for the
+      # cases where CC.currentCurvature is not usable:
+      #   * before controlsd has published a valid value (== 0.0),
+      #   * while vehicle model params are still converging (stiffness/
+      #     steer ratio clamped to their floor by controlsd).
       # ---------------------------------------------------------------
 
-      current_curvature = (
+      yaw_current_curvature = (
         -float(CS.out.yawRate) / v_ego
+      )
+
+      cc_current_curvature = float(
+        getattr(CC, "currentCurvature", 0.0) or 0.0
+      )
+
+      # A finite, non-zero model curvature means controlsd has a live
+      # VehicleModel estimate. Fall back to yaw only while it does not.
+      if math.isfinite(cc_current_curvature) and cc_current_curvature != 0.0:
+        current_curvature = cc_current_curvature
+      else:
+        current_curvature = yaw_current_curvature
+
+      # Dual-source telemetry. Appended at ~1 Hz to bound file growth.
+      # Columns: vEgo, CC.currentCurvature (steer/VM), -yawRate/vEgo.
+      # Used to validate the source switch and to re-tune CURVATURE_ERROR.
+      self._curv_src_log(
+        v_ego,
+        cc_current_curvature,
+        yaw_current_curvature,
       )
 
       # ---------------------------------------------------------------
@@ -256,8 +357,10 @@ class CarController(CarControllerBase):
         lat_active=bool(CC.latActive),
         cruise_enabled=cruise_enabled,
         current_curvature=current_curvature,
-        sport_gear=sport_gear,
       )
+
+      # Extract path_angle (c1) from FordCurveController (BluePilot bp-7.0)
+      apply_path_angle = getattr(self.curve_controller, 'path_angle', 0.0)
 
       self.apply_curvature_last = float(apply_curvature)
 
@@ -477,6 +580,28 @@ class CarController(CarControllerBase):
           CS.acc_tja_status_stock_values,
         )
       )
+
+    # =======================================================================
+    # [C2_APA][路线A] APA 角度域横向支路 (ParkAid_Data, 0x3A8)
+    #
+    # 只在 dp_ford_apa_enable == 2 (L2 实发) 时才产生 CAN。
+    # 异常完全隔离: 任何异常都不影响既有控制回路。
+    # =======================================================================
+    try:
+      apa_msg = self.apa_controller.update(
+        frame=self.frame,
+        lat_active=bool(CC.latActive),
+        curvature=self.apply_curvature_last,
+        v_ego=float(max(CS.out.vEgoRaw, 0.1)),
+        sapp_state=getattr(CS, "apa_sapp_state", 0),
+        eps_assist_limited=getattr(CS, "apa_eps_assist_limited", False),
+        veh_speed_kph=getattr(CS, "apa_veh_speed_kph", 0.0),
+        now_ms=int(now_nanos // 1000000),
+      )
+      if apa_msg is not None:
+        can_sends.append(apa_msg)
+    except Exception:
+      pass
 
     # =======================================================================
     # State update

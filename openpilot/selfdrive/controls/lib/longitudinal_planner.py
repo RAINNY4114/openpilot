@@ -17,6 +17,7 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 from openpilot.selfdrive.controls.lib.ford_curve_speed import FordCurveController, _read_param_bool_direct
+from openpilot.selfdrive.controls.lib.ford_curve_speed_fusion import FordCurveSpeedFusion
 from openpilot.common.params import Params
 
 A_CRUISE_MAX_VALS = [2.2, 1.6, 1.2, 0.9, 0.75, 0.62, 0.58, 0.50, 0.45,  0.40]
@@ -73,6 +74,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     # Ford/Lincoln dynamic curve speed controller
     self._ford_curve = FordCurveController(self.CP, dt)
+    self._curve_speed_fusion = FordCurveSpeedFusion()
     self._params = Params()
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
@@ -136,6 +138,20 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         lincoln_osm_realtime_cruise=lincoln_osm_realtime_cruise)
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
+
+    # Ford curve speed fusion: vision + map predictive curve speed management
+    if hasattr(self, '_curve_speed_fusion') and self._curve_speed_fusion is not None:
+      try:
+        model_msg = sm['modelV2'] if 'modelV2' in sm else None
+        v_ego_f = float(sm['carState'].vEgo) if 'carState' in sm else 0.0
+        scc_vision = getattr(self, 'scc_vision', None)
+        scc_map = getattr(self, 'scc_map', None)
+        fusion_a_max = self._curve_speed_fusion.update(v_ego_f, model_msg, scc_vision=scc_vision, scc_map=scc_map)
+        if fusion_a_max is not None:
+          self.output_a_target = min(self.output_a_target, float(np.min(fusion_a_max)))
+      except Exception:
+        pass
+
     self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
 

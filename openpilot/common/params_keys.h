@@ -325,7 +325,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AutoOvertakeEnabled", {PERSISTENT, BOOL, "1"}},
     {"AutoOvertakeLanePref", {PERSISTENT, INT, "0"}},
     {"AutoOvertakeConfirmSec", {PERSISTENT, FLOAT, "3.0"}},
-    {"AutoOvertakeMinCruiseKph", {PERSISTENT, FLOAT, "90.0"}},
+    {"AutoOvertakeMinCruiseKph", {PERSISTENT, FLOAT, "60.0"}},
     {"AutoOvertakeLaneProbMin", {PERSISTENT, FLOAT, "0.0"}},
 
 };

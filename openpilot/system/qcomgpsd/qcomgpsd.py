@@ -91,7 +91,16 @@ AT_LOCK = "/dev/shm/modem.lock"  # shared with modem.py and LPA
 @retry(attempts=5, delay=1.0)
 def at_cmd(cmd: str) -> str:
   with os.fdopen(os.open(AT_LOCK, os.O_CREAT | os.O_RDWR, 0o666), "r+") as lock:
-    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    # [lock-fix] 使用非阻塞加锁 + 有界退避，避免与上/下电瞬间的其他持有者死等
+    _t0 = time.monotonic()
+    while True:
+      try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+      except BlockingIOError:
+        if time.monotonic() - _t0 > 10.0:
+          raise
+        time.sleep(0.2)
     with Serial(AT_PORT, baudrate=115200, timeout=5) as ser:
       ser.reset_input_buffer()
       ser.write(f"{cmd}\r".encode())
@@ -205,14 +214,50 @@ def main() -> NoReturn:
       cloudlog.warning("quectel cleanup done")
     except NameError:
       cloudlog.warning('quectel not yet setup')
+    except Exception as e:
+      # [lock-fix] teardown 失败不能阻断退出，否则锁被带进坟墓
+      cloudlog.warning(f"teardown_quectel failed: {e}")
+
+    # [lock-fix] 显式释放 /dev/ttyUSB0 的 exclusive flock，保证新实例能立刻打开
+    try:
+      diag.serial.close()
+      cloudlog.warning("diag serial closed")
+    except Exception as e:
+      cloudlog.warning(f"diag serial close failed: {e}")
 
     sys.exit(0)
   signal.signal(signal.SIGINT, cleanup)
   signal.signal(signal.SIGTERM, cleanup)
 
   # connect to modem
-  diag = ModemDiag()
-  setup_quectel(diag)
+  # [lock-fix] ModemDiag() 用 exclusive=True 打开 /dev/ttyUSB0 并加 flock。
+  # 上个实例退出前若未释放（SIGINT cleanup 卡住等），此处会抛
+  #   SerialException [Errno 11] Resource temporarily unavailable
+  # 而旧代码没有重试，导致 setup_quectel failed after retry 的假象。
+  # 这里加有界重试，让首调撞锁能自愈。
+  diag = None
+  last_exc = None
+  for _attempt in range(20):
+    try:
+      diag = ModemDiag()
+      break
+    except Exception as e:
+      last_exc = e
+      cloudlog.warning(f"ModemDiag open failed (attempt {_attempt + 1}/20): {e}")
+      time.sleep(1.0)
+  if diag is None:
+    raise Exception(f"ModemDiag failed to open after retries: {last_exc}")
+
+  try:
+    setup_quectel(diag)
+  except Exception as e:
+    # [lock-fix] 即使 setup 失败也释放串口 flock，避免把锁带进坟墓
+    cloudlog.error(f"setup_quectel failed: {e}")
+    try:
+      diag.serial.close()
+    except Exception:
+      pass
+    raise
   cloudlog.warning("quectel setup done")
   gpio_init(GPIO.GNSS_PWR_EN, True)
   gpio_set(GPIO.GNSS_PWR_EN, True)

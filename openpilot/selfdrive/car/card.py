@@ -502,6 +502,8 @@ class Car:
     self.aux_mr76_lane_enable = False
     self.aux_lidar_bits = (0, 0)
     self.aux_mr76_lane = {"left": False, "right": False, "fresh": False, "count": 0}
+    # [AO_MR76_PUBLISH] params 落盘去重缓存
+    self._ao_mr76_pub_cache = None
 
     # MR76 bus1 稳定性日志(MR76_LOG_ENABLE=0 时零开销; 运行时可热切换)
     self.mr76_log = MR76Analyzer()
@@ -517,6 +519,41 @@ class Car:
     # MR76 bus1 日志热开关: 置 1 立即开始记录, 置 0 停止(flush后零开销)
     try:
       self.mr76_log.set_enabled(read_param_int(MR76_LOG_ENABLE_PARAM, MR76_LOG_ENABLE) != 0)
+    except Exception:
+      pass
+
+  def _ao_publish_mr76_lane(self) -> None:
+    """[AO_MR76_PUBLISH] 把 MR76 相邻车道占用写入 params 文件。
+
+    card.py 与 modeld.py 是两个进程；fork 的 libparams_c.so 不认自定义键，
+    因此沿用 AOBsmZone 的 "直接写参数文件" 约定。
+
+    只在值变化时落盘。异常一律吞掉：本函数绝不能影响 card 主循环。
+    """
+    try:
+      lane = self.aux_mr76_lane or {}
+      enabled = bool(self.aux_mr76_lane_enable)
+      fresh = bool(enabled and lane.get("fresh"))
+
+      if not fresh:
+        fresh_v = 0
+        lane_v = 0
+      else:
+        fresh_v = 1
+        lane_v = (10 if lane.get("left") else 0) + (1 if lane.get("right") else 0)
+
+      if getattr(self, "_ao_mr76_pub_cache", None) == (fresh_v, lane_v):
+        return
+      self._ao_mr76_pub_cache = (fresh_v, lane_v)
+
+      for _k, _v in (("AOMr76Fresh", str(fresh_v)), ("AOMr76Lane", str(lane_v))):
+        for _d in ("/dev/shm/params", "/data/params/d"):
+          try:
+            with open(os.path.join(_d, _k), "w") as _f:
+              _f.write(_v)
+            break
+          except Exception:
+            continue
     except Exception:
       pass
 
@@ -547,6 +584,21 @@ class Car:
         self.aux_lidar_bits = (0, 0)
 
     # ---- front MR76 radar, adjacent-lane occupancy ------------------------
+    #
+    # [AO_MR76_PUBLISH] 把占用结果发布到 params 文件，供独立的 modeld 进程
+    # 读取并交给 auto_overtake 的 _mr76_lane_safe() 硬门使用。
+    #
+    # 背景：modeld 通过 SubMaster 收 capnp 消息，拿不到本进程的 self.RI；
+    # 而 auto_overtake 需要 mr76_left_obstacle / mr76_right_obstacle 等
+    # 独立参数（不只是 OR 进 BSM 的布尔量）。此处复用 AOBsmZone 那套
+    # "写 params 文件" 的已验证通道。
+    #
+    # 语义：
+    #   AOMr76Fresh = 0  未接入 / stale / 未使能 -> 消费者必须"不阻断"
+    #   AOMr76Fresh = 1  数据可用 -> AOMr76Lane 的左右位才有效
+    #   AOMr76Lane  = left*10 + right   （1 = 该侧相邻车道有目标）
+    #
+    # 注意：仅在数值变化时写文件（本函数跑在 CAN 100Hz 循环里）。
     if self.aux_mr76_lane_enable:
       try:
         get_lane_occupancy = getattr(self.RI, 'get_mr76_lane_occupancy', None)
@@ -558,6 +610,8 @@ class Car:
             block_right = block_right or bool(lane.get('right'))
       except Exception:
         self.aux_mr76_lane = {"left": False, "right": False, "fresh": False, "count": 0}
+
+    self._ao_publish_mr76_lane()
 
     # ---- OR into carState (OEM BSM already set by the car port) -----------
     if block_left:

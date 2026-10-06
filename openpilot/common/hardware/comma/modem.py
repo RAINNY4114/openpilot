@@ -216,6 +216,10 @@ class Modem:
     self._roaming_allowed = True
     self.running = True
     self.S = INITIAL_STATE.copy()
+    # C3X crash protection: prevent infinite kill/cleanup loop
+    self._init_cleaned = False
+    self._init_fail_count = 0
+    self._init_last_fail_time = 0.0
 
   @staticmethod
   def _read_param(key):
@@ -320,12 +324,27 @@ class Modem:
     if not os.path.exists(AT_PORT):
       return State.INITIALIZING
     logging.info("port found, initializing")
-    self._ppp.kill()
-    self._ppp.cleanup_routes()
+
+    # C3X crash protection: only kill/cleanup once per init cycle
+    if not self._init_cleaned:
+      self._ppp.kill()
+      self._ppp.cleanup_routes()
+      self._init_cleaned = True
+      logging.info("modem cleanup done (one-time for this init cycle)")
 
     if not self._init_at_channel():
       logging.warning("AT echo still on, retrying")
+      self._init_fail_count += 1
+      self._init_last_fail_time = time.time()
+      # Backoff if too many failures
+      if self._init_fail_count > 5:
+        backoff = min(self._init_fail_count * 2, 30)
+        logging.warning(f"AT init failed {self._init_fail_count} times, backing off {backoff}s")
+        time.sleep(backoff)
       return State.INITIALIZING
+
+    # Reset fail count on success
+    self._init_fail_count = 0
 
     identity = self._read_identity()
     if not identity["iccid"] or not identity["imei"]:
@@ -455,6 +474,9 @@ class Modem:
     self._ppp.cleanup_routes()
     self._ppp.reset_data_port()
     self._sim_change = False
+    # C3X crash protection: reset init flags for next cycle
+    self._init_cleaned = False
+    self._init_fail_count = 0
     return State.INITIALIZING
 
   def _poll_signal(self) -> dict:

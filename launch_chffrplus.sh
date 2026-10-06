@@ -88,12 +88,53 @@ function launch {
   # write tmux scrollback to a file
   tmux capture-pane -pq -S-1000 > /tmp/launch_log
 
-  # start manager
+  # ---- Auto-restart manager with crash protection (C3X Recovery) ----
   cd openpilot/system/manager
-  if [ ! -f $DIR/prebuilt ]; then
-    ./build.py
-  fi
-  ./manager.py
+  MANAGER_RESTART_COUNT=0
+  MAX_FAST_RESTARTS=5
+  while true; do
+    MANAGER_START_TIME=$(date +%s)
+
+    # rebuild if needed
+    if [ ! -f $DIR/prebuilt ]; then
+      ./build.py
+    fi
+
+    # start manager
+    if [ -f /AGNOS ]; then
+      taskset -c 0-5 ./manager.py
+    else
+      ./manager.py
+    fi
+    MANAGER_EXIT_CODE=$?
+
+    # check for shutdown/reboot/uninstall signals
+    if [ -f /data/params/d/DoShutdown ] || [ -f /data/params/d/DoReboot ] || [ -f /data/params/d/DoUninstall ]; then
+      echo "Shutdown/reboot/uninstall requested, exiting..."
+      break
+    fi
+
+    # crash protection logic
+    MANAGER_END_TIME=$(date +%s)
+    MANAGER_RUNTIME=$((MANAGER_END_TIME - MANAGER_START_TIME))
+
+    if [ $MANAGER_RUNTIME -lt 10 ]; then
+      MANAGER_RESTART_COUNT=$((MANAGER_RESTART_COUNT + 1))
+    else
+      MANAGER_RESTART_COUNT=0
+    fi
+
+    if [ $MANAGER_RESTART_COUNT -ge $MAX_FAST_RESTARTS ]; then
+      echo "Too many fast restarts ($MANAGER_RESTART_COUNT), stopping..."
+      break
+    fi
+
+    # exponential backoff
+    BACKOFF=$((MANAGER_RESTART_COUNT * 5 + 2))
+    if [ $BACKOFF -gt 30 ]; then BACKOFF=30; fi
+    echo "Manager exited (code=$MANAGER_EXIT_CODE), restarting in ${BACKOFF}s... (attempt $((MANAGER_RESTART_COUNT + 1))/$MAX_FAST_RESTARTS)"
+    sleep $BACKOFF
+  done
 
   # if broken, keep on screen error
   while true; do sleep 1; done

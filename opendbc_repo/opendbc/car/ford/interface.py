@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from opendbc.car import Bus, get_safety_config, structs
 from opendbc.car.carlog import carlog
@@ -56,18 +58,43 @@ class CarInterface(CarInterfaceBase):
       ret.radarDelay = 0.06
 
     CAN = CanBus(fingerprint=fingerprint)
-    cfgs = [get_safety_config(structs.CarParams.SafetyModel.ford)]
-    if CAN.main >= 4:
-      cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
+
+    # ========================================================================
+    # [C2_APA][路线A] 安全模式选择
+    #
+    # 路线 A 需要 panda 处于 allOutput, 才能发 0x3A8 ParkAid_Data。
+    # 读 /data/ford_params/dp_ford_apa_panda_alloutput: 1 -> allOutput
+    # 默认关闭 (文件不存在 -> 保持 ford), 保证行为与未打补丁时一致。
+    # ========================================================================
+    _apa_alloutput = False
+    try:
+      for _d in ("/data/ford_params", "/dev/shm/params", "/data/params/d"):
+        try:
+          with open(os.path.join(_d, "dp_ford_apa_panda_alloutput"), "r") as _f:
+            _apa_alloutput = int(float(_f.read().strip() or "0")) != 0
+          break
+        except (OSError, ValueError):
+          continue
+    except Exception:
+      _apa_alloutput = False
+
+    if _apa_alloutput:
+      cfgs = [get_safety_config(structs.CarParams.SafetyModel.allOutput)]
+    else:
+      cfgs = [get_safety_config(structs.CarParams.SafetyModel.ford)]
+      if CAN.main >= 4:
+        cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
     ret.safetyConfigs = cfgs
 
     ret.alphaLongitudinalAvailable = ret.radarUnavailable
     if alpha_long or not ret.radarUnavailable:
-      ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
+      if not _apa_alloutput:
+        ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
       ret.openpilotLongitudinalControl = True
 
     if ret.flags & FordFlags.CANFD:
-      ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.CANFD.value
+      if not _apa_alloutput:
+        ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.CANFD.value
 
       # TRON (SecOC) platforms are not supported
       # LateralMotionControl2, ACCDATA are 16 bytes on these platforms
