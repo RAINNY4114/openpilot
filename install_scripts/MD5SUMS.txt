@@ -1,2 +1,8 @@
-72549d9dcc02783df78c1150d2ce05f0 *openpilot-ford-chestnut-installable.tar.gz
-9db7ea69c2386e4a24aa6b981a7b53bdfadf9b3f4a10daacb3922a39d490721e *openpilot-ford-chestnut-installable.tar.gz
+d2c6433533bf48d923f092fbade18ac8 *openpilot-ford-chestnut-installable.tar.gz
+
+# 构建信息 / build info
+# 日期   : 2026-10-06
+# 提交   : 13c33a8c76e92ce7f52e9173966f7a8fc296491d
+# 大小   : 972555025 bytes (928 MB)
+# 条目数 : 5013
+# 版本   : sunnypilot 2026.003.000 / AGNOS 19.7

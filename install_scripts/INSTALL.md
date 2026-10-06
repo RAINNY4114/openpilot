@@ -2,7 +2,8 @@
 
 > 基于 C3X 设备上已验证的 sunnypilot-chestnut 系统生成
 > 仓库：https://github.com/RAINNY4114/openpilot （分支 `ford-chestnut`）
-> 版本：sunnypilot **2026.003.000** ｜ AGNOS **19.7** ｜ 提交 `fdb5323`
+> 版本：sunnypilot **2026.003.000** ｜ AGNOS **19.7** ｜ 提交 `13c33a8`
+> 更新：**2026-10-06**
 
 ---
 
@@ -13,10 +14,19 @@ GitHub 的 `ford-chestnut` 分支，并额外打包了一份**离线安装包**�
 
 **包含完整可运行内容**（不只源码）：
 
-- 全部 Python 源码（含 33 个修改文件 + 20 个新增文件）
+- 全部 Python 源码（含盲区修复、弯道控制器、自动超车恢复）
 - 全部预编译二进制：`libparams_c.so`、acados 求解器、`libcar.so` / `libpose.so` / `liblive.so`
 - 全部模型文件：`big_driving_tinygrad.pkl`（18 分片）、`dmonitoring_model`、`dm_warp` 等
 - `prebuilt` 标记 → 部署后**无需重新编译**，重启即可生效
+
+### 2026-10-06 版本要点
+
+| 项目 | 内容 |
+|---|---|
+| **盲区假警报** | 修复。根因非出厂 BSM（CAN 0x3A6/0x3A7 全程 100% 报 Clear），而是两个辅助传感器注入通道被开启；已置 `dp_amap_lidar_enable=0`、`dp_mr76_lane_enable=0` |
+| **弯道控制** | `ford_curve_controller.py`（含 `FordPlanLead` / `HumanTurnDetection`）+ `lateral_clearance.py` 增加 `steering_pressed` 让权闸门 |
+| **自动超车** | 恢复。此前"收紧"把 near-speed 门放大 4 倍致其永不可满足（4415 帧仅 5 帧通过）；已回退 `MIN_CLOSING 4.0→1.0 m/s`、`HEADWAY 2.8→5.0 s`、`STABLE 1.50→0.50 s`，通过率 5→592 帧 |
+| **Ford APA** | 新增 `apa_controller.py` / `ford_apa_controller.py` / `fordcan_apa.py` |
 
 ---
 
@@ -116,16 +126,21 @@ sudo reboot
 | 项目 | 值 |
 |---|---|
 | 安装包文件名 | `openpilot-ford-chestnut-installable.tar.gz` |
-| 大小 | 928 MB |
-| MD5 | `72549d9dcc02783df78c1150d2ce05f0` |
-| 归档条目数 | 5020 |
-| Git 提交 | `fdb5323dda1fa64ac1b2a34221ebff76cb512d0a` |
+| 大小 | **972,555,025 字节（928 MB）** |
+| MD5 | `d2c6433533bf48d923f092fbade18ac8` |
+| 归档条目数 | 5013 |
+| Git 提交 | `13c33a8c76e92ce7f52e9173966f7a8fc296491d` |
+| 构建日期 | 2026-10-06 |
 
 校验命令：
 
 ```bash
 md5sum openpilot-ford-chestnut-installable.tar.gz
-# 应输出 72549d9dcc02783df78c1150d2ce05f0
+# 应输出 d2c6433533bf48d923f092fbade18ac8
+
+# 归档条目数（可选）
+tar tzf openpilot-ford-chestnut-installable.tar.gz | wc -l
+# 应输出 5013
 ```
 
 ---
