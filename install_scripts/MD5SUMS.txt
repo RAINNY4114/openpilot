@@ -1,0 +1,2 @@
+72549d9dcc02783df78c1150d2ce05f0 *openpilot-ford-chestnut-installable.tar.gz
+9db7ea69c2386e4a24aa6b981a7b53bdfadf9b3f4a10daacb3922a39d490721e *openpilot-ford-chestnut-installable.tar.gz
