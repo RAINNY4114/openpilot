@@ -23,12 +23,12 @@ from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from openpilot.selfdrive.modeld.lane_occupancy import compute_ego_lane_occupancy
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
+A_CRUISE_MAX_VALS = [2.2, 1.6, 1.1, 0.8, 0.60, 0.42, 0.34, 0.28, 0.22, 0.025]
 # Ford/Lincoln comfort: limit positive accel to reduce kickdown / high RPM and encourage earlier upshifts.
 # Slightly higher in 0-30 km/h for better launch, while keeping mid/high speed conservative.
-# "Comfort but still punchy": soften 25-40 m/s a bit while keeping low-speed response.
 # Slightly quicker launch: raise 0-10 m/s caps.
-A_CRUISE_MAX_VALS_FORD = [2.2, 1.7, 1.25, 0.95, 0.70, 0.48, 0.32, 0.25, 0.22, 0.018]
+A_CRUISE_MAX_BP_CUSTOM = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
+A_CRUISE_MAX_VALS_FORD = [2.2, 1.6, 1.1, 0.8, 0.60, 0.42, 0.34, 0.28, 0.22, 0.025]
 A_CRUISE_MAX_BP = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
@@ -39,9 +39,22 @@ FOLLOW_COAST_MIN_HEADWAY = 1.5  # seconds
 FOLLOW_COAST_MIN_VREL = 0.0     # m/s (lead pulling away or steady)
 FOLLOW_COAST_MIN_LEAD_ACCEL = -0.2  # m/s^2 (lead not braking)
 FOLLOW_COAST_MIN_DECEL = -0.3   # m/s^2: only suppress very gentle braking
+FOLLOW_COAST_STOP_GAP_BUFFER = 2.0
+FORD_STOP_GAP_GUARD_MAX_SPEED = 8.0
+FORD_STOP_GAP_GUARD_MIN_ACCEL = -2.0
+FORD_STOP_GAP_GUARD_MAX_ACCEL = -0.15
+FORD_STOP_GAP_GUARD_MIN_MARGIN = 0.3
+FORD_STOP_GAP_PRESTOP_MARGIN = 0.8
+FORD_STOP_GAP_PRESTOP_ACCEL = -0.6
+FORD_SNG_FOLLOW_MIN_SPEED = 0.25
+FORD_SNG_FOLLOW_MAX_SPEED = 8.0
+FORD_SNG_FOLLOW_MIN_DREL = 4.0
+FORD_SNG_FOLLOW_MIN_VREL = 0.3
+FORD_SNG_FOLLOW_ACCEL_CLIP_UP_RATE = 0.15
+FORD_SNG_FOLLOW_MAX_JERK_UP = 3.5
 OBSTACLE_DET_STALE_TIMEOUT_S = 1.0
-OBSTACLE_DET_CONFIRM_S = 1.0
-OBSTACLE_CONFIDENCE_MIN = 0.8
+OBSTACLE_DET_CONFIRM_S = 0.5
+OBSTACLE_CONFIDENCE_MIN = 0.65
 OBSTACLE_CONE_CONF_MIN = 0.95
 OBSTACLE_LANE_PROB_MIN = 0.4
 OBSTACLE_LANE_MARGIN_M = 0.1
@@ -90,7 +103,7 @@ def get_max_accel(v_ego):
 
 def get_max_accel_for_car(v_ego, CP):
   if getattr(CP, "brand", "") == "ford":
-    return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS_FORD)
+    return np.interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_FORD)
   return get_max_accel(v_ego)
 
 def get_coast_accel(pitch):
@@ -210,6 +223,18 @@ class LongitudinalPlanner:
     }
     self._fp_curve_param_last = now
     return self._fp_curve_cfg
+
+  def _lincoln_stop_distance_m(self) -> float:
+    stop_distance_m = 4.0
+    try:
+      raw = self._params.get("dp_lincoln_stop_distance_m")
+      if raw is not None:
+        stop_distance_m = float(raw)
+    except Exception:
+      pass
+    if not math.isfinite(stop_distance_m):
+      stop_distance_m = 4.0
+    return float(np.clip(stop_distance_m, 3.0, 8.0))
 
   def _map_distance_to_point(self, lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
     ax = lat_a * _MAP_TO_RADIANS
@@ -622,6 +647,8 @@ class LongitudinalPlanner:
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
+    is_ford = getattr(self.CP, "brand", "") == "ford"
+    lincoln_stop_distance_m = self._lincoln_stop_distance_m() if is_ford else 4.0
 
     # Reset current state when not engaged, or user is controlling the speed
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['selfdriveState'].enabled
@@ -631,21 +658,42 @@ class LongitudinalPlanner:
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
+    lead_one = sm['radarState'].leadOne
+    lead_status = bool(lead_one.status)
+    lead_d_rel = 0.0
+    lead_v_rel = 0.0
+    lead_a = 0.0
+    if lead_status:
+      try:
+        lead_d_rel = float(lead_one.dRel)
+        lead_v_rel = float(lead_one.vRel)
+        lead_a = float(lead_one.aLeadK)
+        if not math.isfinite(lead_a):
+          lead_a = 0.0
+        lead_status = math.isfinite(lead_d_rel) and math.isfinite(lead_v_rel)
+      except Exception:
+        lead_status = False
+
+    ford_low_speed_lead_pullaway = (
+      is_ford and lead_status and
+      FORD_SNG_FOLLOW_MIN_SPEED < v_ego < FORD_SNG_FOLLOW_MAX_SPEED and
+      lead_d_rel >= FORD_SNG_FOLLOW_MIN_DREL and
+      lead_v_rel >= FORD_SNG_FOLLOW_MIN_VREL
+    )
+
     if mode == 'acc':
       max_accel = float(get_max_accel_for_car(v_ego, self.CP))
 
       # Ford/Lincoln comfort: when following a lead at shorter headways, cap max accel to avoid abrupt tip-in
       # (often felt as high RPM / delayed upshifts after a lead slows down).
-      try:
-        lead_one = sm['radarState'].leadOne
-        if getattr(self.CP, "brand", "") == "ford" and bool(lead_one.status) and v_ego > 3.0:
-          d_rel = float(lead_one.dRel)
-          if math.isfinite(d_rel) and d_rel > 0.0:
-            headway_s = d_rel / max(v_ego, 0.1)
-            follow_cap = float(np.interp(headway_s, [0.8, 1.2, 1.8, 2.6], [0.30, 0.45, 0.65, max_accel]))
-            max_accel = float(min(max_accel, follow_cap))
-      except Exception:
-        pass
+      if is_ford and lead_status and v_ego > 3.0 and lead_d_rel > 0.0:
+        headway_s = lead_d_rel / max(v_ego, 0.1)
+        follow_cap_vals = [0.30, 0.45, 0.65, max_accel]
+        if ford_low_speed_lead_pullaway:
+          # Stop-and-go launch: the lead is already opening the gap, so release the comfort cap faster.
+          follow_cap_vals = [0.45, 0.70, 0.95, max_accel]
+        follow_cap = float(np.interp(headway_s, [0.8, 1.2, 1.8, 2.6], follow_cap_vals))
+        max_accel = float(min(max_accel, follow_cap))
 
       accel_clip = [ACCEL_MIN, max_accel]
       steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
@@ -815,28 +863,20 @@ class LongitudinalPlanner:
                              not obstacle_confirmed and
                              FOLLOW_COAST_MIN_SPEED < v_ego < FOLLOW_COAST_MAX_SPEED and
                              sm['controlsState'].longControlState != LongCtrlState.stopping)
-      if follow_coast_active:
-        lead_one = sm['radarState'].leadOne
-        if bool(lead_one.status):
-          try:
-            d_rel = float(lead_one.dRel)
-            v_rel = float(lead_one.vRel)
-            lead_a = float(lead_one.aLeadK)
-          except Exception:
-            d_rel = 0.0
-            v_rel = -1.0
-            lead_a = -1.0
-          headway_s = d_rel / max(v_ego, 0.1)
-          if (headway_s >= FOLLOW_COAST_MIN_HEADWAY and
-              v_rel >= FOLLOW_COAST_MIN_VREL and
-              lead_a >= FOLLOW_COAST_MIN_LEAD_ACCEL):
-            min_accel = float(np.min(self.a_desired_trajectory))
-            if min_accel > FOLLOW_COAST_MIN_DECEL:
-              self.a_desired_trajectory = np.where(
-                (self.a_desired_trajectory < 0.0) & (self.a_desired_trajectory > FOLLOW_COAST_MIN_DECEL),
-                0.0,
-                self.a_desired_trajectory,
-              )
+      if follow_coast_active and lead_status:
+        headway_s = lead_d_rel / max(v_ego, 0.1)
+        stop_gap_margin = lead_d_rel - lincoln_stop_distance_m
+        if (stop_gap_margin > FOLLOW_COAST_STOP_GAP_BUFFER and
+            headway_s >= FOLLOW_COAST_MIN_HEADWAY and
+            lead_v_rel >= FOLLOW_COAST_MIN_VREL and
+            lead_a >= FOLLOW_COAST_MIN_LEAD_ACCEL):
+          min_accel = float(np.min(self.a_desired_trajectory))
+          if min_accel > FOLLOW_COAST_MIN_DECEL:
+            self.a_desired_trajectory = np.where(
+              (self.a_desired_trajectory < 0.0) & (self.a_desired_trajectory > FOLLOW_COAST_MIN_DECEL),
+              0.0,
+              self.a_desired_trajectory,
+            )
     self.j_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC[:-1], self.mpc.j_solution)
 
     # TODO counter is only needed because radar is glitchy, remove once radar is gone
@@ -862,21 +902,56 @@ class LongitudinalPlanner:
       output_a_target = min(output_a_target_mpc, output_a_target_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
 
+    ford_stop_gap_guard_active = False
+    ford_stop_gap_hard_active = False
+    if (is_ford and self.CP.openpilotLongitudinalControl and mode == 'acc' and lead_status and
+        not long_control_off and not reset_state and not force_slow_decel and not obstacle_confirmed and
+        0.0 < v_ego < FORD_STOP_GAP_GUARD_MAX_SPEED and lead_d_rel > 0.0):
+      lead_v = max(v_ego + lead_v_rel, 0.0)
+      closing_speed = max(v_ego - lead_v, 0.0)
+      stop_gap_margin = lead_d_rel - lincoln_stop_distance_m
+      guard_window = max(FOLLOW_COAST_STOP_GAP_BUFFER, 0.6 * v_ego + 1.0)
+      boundary_reached = stop_gap_margin <= 0.0
+      prestop_active = stop_gap_margin <= FORD_STOP_GAP_PRESTOP_MARGIN
+      if stop_gap_margin < guard_window and (closing_speed > 0.05 or prestop_active or boundary_reached):
+        usable_margin = max(stop_gap_margin, FORD_STOP_GAP_GUARD_MIN_MARGIN)
+        guard_accel = -closing_speed * closing_speed / (2.0 * usable_margin)
+        guard_accel = float(np.clip(guard_accel, FORD_STOP_GAP_GUARD_MIN_ACCEL, FORD_STOP_GAP_GUARD_MAX_ACCEL))
+        if prestop_active:
+          guard_accel = min(guard_accel, FORD_STOP_GAP_PRESTOP_ACCEL)
+        if boundary_reached:
+          guard_accel = FORD_STOP_GAP_GUARD_MIN_ACCEL
+          ford_stop_gap_hard_active = True
+        output_a_target = min(output_a_target, guard_accel)
+        ford_stop_gap_guard_active = True
+        if boundary_reached or (prestop_active and v_ego < max(self.CP.vEgoStopping + 0.4, 1.0)):
+          self.output_should_stop = True
+
+    sng_follow_launch = (
+      ford_low_speed_lead_pullaway and self.CP.openpilotLongitudinalControl and mode == 'acc' and
+      not long_control_off and not reset_state and not force_slow_decel and not self.output_should_stop and
+      not map_turn_limit_active and not vision_turn_limit_active and not obstacle_confirmed
+    )
+
     accel_clip_lower_rate = 0.05
     if map_turn_limit_active or vision_turn_limit_active:
       accel_clip_lower_rate = 0.15
       if v_ego > 17.0:
         accel_clip_lower_rate = 0.25
+    if ford_stop_gap_guard_active:
+      accel_clip_lower_rate = max(accel_clip_lower_rate, 0.35 if ford_stop_gap_hard_active else 0.20)
+    accel_clip_upper_rate = FORD_SNG_FOLLOW_ACCEL_CLIP_UP_RATE if sng_follow_launch else 0.05
     accel_clip[0] = np.clip(accel_clip[0], self.prev_accel_clip[0] - accel_clip_lower_rate, self.prev_accel_clip[0] + accel_clip_lower_rate)
-    accel_clip[1] = np.clip(accel_clip[1], self.prev_accel_clip[1] - 0.05, self.prev_accel_clip[1] + 0.05)
+    accel_clip[1] = np.clip(accel_clip[1], self.prev_accel_clip[1] - 0.05, self.prev_accel_clip[1] + accel_clip_upper_rate)
     output_a_target_clipped = float(np.clip(output_a_target, accel_clip[0], accel_clip[1]))
 
     # Ford/Lincoln comfort: limit positive jerk to reduce abrupt tip-in (high RPM / delayed upshifts),
     # while keeping decel response unmodified for safety.
-    if getattr(self.CP, "brand", "") == "ford" and (not reset_state) and (not long_control_off):
+    if is_ford and (not reset_state) and (not long_control_off):
       if math.isfinite(self.output_a_target) and output_a_target_clipped > self.output_a_target:
-        # "Comfort but still punchy": keep low-speed jerk, soften mid/high speed a touch.
-        max_jerk_up = float(np.interp(v_ego, [0.0, 5.0, 15.0, 30.0], [2.0, 1.5, 0.9, 0.7]))
+        max_jerk_up = float(np.interp(v_ego, [0.0, 5.0, 15.0, 30.0], [2.0, 1.5, 1.0, 0.8]))
+        if sng_follow_launch:
+          max_jerk_up = max(max_jerk_up, FORD_SNG_FOLLOW_MAX_JERK_UP)
         max_step = max_jerk_up * float(self.dt)
         output_a_target_clipped = float(min(output_a_target_clipped, self.output_a_target + max_step))
 

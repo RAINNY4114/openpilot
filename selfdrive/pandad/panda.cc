@@ -245,10 +245,33 @@ void Panda::can_send(const capnp::List<cereal::CanData>::Reader &can_data_list) 
 }
 
 bool Panda::can_receive(std::vector<can_frame>& out_vec) {
+  fprintf(stderr, "[PANDA-CAN] ENTER can_receive\n");
+  fflush(stderr);
+
   // Check if enough space left in buffer to store RECV_SIZE data
   assert(receive_buffer_size + RECV_SIZE <= sizeof(receive_buffer));
 
+  fprintf(stderr, "[PANDA-CAN] BEFORE bulk_read rx_size=%u RECV_SIZE=%u\n",
+          receive_buffer_size, RECV_SIZE);
+  fflush(stderr);
+
   int recv = handle->bulk_read(0x81, &receive_buffer[receive_buffer_size], RECV_SIZE);
+
+  fprintf(stderr, "[PANDA-CAN] AFTER bulk_read recv=%d rx_size=%u\n",
+          recv, receive_buffer_size);
+  fflush(stderr);
+
+  bool healthy = comms_healthy();
+
+  fprintf(stderr, "[PANDA-CAN] comms_healthy=%d recv=%d\n",
+          healthy, recv);
+  fflush(stderr);
+
+  if (!healthy) {
+    fprintf(stderr, "[PANDA-CAN] EARLY RETURN: comms unhealthy\n");
+    fflush(stderr);
+    return false;
+  }
   if (!comms_healthy()) {
     return false;
   }
@@ -261,7 +284,11 @@ bool Panda::can_receive(std::vector<can_frame>& out_vec) {
   bool ret = true;
   if (recv > 0) {
     receive_buffer_size += recv;
+    fprintf(stderr, "[PANDA-CAN] BEFORE unpack_can_buffer\\n");
+    fflush(stderr);
     ret = unpack_can_buffer(receive_buffer, receive_buffer_size, out_vec);
+    fprintf(stderr, "[PANDA-CAN] AFTER unpack_can_buffer\\n");
+    fflush(stderr);
   }
   return ret;
 }

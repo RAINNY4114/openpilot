@@ -23,6 +23,8 @@ from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroa
 
 from openpilot.system.version import get_build_metadata
 from openpilot.system.hardware import HARDWARE
+from openpilot.system.hardware_diagnostics import append_hardware_diagnostic
+from openpilot.system.sensord.imu import probe_lsm6ds3
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
 
 REPLAY = "REPLAY" in os.environ
@@ -71,7 +73,8 @@ class SelfdriveD:
 
     self.gps_location_service = get_gps_location_service(self.params)
     self.gps_packets = [self.gps_location_service]
-    self.sensor_packets = ["accelerometer", "gyroscope"]
+    self.imu_available, self.imu_probe_details = probe_lsm6ds3()
+    self.sensor_packets = ["accelerometer", "gyroscope"] if self.imu_available else []
     self.camera_packets = ["roadCameraState", "driverCameraState", "wideRoadCameraState"]
 
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
@@ -148,6 +151,40 @@ class SelfdriveD:
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
 
+  def _service_health(self, service: str) -> dict[str, object]:
+    seen = bool(self.sm.seen.get(service, False))
+    last_seen_sec = None if not seen else round(max(0., (self.sm.frame - self.sm.recv_frame[service]) * DT_CTRL), 3)
+    return {
+      "seen": seen,
+      "last_seen_sec": last_seen_sec,
+      "recv_frame": self.sm.recv_frame.get(service),
+      "alive": self.sm.alive.get(service),
+      "freq_ok": self.sm.freq_ok.get(service),
+      "valid": self.sm.valid.get(service),
+    }
+
+  def _log_hardware_issue(self, issue: str, details: dict[str, object] | None = None,
+                          dedupe_suffix: str | None = None, min_interval_sec: float = 60.) -> None:
+    diagnostic = {
+      "device_type": HARDWARE.get_device_type(),
+      "frame": self.sm.frame,
+      "car_brand": self.CP.brand,
+      "car_fingerprint": getattr(self.CP, "carFingerprint", ""),
+      "enabled": self.enabled,
+      "active": self.active,
+    }
+    if details:
+      diagnostic.update(details)
+
+    suffix = f":{dedupe_suffix}" if dedupe_suffix else ""
+    append_hardware_diagnostic(
+      "selfdrived",
+      issue,
+      diagnostic,
+      dedupe_key=f"selfdrived:{issue}{suffix}",
+      min_interval_sec=min_interval_sec,
+    )
+
   def update_events(self, CS):
     """Compute onroadEvents from carState"""
 
@@ -194,6 +231,16 @@ class SelfdriveD:
     if CS.canValid:
       car_events = self.car_events.update(CS, self.CS_prev, self.sm['carControl']).to_msg()
       self.events.add_from_msg(car_events)
+      if CS.vehicleSensorsInvalid:
+        self._log_hardware_issue("vehicleSensorsInvalid", {
+          "can_valid": bool(CS.canValid),
+          "can_timeout": bool(CS.canTimeout),
+          "can_error_counter": int(CS.canErrorCounter),
+          "steering_angle_deg": float(CS.steeringAngleDeg),
+          "steering_rate_deg": float(CS.steeringRateDeg),
+          "v_ego": float(CS.vEgo),
+          "likely_reason": "Vehicle-reported steering/vehicle sensor data is invalid; check CAN wiring and steering angle related signals",
+        }, min_interval_sec=60.)
 
       if self.CP.notCar:
         # wait for everything to init first
@@ -208,19 +255,40 @@ class SelfdriveD:
         self.events.add(EventName.pedalPressed)
 
     # Create events for temperature, disk space, and memory
-    if self.sm['deviceState'].thermalStatus >= ThermalStatus.red:
+    device_state = self.sm['deviceState']
+    if device_state.thermalStatus >= ThermalStatus.red:
       self.events.add(EventName.overheat)
-    if self.sm['deviceState'].freeSpacePercent < 7 and not SIMULATION:
+      self._log_hardware_issue("overheat", {
+        "thermal_status": str(device_state.thermalStatus),
+        "max_temp_c": float(device_state.maxTempC),
+        "cpu_temp_c": list(device_state.cpuTempC),
+        "gpu_temp_c": list(device_state.gpuTempC),
+        "memory_temp_c": float(device_state.memoryTempC),
+        "pmic_temp_c": list(device_state.pmicTempC),
+      }, min_interval_sec=60.)
+    if device_state.freeSpacePercent < 7 and not SIMULATION:
       self.events.add(EventName.outOfSpace)
-    if self.sm['deviceState'].memoryUsagePercent > 90 and not SIMULATION:
+      self._log_hardware_issue("outOfSpace", {
+        "free_space_percent": float(device_state.freeSpacePercent),
+      }, min_interval_sec=300.)
+    if device_state.memoryUsagePercent > 90 and not SIMULATION:
       self.events.add(EventName.lowMemory)
+      self._log_hardware_issue("lowMemory", {
+        "memory_usage_percent": int(device_state.memoryUsagePercent),
+      }, min_interval_sec=300.)
 
     # Alert if fan isn't spinning for 5 seconds
-    if self.sm['peripheralState'].pandaType != log.PandaState.PandaType.unknown:
-      if self.sm['peripheralState'].fanSpeedRpm < 500 and self.sm['deviceState'].fanSpeedPercentDesired > 50:
+    peripheral_state = self.sm['peripheralState']
+    if peripheral_state.pandaType != log.PandaState.PandaType.unknown:
+      if peripheral_state.fanSpeedRpm < 500 and device_state.fanSpeedPercentDesired > 50:
         # allow enough time for the fan controller in the panda to recover from stalls
         if (self.sm.frame - self.last_functional_fan_frame) * DT_CTRL > 15.0:
           self.events.add(EventName.fanMalfunction)
+          self._log_hardware_issue("fanMalfunction", {
+            "fan_speed_rpm": int(peripheral_state.fanSpeedRpm),
+            "fan_speed_percent_desired": int(device_state.fanSpeedPercentDesired),
+            "panda_type": str(peripheral_state.pandaType),
+          }, min_interval_sec=60.)
       else:
         self.last_functional_fan_frame = self.sm.frame
 
@@ -291,9 +359,30 @@ class SelfdriveD:
       # safety mismatch allows some time for pandad to set the safety mode and publish it back from panda
       if (safety_mismatch and self.sm.frame*DT_CTRL > 10.) or pandaState.safetyRxChecksInvalid or self.mismatch_counter >= 200:
         self.events.add(EventName.controlsMismatch)
+        details = {
+          "panda_index": i,
+          "panda_safety_model": str(pandaState.safetyModel),
+          "panda_safety_param": int(pandaState.safetyParam),
+          "panda_alternative_experience": int(pandaState.alternativeExperience),
+          "panda_safety_rx_checks_invalid": bool(pandaState.safetyRxChecksInvalid),
+          "mismatch_counter": int(self.mismatch_counter),
+        }
+        if i < len(self.CP.safetyConfigs):
+          details.update({
+            "expected_safety_model": str(self.CP.safetyConfigs[i].safetyModel),
+            "expected_safety_param": int(self.CP.safetyConfigs[i].safetyParam),
+            "expected_alternative_experience": int(self.CP.alternativeExperience),
+          })
+        self._log_hardware_issue("controlsMismatch", details, dedupe_suffix=str(i), min_interval_sec=60.)
 
       if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
         self.events.add(EventName.relayMalfunction)
+        self._log_hardware_issue("relayMalfunction", {
+          "panda_index": i,
+          "panda_type": str(pandaState.pandaType),
+          "faults": [str(fault) for fault in pandaState.faults],
+          "fault_status": str(pandaState.faultStatus),
+        }, dedupe_suffix=str(i), min_interval_sec=60.)
 
     # Handle HW and system malfunctions
     # Order is very intentional here. Be careful when modifying this.
@@ -304,29 +393,68 @@ class SelfdriveD:
     if self.sm.recv_frame['managerState'] and len(not_running):
       if not_running != self.not_running_prev:
         cloudlog.event("process_not_running", not_running=not_running, error=True)
+        self._log_hardware_issue("processNotRunning", {
+          "not_running": sorted(not_running),
+        }, dedupe_suffix=",".join(sorted(not_running)), min_interval_sec=10.)
       self.not_running_prev = not_running
     if self.sm.recv_frame['managerState'] and not_running:
       self.events.add(EventName.processNotRunning)
     else:
       if not SIMULATION and not self.rk.lagging:
-        if not self.sm.all_alive(self.camera_packets):
+        camera_not_alive = [s for s in self.camera_packets if s not in self.sm.ignore_alive and not self.sm.alive[s]]
+        camera_bad_freq = [s for s in self.camera_packets if s not in self.sm.ignore_average_freq and s not in self.sm.ignore_alive and not self.sm.freq_ok[s]]
+        if camera_not_alive:
           pass#self.events.add(EventName.cameraMalfunction)
-        elif not self.sm.all_freq_ok(self.camera_packets):
+          self._log_hardware_issue("cameraMalfunction", {
+            "camera_not_alive": camera_not_alive,
+            "camera_health": {s: self._service_health(s) for s in camera_not_alive},
+          }, dedupe_suffix=",".join(camera_not_alive), min_interval_sec=60.)
+        elif camera_bad_freq:
           self.events.add(EventName.cameraFrameRate)
+          self._log_hardware_issue("cameraFrameRate", {
+            "camera_bad_freq": camera_bad_freq,
+            "camera_health": {s: self._service_health(s) for s in camera_bad_freq},
+          }, dedupe_suffix=",".join(camera_bad_freq), min_interval_sec=60.)
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
+      self._log_hardware_issue("selfdrivedLagging", {
+        "ratekeeper_frame": self.sm.frame,
+      }, min_interval_sec=60.)
+    radar_errors = self.sm['radarState'].radarErrors.to_dict()
     if self.sm['radarState'].radarErrors.canError:
       self.events.add(EventName.canError)
+      self._log_hardware_issue("radarCanError", {
+        "radar_errors": radar_errors,
+      }, min_interval_sec=60.)
     elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
       self.events.add(EventName.radarTempUnavailable)
-    elif any(self.sm['radarState'].radarErrors.to_dict().values()):
+      self._log_hardware_issue("radarTempUnavailable", {
+        "radar_errors": radar_errors,
+      }, min_interval_sec=60.)
+    elif any(radar_errors.values()):
       self.events.add(EventName.radarFault)
+      self._log_hardware_issue("radarFault", {
+        "radar_errors": radar_errors,
+      }, min_interval_sec=60.)
     if not self.sm.valid['pandaStates']:
       self.events.add(EventName.usbError)
+      self._log_hardware_issue("usbError", {
+        "panda_states_health": self._service_health("pandaStates"),
+      }, min_interval_sec=60.)
     if CS.canTimeout:
       self.events.add(EventName.canBusMissing)
+      self._log_hardware_issue("canBusMissing", {
+        "can_timeout": bool(CS.canTimeout),
+        "can_valid": bool(CS.canValid),
+        "panda_states_health": self._service_health("pandaStates"),
+      }, min_interval_sec=60.)
     elif not CS.canValid:
       self.events.add(EventName.canError)
+      self._log_hardware_issue("canError", {
+        "can_timeout": bool(CS.canTimeout),
+        "can_valid": bool(CS.canValid),
+        "panda_states_health": self._service_health("pandaStates"),
+      }, min_interval_sec=60.)
 
     # generic catch-all. ideally, a more specific event should be added above instead
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
@@ -346,6 +474,8 @@ class SelfdriveD:
       }
       if logs != self.logged_comm_issue:
         cloudlog.event("commIssue", error=True, **logs)
+        comm_issue_key = ",".join(logs["invalid"] + logs["not_alive"] + logs["not_freq_ok"])[:120]
+        self._log_hardware_issue("commIssue", logs, dedupe_suffix=comm_issue_key, min_interval_sec=30.)
         self.logged_comm_issue = logs
     else:
       self.logged_comm_issue = None
@@ -353,14 +483,42 @@ class SelfdriveD:
     if not self.CP.notCar:
       if not self.sm['livePose'].posenetOK:
         self.events.add(EventName.posenetInvalid)
+        self._log_hardware_issue("posenetInvalid", {
+          "live_pose_health": self._service_health("livePose"),
+          "posenet_ok": bool(self.sm['livePose'].posenetOK),
+          "inputs_ok": bool(self.sm['livePose'].inputsOK),
+        }, min_interval_sec=60.)
       if not self.sm['livePose'].inputsOK:
         self.events.add(EventName.locationdTemporaryError)
+        self._log_hardware_issue("locationdTemporaryError", {
+          "live_pose_health": self._service_health("livePose"),
+          "posenet_ok": bool(self.sm['livePose'].posenetOK),
+          "inputs_ok": bool(self.sm['livePose'].inputsOK),
+          "sensor_health": {s: self._service_health(s) for s in self.sensor_packets},
+        }, min_interval_sec=60.)
       if not self.sm['liveParameters'].valid and cal_status == log.LiveCalibrationData.Status.calibrated and not TESTING_CLOSET and (not SIMULATION or REPLAY):
         self.events.add(EventName.paramsdTemporaryError)
+        self._log_hardware_issue("paramsdTemporaryError", {
+          "live_parameters_health": self._service_health("liveParameters"),
+          "calibration_status": str(cal_status),
+        }, min_interval_sec=60.)
 
     # conservative HW alert. if the data or frequency are off, locationd will throw an error
-    if any((self.sm.frame - self.sm.recv_frame[s])*DT_CTRL > 10. for s in self.sensor_packets):
+    missing_sensor_services = [s for s in self.sensor_packets if (self.sm.frame - self.sm.recv_frame[s]) * DT_CTRL > 10.]
+    if missing_sensor_services:
       pass#self.events.add(EventName.sensorDataInvalid)
+      if "sensord" in not_running:
+        likely_reason = "sensord process is not running"
+      elif set(missing_sensor_services) == set(self.sensor_packets):
+        likely_reason = "IMU is not publishing; check LSM6DS3 I2C bus 1 address 0x6A, GPIO chip 0 line 84 IRQ, power, or sensor variant"
+      else:
+        likely_reason = "one IMU stream is missing; check shared LSM6DS3 configuration and data-ready status"
+      self._log_hardware_issue("sensorDataInvalid", {
+        "missing_sensor_services": missing_sensor_services,
+        "sensor_health": {s: self._service_health(s) for s in self.sensor_packets},
+        "not_running_processes": sorted(not_running),
+        "likely_reason": likely_reason,
+      }, dedupe_suffix=",".join(missing_sensor_services), min_interval_sec=60.)
 
     if not REPLAY:
       # Check for mismatch between openpilot and car's PCM
@@ -398,6 +556,11 @@ class SelfdriveD:
     gps_ok = self.sm.recv_frame[self.gps_location_service] > 0 and (self.sm.frame - self.sm.recv_frame[self.gps_location_service]) * DT_CTRL < 2.0
     if not gps_ok and self.sm['livePose'].inputsOK and (self.distance_traveled > 1500):
       self.events.add(EventName.noGps)
+      self._log_hardware_issue("noGps", {
+        "gps_service": self.gps_location_service,
+        "gps_health": self._service_health(self.gps_location_service),
+        "distance_traveled_m": round(self.distance_traveled, 2),
+      }, min_interval_sec=60.)
     if gps_ok:
       self.distance_traveled = 0
     self.distance_traveled += abs(CS.vEgo) * DT_CTRL
@@ -406,6 +569,10 @@ class SelfdriveD:
     if not SIMULATION or REPLAY:
       if self.sm['modelV2'].frameDropPerc > 20:
         self.events.add(EventName.modeldLagging)
+        self._log_hardware_issue("modeldLagging", {
+          "model_frame_drop_percent": float(self.sm['modelV2'].frameDropPerc),
+          "model_health": self._service_health("modelV2"),
+        }, min_interval_sec=60.)
 
     # Decrement personality on distance button press
     if self.CP.openpilotLongitudinalControl:
@@ -531,7 +698,7 @@ class SelfdriveD:
       t.start()
       while True:
         self.step()
-        self.rk.monitor_time()
+        self.rk.keep_time()
     finally:
       e.set()
       t.join()

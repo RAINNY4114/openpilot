@@ -23,9 +23,9 @@ class CarInterface(CarInterfaceBase):
     # so limit limits of pid to prevent windup
     # Additionally, cap positive accel by speed to reduce kickdown/high-RPM behavior on Ford/Lincoln.
     # This aligns the PID output limits with the planner's Ford cruise accel map.
-    accel_max_speed_bp = [0., 10.0, 25., 40.]              # m/s
+    accel_max_speed_bp = [0.0, 5., 10., 15., 20., 25., 40.]  # m/s
     # Keep in sync with A_CRUISE_MAX_VALS_FORD in longitudinal_planner.py
-    accel_max_speed_vals = [1.1, 0.9, 0.60, 0.50]          # m/s^2
+    accel_max_speed_vals = [2.0, 1.7, 1.4, 1.1, 0.9, 0.7, 0.5]  # m/s^2
     speed_accel_cap = float(np.interp(current_speed, accel_max_speed_bp, accel_max_speed_vals))
 
     if cruise_speed < 1e-3:
@@ -53,7 +53,7 @@ class CarInterface(CarInterfaceBase):
     # This is especially noticeable on Ford/Lincoln platforms where the ACC system can be slow to react.
     ret.startingState = True
     # Reduce low-speed surge in stop-and-go; smoother and safer following.
-    ret.startAccel = 0.5
+    ret.startAccel = 0.7
     ret.vEgoStarting = 0.25
 
     if not ret.radarUnavailable and DBC[candidate][Bus.radar] == RADAR.DELPHI_MRR:

@@ -13,13 +13,14 @@ VisualAlert = structs.CarControl.HUDControl.VisualAlert
 
 # CAN FD limits:
 # Limit to average banked road since safety doesn't have the roll
-AVERAGE_ROAD_ROLL = 0.06
-MAX_LATERAL_ACCEL = 2.2
-HUMAN_TURN_STEERING_ANGLE_DEG = 35.0
+AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation. higher actual roll raises lateral acceleration
+MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL - (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~2.4 m/s^2
+HUMAN_TURN_STEERING_ANGLE_DEG = 45.0
+
 
 def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
   diff = 0.1
-  tau = 5
+  tau = 5  # 5s smooths over the overshoot
   dt = DT_CTRL * CarControllerParams.STEER_STEP
   alpha = 1 - np.exp(-dt / tau)
 
@@ -29,17 +30,9 @@ def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
   last_lataccel = alpha * lataccel + (1 - alpha) * last_lataccel
 
   output_curvature = last_lataccel / (max(v_ego, 1) ** 2)
+
   return float(np.interp(v_ego, [5, 10], [apply_curvature, output_curvature]))
 
-def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature,
-                                 v_ego_raw, steering_angle, lat_active, CP):
-
-  if v_ego_raw > 12:
-    apply_curvature = np.clip(
-      apply_curvature,
-      current_curvature - CarControllerParams.CURVATURE_ERROR,
-      current_curvature + CarControllerParams.CURVATURE_ERROR
-    )
 
 def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature, v_ego_raw, steering_angle, lat_active, CP):
   # No blending at low speed due to lack of torque wind-up and inaccurate current curvature
@@ -47,16 +40,14 @@ def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_c
     apply_curvature = np.clip(apply_curvature, current_curvature - CarControllerParams.CURVATURE_ERROR,
                               current_curvature + CarControllerParams.CURVATURE_ERROR)
 
-  apply_curvature = apply_std_steer_angle_limits(
-    apply_curvature,
-    apply_curvature_last,
-    v_ego_raw,
-    steering_angle,
-    lat_active,
-    CarControllerParams.get_angle_limits(CP)
-  )
+  # Curvature rate limit after driver torque limit
+  apply_curvature = apply_std_steer_angle_limits(apply_curvature, apply_curvature_last, v_ego_raw, steering_angle, lat_active,
+                                                  CarControllerParams.get_angle_limits(CP))
 
+  # Ford Q4/CAN FD has more torque available compared to Q3/CAN so we limit it based on lateral acceleration.
+  # Safety is not aware of the road roll so we subtract a conservative amount at all times
   if CP.flags & FordFlags.CANFD:
+    # Limit curvature to conservative max lateral acceleration
     curvature_accel_limit = MAX_LATERAL_ACCEL / (max(v_ego_raw, 1) ** 2)
     apply_curvature = float(np.clip(apply_curvature, -curvature_accel_limit, curvature_accel_limit))
 
@@ -69,57 +60,8 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
   accel -= creep_accel
   return float(accel)
 
-def to_float(x):
-  return float(x) if x is not None else None
-
-def safe_get_float(params, key):
-  try:
-    v = params.get(key)
-    return float(v) if v is not None else None
-  except Exception:
-    return None
-
-class BlindSpotMonitor:
-    def __init__(self, radar_interface, blindspot_range: float = 5.0):
-        """
-        初始化盲点监测系统
-
-        :param radar_interface: 用于获取雷达数据的接口
-        :param blindspot_range: 盲点范围的阈值（单位：米）
-        """
-        self.radar_interface = radar_interface
-        self.blindspot_range = blindspot_range
-        self.blindspot_warning = False  # 默认没有盲点警告
-
-    def check_blindspot(self):
-        """
-        检查盲点：获取雷达数据，判断盲点内是否有物体
-        """
-        radar_data = self.radar_interface.update(can_strings)
-
-        if radar_data is None:
-            return False
-
-        for point in radar_data.points:
-            # 根据车辆的盲区范围判断目标是否进入盲区
-            # 假设我们只关心车辆左右两侧的盲区
-            if point.dRel < self.blindspot_range and abs(point.yRel) < 2:  # 设定盲区阈值，例如：距离5米，左右2米
-                self.blindspot_warning = True
-                return True
-
-        self.blindspot_warning = False
-        return False
-
-    def get_blindspot_warning(self):
-        """
-        获取盲点警告状态
-
-        :return: True 如果盲点内有物体，False 否则
-        """
-        return self.blindspot_warning
 
 class CarController(CarControllerBase):
-
   def __init__(self, dbc_names, CP):
     super().__init__(dbc_names, CP)
     self.params = Params()
@@ -131,54 +73,19 @@ class CarController(CarControllerBase):
     self.accel = 0.0
     self.gas = 0.0
     self.brake_request = False
-
     self.main_on_last = False
     self.lkas_enabled_last = False
     self.steer_alert_last = False
-
     self.lead_distance_bars_last = None
     self.distance_bar_frame = 0
-    # 初始化 BlindSpotMonitor
-    self.blindspot_monitor = BlindSpotMonitor(radar_interface)
-
     self.enable_human_turn_detection = True
     self.human_turn = False
     self.post_reset_ramp_active = False
     self.reset_steering_last = False
 
-    self._auto_blinker_dir = 0
+    # Auto-turn-signal latch (for auto-requested lane changes)
+    self._auto_blinker_dir = 0  # 0=off, 1=left, 2=right
     self._prev_cc_blinker_dir = 0
-
-    self._lidar_cache = {"t": 0, "left": None, "right": None, "front": None}
-
-  def _compute_dynamic_boundaries(self, v_ego):
-    # speed (m/s)
-    v = max(v_ego, 0.1)
-
-    # fallback fixed values (your params)
-    left = self._lidar_cache["left"]
-    right = self._lidar_cache["right"]
-    front = self._lidar_cache["front"]
-
-    # 1️⃣ fallback base values
-    base_side = 3.0
-    base_front = 10.0
-
-    # 2️⃣ dynamic model
-    side_dynamic = max(1.5, base_side - 0.04 * v * 3.6)  # convert to km/h scale
-    front_dynamic = 5.0 + v * 2.2  # TTC ~2.2s
-
-    # 3️⃣ merge logic
-    use_sensor = (
-      left is not None and left > 0 and
-      right is not None and right > 0 and
-      front is not None and front > 0
-    )
-
-    if use_sensor:
-      return left, right, front
-
-    return side_dynamic, side_dynamic, front_dynamic
 
   def _update_human_turn_detection_enabled(self) -> None:
     enabled = self.params.get("enable_human_turn_detection")
@@ -205,22 +112,7 @@ class CarController(CarControllerBase):
     steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
 
-    # 检查盲点警告
-    if self.blindspot_monitor.check_blindspot():
-        # 发出盲点警告，例如启用盲点警告灯
-        print("Blind Spot Detected! Activating warning light.")
-        # 你可以在这里发送相关的警告消息
-        can_sends.append(fordcan.create_blindspot_warning_msg(self.packer, self.CAN))
-
-    # ===== 新增：雷达缓存更新（不影响原结构）=====
-    now = now_nanos * 1e-9
-    if now - self._lidar_cache["t"] > 0.1:
-      self._lidar_cache["left"] = to_float(self.params.get("lidar_left_dist"))
-      self._lidar_cache["right"] = to_float(self.params.get("lidar_right_dist"))
-      self._lidar_cache["front"] = to_float(self.params.get("radar_front_dist"))
-      self._lidar_cache["t"] = now
-
-    # Latch whether this lane-change blinker request is "auto"
+    # Latch whether this lane-change blinker request is "auto" (driver stalk was not active at start).
     cc_blinker_dir = 0
     if CC.leftBlinker and not CC.rightBlinker:
       cc_blinker_dir = 1
@@ -242,114 +134,75 @@ class CarController(CarControllerBase):
     elif CC.cruiseControl.resume and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, resume=True))
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.main, CS.buttons_stock_values, resume=True))
+    # if stock lane centering isn't off, send a button press to toggle it off
+    # the stock system checks for steering pressed, and eventually disengages cruise control
     elif CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0 and (self.frame % CarControllerParams.ACC_UI_STEP) == 0:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, tja_toggle=True))
 
+    # Auto blinker (exterior) during auto-requested lane changes.
     if self._auto_blinker_dir != 0 and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
       can_sends.append(fordcan.create_turn_signal_msg(self.packer, self.CAN.main, CS.buttons_stock_values, self._auto_blinker_dir))
 
     ### lateral control ###
+    # send steer msg at 20Hz
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
       self.human_turn = self.enable_human_turn_detection and CS.out.steeringPressed and \
                         abs(CS.out.steeringAngleDeg) > HUMAN_TURN_STEERING_ANGLE_DEG
       reset_steering = self.human_turn or CS.out.vEgoRaw < 0.1
 
+      # Bronco and some other cars consistently overshoot curv requests
+      # Apply some deadzone + smoothing convergence to avoid oscillations
       if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14) and not reset_steering:
-        self.anti_overshoot_curvature_last = anti_overshoot(
-          actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
+        self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
         requested_curvature = self.anti_overshoot_curvature_last
       else:
         if reset_steering:
           self.anti_overshoot_curvature_last = 0.0
-        requested_curvature = float(actuators.curvature)
+        requested_curvature = actuators.curvature
 
-    # ===== 安全约束（融合点）=====
-    try:
-      left = to_float(self._lidar_cache["left"])
-      right = to_float(self._lidar_cache["right"])
-      front = to_float(self._lidar_cache["front"])
-
-      if left is not None and right is not None:
-        if left < 1.5 and right < 1.5:
-          requested_curvature = 0.0
-        elif left < 1.5:
-          requested_curvature = min(requested_curvature, 0.0)
-        elif right < 1.5:
-          requested_curvature = max(requested_curvature, 0.0)
-
-      if left is not None and left < 2.5:
-        requested_curvature += 0.002
-      if right is not None and right < 2.5:
-        requested_curvature -= 0.002
-
-      if front is not None:
-        v = CS.out.vEgo
-        ttc = front / max(v, 0.1)
-
-        if front < max(6.0, v * 1.2) or ttc < 2.0:
-          actuators.accel = min(actuators.accel, -1.0)
-
-        if front < 4.0 or ttc < 1.2:
-          actuators.accel = -2.5
-          requested_curvature = 0.0
-
-    except Exception:
-      pass
-
-    # ===== 原控制逻辑 =====
-    if reset_steering:
-      requested_curvature = 0.0
-      self.apply_curvature_last = 0.0
-      self.post_reset_ramp_active = False
-    else:
-      current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-
-      if self.reset_steering_last:
-        self.post_reset_ramp_active = True
+      # apply rate limits, curvature error limit, and clip to signal range
+      if reset_steering:
+        requested_curvature = 0.0
         self.apply_curvature_last = 0.0
-
-      if self.post_reset_ramp_active:
-        self.apply_curvature_last = apply_std_steer_angle_limits(
-          requested_curvature,
-          self.apply_curvature_last,
-          CS.out.vEgoRaw,
-          0.,
-          CC.latActive,
-          CarControllerParams.get_angle_limits(self.CP),
-        )
+        self.post_reset_ramp_active = False
       else:
-        self.apply_curvature_last = apply_ford_curvature_limits(
-          requested_curvature,
-          self.apply_curvature_last,
-          current_curvature,
-          CS.out.vEgoRaw,
-          0.,
-          CC.latActive,
-          self.CP
-        )
-        smooth = np.interp(CS.out.vEgoRaw, [0, 30], [0.3, 0.15])
-        smooth = np.clip(smooth, 0.12, 0.35)
-        max_delta = 0.002  # 每帧最大变化
-        target = (
-           smooth * self.apply_curvature_last +
-           (1 - smooth) * requested_curvature
-        )
-        delta = np.clip(target - self.apply_curvature_last, -max_delta, max_delta)
-        self.apply_curvature_last += delta
-    self.reset_steering_last = reset_steering
+        current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
+        if self.reset_steering_last:
+          self.post_reset_ramp_active = True
+          self.apply_curvature_last = 0.0
 
-    if self.CP.flags & FordFlags.CANFD:
-      # TODO: extended mode
-      # Ford uses four individual signals to dictate how to drive to the car. Curvature alone (limited to 0.02m/s^2)
-      # can actuate the steering for a large portion of any lateral movements. However, in order to get further control on
-      # steer actuation, the other three signals are necessary. Ford controls vehicles differently than most other makes.
-      # A detailed explanation on ford control can be found here:
-      # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
-      mode = 1 if CC.latActive else 0
-      counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
-      can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter))
-    else:
-      can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
+        if self.post_reset_ramp_active:
+          self.apply_curvature_last = apply_std_steer_angle_limits(
+            requested_curvature,
+            self.apply_curvature_last,
+            CS.out.vEgoRaw,
+            0.,
+            CC.latActive,
+            CarControllerParams.get_angle_limits(self.CP),
+          )
+
+          curvature_error = abs(requested_curvature - self.apply_curvature_last)
+          curvature_threshold = max(abs(requested_curvature) * 0.1, 0.001)
+          if curvature_error < curvature_threshold:
+            self.post_reset_ramp_active = False
+        else:
+          self.apply_curvature_last = apply_ford_curvature_limits(requested_curvature, self.apply_curvature_last, current_curvature,
+                                                                  CS.out.vEgoRaw, 0., CC.latActive, self.CP)
+
+      self.reset_steering_last = reset_steering
+
+      if self.CP.flags & FordFlags.CANFD:
+        # TODO: extended mode
+        # Ford uses four individual signals to dictate how to drive to the car. Curvature alone (limited to 0.02m/s^2)
+        # can actuate the steering for a large portion of any lateral movements. However, in order to get further control on
+        # steer actuation, the other three signals are necessary. Ford controls vehicles differently than most other makes.
+        # A detailed explanation on ford control can be found here:
+        # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
+        mode = 1 if CC.latActive else 0
+        counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
+        can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter))
+      else:
+        can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
 
     # send lka msg at 33Hz
     if (self.frame % CarControllerParams.LKA_STEP) == 0:
@@ -358,42 +211,72 @@ class CarController(CarControllerBase):
     ### longitudinal control ###
     # send acc msg at 50Hz
     if self.CP.openpilotLongitudinalControl and (self.frame % CarControllerParams.ACC_CONTROL_STEP) == 0:
-      accel = float(actuators.accel)
+      accel = actuators.accel
       gas = accel
 
-      long_emergency = False
-      front = to_float(self._lidar_cache["front"])
-
-      if front is not None:
-        v = CS.out.vEgo
-        ttc = front / max(v, 0.1)
-
-        if front < 4.0 or ttc < 1.2:
-          long_emergency = True
-        elif front < max(6.0, v * 1.2) or ttc < 2.0:
-          accel = min(accel, -1.0)
-
       if CC.longActive:
+        # Compensate for engine creep at low speed.
+        # Either the ABS does not account for engine creep, or the correction is very slow
+        # TODO: verify this applies to EV/hybrid
         accel = apply_creep_compensation(accel, CS.out.vEgo)
-        accel = max(accel, self.accel - (3.5 * CarControllerParams.ACC_CONTROL_STEP * DT_CTRL))
 
-      if long_emergency:
-        accel = -2.5
-        gas = 0.0
+        # The stock system has been seen rate limiting the brake accel to 5 m/s^3,
+        # however even 3.5 m/s^3 causes some overshoot with a step response.
+        accel = max(accel, self.accel - (3.5 * CarControllerParams.ACC_CONTROL_STEP * DT_CTRL))
 
       accel = float(np.clip(accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       gas = float(np.clip(gas, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
 
+      # Both gas and accel are in m/s^2, accel is used solely for braking
       if not CC.longActive or gas < CarControllerParams.MIN_GAS:
         gas = CarControllerParams.INACTIVE_GAS
+
+      # PCM applies pitch compensation to gas/accel, but we need to compensate for the brake/pre-charge bits
+      accel_due_to_pitch = 0.0
+      if len(CC.orientationNED) == 3:
+        accel_due_to_pitch = math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY
+
+      accel_pitch_compensated = accel + accel_due_to_pitch
+      # Release brake request as soon as we are no longer asking for decel.
+      # This prevents lingering brake precharge/drag during mild accel.
+      if accel_pitch_compensated >= 0.0 or not CC.longActive:
+        self.brake_request = False
+      elif accel_pitch_compensated < 0.0:
+        self.brake_request = True
+
+      stopping = CC.actuators.longControlState == LongCtrlState.stopping
+      # TODO: look into using the actuators packet to send the desired speed
+      can_sends.append(fordcan.create_acc_msg(self.packer, self.CAN, CC.longActive, gas, accel, stopping, self.brake_request, v_ego_kph=V_CRUISE_MAX))
 
       self.accel = accel
       self.gas = gas
 
-    self.frame += 1
+    ### ui ###
+    send_ui = (self.main_on_last != main_on) or (self.lkas_enabled_last != CC.latActive) or (self.steer_alert_last != steer_alert)
+    # send lkas ui msg at 1Hz or if ui state changes
+    if (self.frame % CarControllerParams.LKAS_UI_STEP) == 0 or send_ui:
+      can_sends.append(fordcan.create_lkas_ui_msg(self.packer, self.CAN, main_on, CC.latActive, steer_alert, hud_control, CS.lkas_status_stock_values))
+
+    # send acc ui msg at 5Hz or if ui state changes
+    if hud_control.leadDistanceBars != self.lead_distance_bars_last:
+      send_ui = True
+      self.distance_bar_frame = self.frame
+
+    if (self.frame % CarControllerParams.ACC_UI_STEP) == 0 or send_ui:
+      show_distance_bars = self.frame - self.distance_bar_frame < 400
+      can_sends.append(fordcan.create_acc_ui_msg(self.packer, self.CAN, self.CP, main_on, CC.latActive,
+                                                 fcw_alert, CS.out.cruiseState.standstill, show_distance_bars,
+                                                 hud_control, CS.acc_tja_status_stock_values))
+
+    self.main_on_last = main_on
+    self.lkas_enabled_last = CC.latActive
+    self.steer_alert_last = steer_alert
+    self.lead_distance_bars_last = hud_control.leadDistanceBars
+
     new_actuators = actuators.as_builder()
     new_actuators.curvature = self.apply_curvature_last
     new_actuators.accel = self.accel
     new_actuators.gas = self.gas
 
+    self.frame += 1
     return new_actuators, can_sends

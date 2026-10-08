@@ -84,7 +84,6 @@ DET_SHOW_DISTANCE = bool(int(os.getenv("DP_DET_SHOW_DISTANCE", "0")))
 DET_DRAW_ALL = bool(int(os.getenv("DP_DET_DRAW_ALL", "0")))
 DET_VEHICLE_CLASS_IDS = {1, 2, 3, 5, 7}  # bicycle/car/moto/bus/truck
 DET_DRAW_CLASSES = {0, 80} | DET_VEHICLE_CLASS_IDS
-DET_FEATURE_PARAMS = ("dp_lat_cone_detection", "dp_lincoln_auto_avoid", "dp_lincoln_auto_overtake")
 
 # Adjacent-lane occupancy visualization (uses coned bboxes + model lane lines).
 # This is a conservative "block" cue for the driver, not a guarantee that a lane is clear.
@@ -227,80 +226,6 @@ def _lane_y_at_x(lane_x: np.ndarray, lane_y: np.ndarray, x_m: float) -> float | 
   if not (x0 <= float(x_m) <= x1):
     return None
   return float(np.interp(float(x_m), lane_x, lane_y))
-
-
-def _det_features_enabled(params: Params) -> bool:
-  return any(params.get_bool(k) for k in DET_FEATURE_PARAMS)
-
-
-def _det_bbox_iou(a: dict, b: dict) -> float:
-  try:
-    ax1 = float(a.get("x1", 0.0))
-    ay1 = float(a.get("y1", 0.0))
-    ax2 = float(a.get("x2", 0.0))
-    ay2 = float(a.get("y2", 0.0))
-    bx1 = float(b.get("x1", 0.0))
-    by1 = float(b.get("y1", 0.0))
-    bx2 = float(b.get("x2", 0.0))
-    by2 = float(b.get("y2", 0.0))
-  except Exception:
-    return 0.0
-
-  ix1 = max(ax1, bx1)
-  iy1 = max(ay1, by1)
-  ix2 = min(ax2, bx2)
-  iy2 = min(ay2, by2)
-  iw = max(0.0, ix2 - ix1)
-  ih = max(0.0, iy2 - iy1)
-  inter = iw * ih
-  if inter <= 0.0:
-    return 0.0
-
-  area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-  area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-  union = area_a + area_b - inter
-  if union <= 0.0:
-    return 0.0
-  return float(inter / union)
-
-
-def _det_payload_objects(payload: dict | None, *, prefer_refined: bool) -> list[dict]:
-  if not isinstance(payload, dict):
-    return []
-
-  primary_key = "objsR" if prefer_refined else "objs"
-  fallback_key = "objs" if prefer_refined else "objsR"
-  src = payload.get(primary_key, None)
-  if not isinstance(src, list) or not src:
-    src = payload.get(fallback_key, []) or []
-
-  objs = [dict(o) for o in src if isinstance(o, dict)]
-
-  # `cones` is the dedicated low-threshold traffic-cone stream. Merge it into the object stream
-  # so HUD markers still render if the generic object list is empty or misses a cone.
-  cones = payload.get("cones", []) or []
-  if isinstance(cones, list):
-    for c in cones:
-      if not isinstance(c, dict):
-        continue
-      try:
-        cone_obj = {
-          "c": 80,
-          "x1": float(c.get("x1", 0.0)),
-          "y1": float(c.get("y1", 0.0)),
-          "x2": float(c.get("x2", 0.0)),
-          "y2": float(c.get("y2", 0.0)),
-          "s": float(c.get("s", 0.0)),
-        }
-      except Exception:
-        continue
-      if cone_obj["x2"] <= cone_obj["x1"] or cone_obj["y2"] <= cone_obj["y1"]:
-        continue
-      duplicate = any(isinstance(o, dict) and int(o.get("c", -1)) == 80 and _det_bbox_iou(o, cone_obj) >= 0.60 for o in objs)
-      if not duplicate:
-        objs.append(cone_obj)
-
-  return objs
 
 
 @dataclass
@@ -454,7 +379,7 @@ class AugmentedRoadView(CameraView):
     return rl.Rectangle(float(x_offset), float(y_offset), float(scale_x), float(scale_y))
 
   def _draw_object_detections(self, rect: rl.Rectangle) -> None:
-    if not _det_features_enabled(self._params):
+    if not self._params.get_bool("dp_lat_cone_detection"):
       return
     sm = ui_state.sm
     det_ts_sof_ns = 0
@@ -476,7 +401,29 @@ class AugmentedRoadView(CameraView):
             self._det_img_h = img_h
             self._det_tracker.reset()
 
-          objs = _det_payload_objects(self._det_payload, prefer_refined=True)
+          objs = self._det_payload.get("objsR", []) or []
+          if not objs:
+            objs = self._det_payload.get("objs", []) or []
+
+          # Backward/robustness: if the refined/raw streams are empty but `cones` is present,
+          # surface cones in the HUD by promoting them into the object stream.
+          try:
+            have_cone = any(isinstance(o, dict) and int(o.get("c", -1)) == 80 for o in objs)
+            cones = self._det_payload.get("cones", []) or []
+            if (not have_cone) and isinstance(cones, list):
+              for c in cones:
+                if not isinstance(c, dict):
+                  continue
+                objs.append({
+                  "c": 80,
+                  "x1": float(c.get("x1", 0.0)),
+                  "y1": float(c.get("y1", 0.0)),
+                  "x2": float(c.get("x2", 0.0)),
+                  "y2": float(c.get("y2", 0.0)),
+                  "s": float(c.get("s", 0.0)),
+                })
+          except Exception:
+            pass
           if not DET_DRAW_ALL:
             try:
               objs = [o for o in objs if isinstance(o, dict) and int(o.get("c", -1)) in DET_DRAW_CLASSES]
@@ -546,8 +493,7 @@ class AugmentedRoadView(CameraView):
               lane_right_x = lane_right_x[::-1]
               lane_right_y = lane_right_y[::-1]
 
-            lane_lines_ok = bool(lane_left_x.size >= 2 and lane_right_x.size >= 2 and
-                                 lane_left_x.size == lane_left_y.size and lane_right_x.size == lane_right_y.size)
+            lane_lines_ok = bool(lane_left_x.size >= 2 and lane_right_x.size >= 2 and lane_left_x.size == lane_left_y.size and lane_right_x.size == lane_right_y.size)
     except Exception:
       lane_lines_ok = False
 
@@ -556,7 +502,7 @@ class AugmentedRoadView(CameraView):
     # an occupied target lane close enough to block a lane change.
     try:
       if cs is not None and lane_lines_ok and focal_length_px_det > 1.0:
-        objs_raw = _det_payload_objects(self._det_payload, prefer_refined=False)
+        objs_raw = (self._det_payload.get("objsR", None) or self._det_payload.get("objs", [])) or []
         if isinstance(objs_raw, list):
           occ = compute_lane_occupancy(
             objs=objs_raw,
@@ -637,17 +583,17 @@ class AugmentedRoadView(CameraView):
 
         if dist_m is not None and lane_lines_ok:
           cx = 0.5 * (x1 + x2)
-          y_m = (float(cx) - float(img_w) * 0.5) * float(dist_m) / max(float(focal_length_px_det), 1.0)
+          y_m = -((float(cx) - float(img_w) * 0.5) * float(dist_m) / max(float(focal_length_px_det), 1.0))
           if np.isfinite(y_m):
             y_left = _lane_y_at_x(lane_left_x, lane_left_y, dist_m)
             y_right = _lane_y_at_x(lane_right_x, lane_right_y, dist_m)
             if y_left is not None and y_right is not None:
-              left_boundary = min(float(y_left), float(y_right))
-              right_boundary = max(float(y_left), float(y_right))
+              left_boundary = max(float(y_left), float(y_right))
+              right_boundary = min(float(y_left), float(y_right))
               margin = float(AUTO_LC_UI_LANE_MARGIN_M)
-              if y_m < (left_boundary - margin):
+              if y_m > (left_boundary + margin):
                 lane_dir = 1
-              elif y_m > (right_boundary + margin):
+              elif y_m < (right_boundary - margin):
                 lane_dir = -1
               else:
                 lane_dir = 0
@@ -1096,11 +1042,11 @@ class AugmentedRoadView(CameraView):
 
     # FrogPilot-style blindspot "wall" (drawn in the adjacent lane polygon)
     if cs.leftBlindspot:
-      self._draw_hud_fp_blindspot_wall(rect=rect, is_left=True)
+      drew = self._draw_hud_fp_blindspot_wall(rect=rect, is_left=True)
       # Removed: internal trapezoid blinker band
 
     if cs.rightBlindspot:
-      self._draw_hud_fp_blindspot_wall(rect=rect, is_left=False)
+      drew = self._draw_hud_fp_blindspot_wall(rect=rect, is_left=False)
       # Removed: internal trapezoid blinker band
 
   @staticmethod
@@ -1293,6 +1239,7 @@ class AugmentedRoadView(CameraView):
     if rect.width <= 0 or rect.height <= 0:
       return
 
+    sm = ui_state.sm
     stats = self._get_perf_stats()
     curvature_text, steering_text, torque_text = self._get_curvature_steer_torque()
     direction_text = self._get_direction_label()

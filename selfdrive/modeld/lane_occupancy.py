@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 import math
+from typing import Sequence
 
 import numpy as np
 
@@ -150,9 +150,9 @@ def compute_lane_occupancy(*,
     if dist_m <= 0.0:
       continue
 
-    # Lateral position in car space (openpilot model frame: y right +).
+    # Lateral position in car space (y left +): y = -(cx - cx0) * x / f
     cx = 0.5 * (x1 + x2)
-    y_m = (float(cx) - float(img_w) * 0.5) * dist_m / max(f_px, 1.0)
+    y_m = -((float(cx) - float(img_w) * 0.5) * dist_m / max(f_px, 1.0))
     if not math.isfinite(y_m):
       continue
 
@@ -161,14 +161,14 @@ def compute_lane_occupancy(*,
     if y_left is None or y_right is None:
       continue
 
-    left_boundary = min(float(y_left), float(y_right))
-    right_boundary = max(float(y_left), float(y_right))
+    left_boundary = max(float(y_left), float(y_right))
+    right_boundary = min(float(y_left), float(y_right))
     # Positive margin is stricter (fewer objects considered "in adjacent lanes").
     # Negative margin is more conservative (more objects block adjacent-lane changes).
     margin = float(lane_margin_m)
 
-    in_left_lane = y_m < (left_boundary - margin)
-    in_right_lane = y_m > (right_boundary + margin)
+    in_left_lane = y_m > (left_boundary + margin)
+    in_right_lane = y_m < (right_boundary - margin)
 
     if in_left_lane:
       left_min = _min_nonzero(left_min, dist_m)
@@ -266,7 +266,7 @@ def compute_ego_lane_occupancy(*,
       continue
 
     cx = 0.5 * (x1 + x2)
-    y_m = (float(cx) - float(img_w) * 0.5) * dist_m / max(f_px, 1.0)
+    y_m = -((float(cx) - float(img_w) * 0.5) * dist_m / max(f_px, 1.0))
     if not math.isfinite(y_m):
       continue
 
@@ -275,10 +275,10 @@ def compute_ego_lane_occupancy(*,
     if y_left is None or y_right is None:
       continue
 
-    left_boundary = min(float(y_left), float(y_right))
-    right_boundary = max(float(y_left), float(y_right))
+    left_boundary = max(float(y_left), float(y_right))
+    right_boundary = min(float(y_left), float(y_right))
 
-    in_ego_lane = (left_boundary + margin) <= y_m <= (right_boundary - margin)
+    in_ego_lane = (right_boundary + margin) <= y_m <= (left_boundary - margin)
     if in_ego_lane:
       ego_min = _min_nonzero(ego_min, dist_m)
 

@@ -30,8 +30,29 @@ class Priority:
 
 def set_core_affinity(cores: list[int]) -> None:
   if sys.platform == 'linux' and not PC:
-    os.sched_setaffinity(0, cores)
+    try:
+      # C3X only exposes CPU 0-3.
+      # Some openpilot versions still request CPU5.
+      # Filter unavailable cores to avoid:
+      # OSError: [Errno 22] Invalid argument
 
+      available_cores = os.sched_getaffinity(0)
+
+      valid_cores = [
+        c for c in cores
+        if c in available_cores
+      ]
+
+      if len(valid_cores) > 0:
+        os.sched_setaffinity(
+          0,
+          valid_cores,
+        )
+
+    except OSError:
+      # CPU affinity is an optimization only.
+      # Never stop openpilot because of affinity failure.
+      pass
 
 def config_realtime_process(cores: int | list[int], priority: int) -> None:
   gc.disable()

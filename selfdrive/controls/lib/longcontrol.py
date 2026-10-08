@@ -13,8 +13,9 @@ LongCtrlState = car.CarControl.Actuators.LongControlState
 def long_control_state_trans(CP, active, long_control_state, v_ego,
                              should_stop, brake_pressed, cruise_standstill):
   stopping_condition = should_stop
+  cruise_standstill_blocking = cruise_standstill and not (getattr(CP, "brand", "") == "ford" and CP.startingState and not should_stop)
   starting_condition = (not should_stop and
-                        not cruise_standstill and
+                        not cruise_standstill_blocking and
                         not brake_pressed)
   started_condition = v_ego > CP.vEgoStarting
 

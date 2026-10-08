@@ -2905,7 +2905,7 @@ struct Event {
     ALERT_DEBUG,
     ONROAD_EVENTS,
     TOUCH,
-    CUSTOM_RESERVED10,
+    MR76_STATE,
     CUSTOM_RESERVED11,
     CUSTOM_RESERVED12,
     CUSTOM_RESERVED13,
@@ -21712,9 +21712,9 @@ public:
   inline bool hasTouch() const;
   inline  ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>::Reader getTouch() const;
 
-  inline bool isCustomReserved10() const;
-  inline bool hasCustomReserved10() const;
-  inline  ::cereal::CustomReserved10::Reader getCustomReserved10() const;
+  inline bool isMr76State() const;
+  inline bool hasMr76State() const;
+  inline  ::cereal::MR76State::Reader getMr76State() const;
 
   inline bool isCustomReserved11() const;
   inline bool hasCustomReserved11() const;
@@ -22875,13 +22875,13 @@ public:
   inline void adoptTouch(::capnp::Orphan< ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>>&& value);
   inline ::capnp::Orphan< ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>> disownTouch();
 
-  inline bool isCustomReserved10();
-  inline bool hasCustomReserved10();
-  inline  ::cereal::CustomReserved10::Builder getCustomReserved10();
-  inline void setCustomReserved10( ::cereal::CustomReserved10::Reader value);
-  inline  ::cereal::CustomReserved10::Builder initCustomReserved10();
-  inline void adoptCustomReserved10(::capnp::Orphan< ::cereal::CustomReserved10>&& value);
-  inline ::capnp::Orphan< ::cereal::CustomReserved10> disownCustomReserved10();
+  inline bool isMr76State();
+  inline bool hasMr76State();
+  inline  ::cereal::MR76State::Builder getMr76State();
+  inline void setMr76State( ::cereal::MR76State::Reader value);
+  inline  ::cereal::MR76State::Builder initMr76State();
+  inline void adoptMr76State(::capnp::Orphan< ::cereal::MR76State>&& value);
+  inline ::capnp::Orphan< ::cereal::MR76State> disownMr76State();
 
   inline bool isCustomReserved11();
   inline bool hasCustomReserved11();
@@ -58848,57 +58848,57 @@ inline ::capnp::Orphan< ::capnp::List< ::cereal::Touch,  ::capnp::Kind::STRUCT>>
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 
-inline bool Event::Reader::isCustomReserved10() const {
-  return which() == Event::CUSTOM_RESERVED10;
+inline bool Event::Reader::isMr76State() const {
+  return which() == Event::MR76_STATE;
 }
-inline bool Event::Builder::isCustomReserved10() {
-  return which() == Event::CUSTOM_RESERVED10;
+inline bool Event::Builder::isMr76State() {
+  return which() == Event::MR76_STATE;
 }
-inline bool Event::Reader::hasCustomReserved10() const {
-  if (which() != Event::CUSTOM_RESERVED10) return false;
+inline bool Event::Reader::hasMr76State() const {
+  if (which() != Event::MR76_STATE) return false;
   return !_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
 }
-inline bool Event::Builder::hasCustomReserved10() {
-  if (which() != Event::CUSTOM_RESERVED10) return false;
+inline bool Event::Builder::hasMr76State() {
+  if (which() != Event::MR76_STATE) return false;
   return !_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
 }
-inline  ::cereal::CustomReserved10::Reader Event::Reader::getCustomReserved10() const {
-  KJ_IREQUIRE((which() == Event::CUSTOM_RESERVED10),
+inline  ::cereal::MR76State::Reader Event::Reader::getMr76State() const {
+  KJ_IREQUIRE((which() == Event::MR76_STATE),
               "Must check which() before get()ing a union member.");
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::get(_reader.getPointerField(
+  return ::capnp::_::PointerHelpers< ::cereal::MR76State>::get(_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline  ::cereal::CustomReserved10::Builder Event::Builder::getCustomReserved10() {
-  KJ_IREQUIRE((which() == Event::CUSTOM_RESERVED10),
+inline  ::cereal::MR76State::Builder Event::Builder::getMr76State() {
+  KJ_IREQUIRE((which() == Event::MR76_STATE),
               "Must check which() before get()ing a union member.");
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::get(_builder.getPointerField(
+  return ::capnp::_::PointerHelpers< ::cereal::MR76State>::get(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline void Event::Builder::setCustomReserved10( ::cereal::CustomReserved10::Reader value) {
+inline void Event::Builder::setMr76State( ::cereal::MR76State::Reader value) {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::CUSTOM_RESERVED10);
-  ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::set(_builder.getPointerField(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::MR76_STATE);
+  ::capnp::_::PointerHelpers< ::cereal::MR76State>::set(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS), value);
 }
-inline  ::cereal::CustomReserved10::Builder Event::Builder::initCustomReserved10() {
+inline  ::cereal::MR76State::Builder Event::Builder::initMr76State() {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::CUSTOM_RESERVED10);
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::init(_builder.getPointerField(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::MR76_STATE);
+  return ::capnp::_::PointerHelpers< ::cereal::MR76State>::init(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
-inline void Event::Builder::adoptCustomReserved10(
-    ::capnp::Orphan< ::cereal::CustomReserved10>&& value) {
+inline void Event::Builder::adoptMr76State(
+    ::capnp::Orphan< ::cereal::MR76State>&& value) {
   _builder.setDataField<Event::Which>(
-      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::CUSTOM_RESERVED10);
-  ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::adopt(_builder.getPointerField(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, Event::MR76_STATE);
+  ::capnp::_::PointerHelpers< ::cereal::MR76State>::adopt(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
 }
-inline ::capnp::Orphan< ::cereal::CustomReserved10> Event::Builder::disownCustomReserved10() {
-  KJ_IREQUIRE((which() == Event::CUSTOM_RESERVED10),
+inline ::capnp::Orphan< ::cereal::MR76State> Event::Builder::disownMr76State() {
+  KJ_IREQUIRE((which() == Event::MR76_STATE),
               "Must check which() before get()ing a union member.");
-  return ::capnp::_::PointerHelpers< ::cereal::CustomReserved10>::disown(_builder.getPointerField(
+  return ::capnp::_::PointerHelpers< ::cereal::MR76State>::disown(_builder.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS));
 }
 

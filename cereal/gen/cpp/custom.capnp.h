@@ -40,7 +40,6 @@ enum class Type_cd3bc797c2c88ab3: uint16_t {
   NAVIGATION,
   VISION,
   POLICY,
-  OFF_POLICY,
 };
 CAPNP_DECLARE_ENUM(Type, cd3bc797c2c88ab3);
 CAPNP_DECLARE_SCHEMA(93f047e438952867);
@@ -60,6 +59,7 @@ CAPNP_DECLARE_SCHEMA(b86e6369214c01c8);
 CAPNP_DECLARE_SCHEMA(f416ec09499d9d19);
 CAPNP_DECLARE_SCHEMA(a1680744031fdb2d);
 CAPNP_DECLARE_SCHEMA(cb9fd56c7057593a);
+CAPNP_DECLARE_SCHEMA(fddf81a90e51911a);
 CAPNP_DECLARE_SCHEMA(c2243c65e0340384);
 CAPNP_DECLARE_SCHEMA(9ccdc8676701b412);
 CAPNP_DECLARE_SCHEMA(cd96dafb67a082d0);
@@ -327,15 +327,30 @@ struct CustomReserved9 {
   };
 };
 
-struct CustomReserved10 {
-  CustomReserved10() = delete;
+struct MR76State {
+  MR76State() = delete;
 
   class Reader;
   class Builder;
   class Pipeline;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(cb9fd56c7057593a, 0, 0)
+    CAPNP_DECLARE_STRUCT_HEADER(cb9fd56c7057593a, 4, 1)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct Target {
+  Target() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(fddf81a90e51911a, 5, 0)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -1876,9 +1891,9 @@ private:
 };
 #endif  // !CAPNP_LITE
 
-class CustomReserved10::Reader {
+class MR76State::Reader {
 public:
-  typedef CustomReserved10 Reads;
+  typedef MR76State Reads;
 
   Reader() = default;
   inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
@@ -1893,6 +1908,53 @@ public:
   }
 #endif  // !CAPNP_LITE
 
+  inline bool getValid() const;
+
+  inline bool getRadarStateValid() const;
+
+  inline bool getStatusValid() const;
+
+  inline bool getObjectDataValid() const;
+
+  inline  ::uint8_t getNvmReadStatus() const;
+
+  inline  ::uint8_t getNvmWriteStatus() const;
+
+  inline float getMaxDistance() const;
+
+  inline  ::uint8_t getRadarPower() const;
+
+  inline  ::uint8_t getSensorId() const;
+
+  inline  ::uint8_t getSortIndex() const;
+
+  inline  ::uint8_t getOutputType() const;
+
+  inline bool getQualityInfo() const;
+
+  inline bool getExtInfo() const;
+
+  inline  ::uint8_t getCanBaudRate() const;
+
+  inline  ::uint8_t getInterfaceType() const;
+
+  inline  ::uint8_t getRcsThreshold() const;
+
+  inline  ::uint8_t getCalibrationEnabled() const;
+
+  inline  ::uint16_t getNumObjects() const;
+
+  inline  ::uint32_t getMeasCount() const;
+
+  inline  ::uint8_t getInterfaceVersion() const;
+
+  inline  ::uint16_t getObjectCount() const;
+
+  inline bool hasObjects() const;
+  inline  ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Reader getObjects() const;
+
+  inline  ::uint64_t getLastUpdateMonoTime() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -1905,9 +1967,9 @@ private:
   friend class ::capnp::Orphanage;
 };
 
-class CustomReserved10::Builder {
+class MR76State::Builder {
 public:
-  typedef CustomReserved10 Builds;
+  typedef MR76State Builds;
 
   Builder() = delete;  // Deleted to discourage incorrect usage.
                        // You can explicitly initialize to nullptr instead.
@@ -1921,6 +1983,79 @@ public:
   inline ::kj::StringTree toString() const { return asReader().toString(); }
 #endif  // !CAPNP_LITE
 
+  inline bool getValid();
+  inline void setValid(bool value);
+
+  inline bool getRadarStateValid();
+  inline void setRadarStateValid(bool value);
+
+  inline bool getStatusValid();
+  inline void setStatusValid(bool value);
+
+  inline bool getObjectDataValid();
+  inline void setObjectDataValid(bool value);
+
+  inline  ::uint8_t getNvmReadStatus();
+  inline void setNvmReadStatus( ::uint8_t value);
+
+  inline  ::uint8_t getNvmWriteStatus();
+  inline void setNvmWriteStatus( ::uint8_t value);
+
+  inline float getMaxDistance();
+  inline void setMaxDistance(float value);
+
+  inline  ::uint8_t getRadarPower();
+  inline void setRadarPower( ::uint8_t value);
+
+  inline  ::uint8_t getSensorId();
+  inline void setSensorId( ::uint8_t value);
+
+  inline  ::uint8_t getSortIndex();
+  inline void setSortIndex( ::uint8_t value);
+
+  inline  ::uint8_t getOutputType();
+  inline void setOutputType( ::uint8_t value);
+
+  inline bool getQualityInfo();
+  inline void setQualityInfo(bool value);
+
+  inline bool getExtInfo();
+  inline void setExtInfo(bool value);
+
+  inline  ::uint8_t getCanBaudRate();
+  inline void setCanBaudRate( ::uint8_t value);
+
+  inline  ::uint8_t getInterfaceType();
+  inline void setInterfaceType( ::uint8_t value);
+
+  inline  ::uint8_t getRcsThreshold();
+  inline void setRcsThreshold( ::uint8_t value);
+
+  inline  ::uint8_t getCalibrationEnabled();
+  inline void setCalibrationEnabled( ::uint8_t value);
+
+  inline  ::uint16_t getNumObjects();
+  inline void setNumObjects( ::uint16_t value);
+
+  inline  ::uint32_t getMeasCount();
+  inline void setMeasCount( ::uint32_t value);
+
+  inline  ::uint8_t getInterfaceVersion();
+  inline void setInterfaceVersion( ::uint8_t value);
+
+  inline  ::uint16_t getObjectCount();
+  inline void setObjectCount( ::uint16_t value);
+
+  inline bool hasObjects();
+  inline  ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Builder getObjects();
+  inline void setObjects( ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Reader value);
+  inline  ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Builder initObjects(unsigned int size);
+  inline void adoptObjects(::capnp::Orphan< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>&& value);
+  inline ::capnp::Orphan< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>> disownObjects();
+
+  inline  ::uint64_t getLastUpdateMonoTime();
+  inline void setLastUpdateMonoTime( ::uint64_t value);
+
 private:
   ::capnp::_::StructBuilder _builder;
   template <typename, ::capnp::Kind>
@@ -1931,9 +2066,135 @@ private:
 };
 
 #if !CAPNP_LITE
-class CustomReserved10::Pipeline {
+class MR76State::Pipeline {
 public:
-  typedef CustomReserved10 Pipelines;
+  typedef MR76State Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class Target::Reader {
+public:
+  typedef Target Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline  ::uint8_t getId() const;
+
+  inline float getDistLong() const;
+
+  inline float getDistLat() const;
+
+  inline float getVRelLong() const;
+
+  inline float getVRelLat() const;
+
+  inline  ::uint8_t getDynProp() const;
+
+  inline  ::uint8_t getTargetClass() const;
+
+  inline float getRcs() const;
+
+  inline float getDistance() const;
+
+  inline  ::uint64_t getLastUpdateMonoTime() const;
+
+  inline  ::uint32_t getFrameCount() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class Target::Builder {
+public:
+  typedef Target Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline  ::uint8_t getId();
+  inline void setId( ::uint8_t value);
+
+  inline float getDistLong();
+  inline void setDistLong(float value);
+
+  inline float getDistLat();
+  inline void setDistLat(float value);
+
+  inline float getVRelLong();
+  inline void setVRelLong(float value);
+
+  inline float getVRelLat();
+  inline void setVRelLat(float value);
+
+  inline  ::uint8_t getDynProp();
+  inline void setDynProp( ::uint8_t value);
+
+  inline  ::uint8_t getTargetClass();
+  inline void setTargetClass( ::uint8_t value);
+
+  inline float getRcs();
+  inline void setRcs(float value);
+
+  inline float getDistance();
+  inline void setDistance(float value);
+
+  inline  ::uint64_t getLastUpdateMonoTime();
+  inline void setLastUpdateMonoTime( ::uint64_t value);
+
+  inline  ::uint32_t getFrameCount();
+  inline void setFrameCount( ::uint32_t value);
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class Target::Pipeline {
+public:
+  typedef Target Pipelines;
 
   inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
   inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
@@ -3438,6 +3699,502 @@ inline  ::int32_t AmapNavi::Builder::getRightBlind() {
 inline void AmapNavi::Builder::setRightBlind( ::int32_t value) {
   _builder.setDataField< ::int32_t>(
       ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::getValid() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+
+inline bool MR76State::Builder::getValid() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setValid(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::getRadarStateValid() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline bool MR76State::Builder::getRadarStateValid() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setRadarStateValid(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::getStatusValid() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline bool MR76State::Builder::getStatusValid() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setStatusValid(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::getObjectDataValid() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline bool MR76State::Builder::getObjectDataValid() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setObjectDataValid(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getNvmReadStatus() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getNvmReadStatus() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setNvmReadStatus( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getNvmWriteStatus() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getNvmWriteStatus() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setNvmWriteStatus( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline float MR76State::Reader::getMaxDistance() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline float MR76State::Builder::getMaxDistance() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setMaxDistance(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getRadarPower() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getRadarPower() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setRadarPower( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getSensorId() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<8>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getSensorId() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<8>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setSensorId( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<8>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getSortIndex() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getSortIndex() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setSortIndex( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getOutputType() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getOutputType() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setOutputType( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::getQualityInfo() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+
+inline bool MR76State::Builder::getQualityInfo() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setQualityInfo(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::getExtInfo() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+
+inline bool MR76State::Builder::getExtInfo() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setExtInfo(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getCanBaudRate() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getCanBaudRate() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setCanBaudRate( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getInterfaceType() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getInterfaceType() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setInterfaceType( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getRcsThreshold() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<13>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getRcsThreshold() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<13>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setRcsThreshold( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<13>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getCalibrationEnabled() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getCalibrationEnabled() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setCalibrationEnabled( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint16_t MR76State::Reader::getNumObjects() const {
+  return _reader.getDataField< ::uint16_t>(
+      ::capnp::bounded<8>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint16_t MR76State::Builder::getNumObjects() {
+  return _builder.getDataField< ::uint16_t>(
+      ::capnp::bounded<8>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setNumObjects( ::uint16_t value) {
+  _builder.setDataField< ::uint16_t>(
+      ::capnp::bounded<8>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint32_t MR76State::Reader::getMeasCount() const {
+  return _reader.getDataField< ::uint32_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint32_t MR76State::Builder::getMeasCount() {
+  return _builder.getDataField< ::uint32_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setMeasCount( ::uint32_t value) {
+  _builder.setDataField< ::uint32_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t MR76State::Reader::getInterfaceVersion() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<15>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t MR76State::Builder::getInterfaceVersion() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<15>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setInterfaceVersion( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<15>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint16_t MR76State::Reader::getObjectCount() const {
+  return _reader.getDataField< ::uint16_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint16_t MR76State::Builder::getObjectCount() {
+  return _builder.getDataField< ::uint16_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setObjectCount( ::uint16_t value) {
+  _builder.setDataField< ::uint16_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool MR76State::Reader::hasObjects() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool MR76State::Builder::hasObjects() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Reader MR76State::Reader::getObjects() const {
+  return ::capnp::_::PointerHelpers< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Builder MR76State::Builder::getObjects() {
+  return ::capnp::_::PointerHelpers< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void MR76State::Builder::setObjects( ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Reader value) {
+  ::capnp::_::PointerHelpers< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>::Builder MR76State::Builder::initObjects(unsigned int size) {
+  return ::capnp::_::PointerHelpers< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), size);
+}
+inline void MR76State::Builder::adoptObjects(
+    ::capnp::Orphan< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>&& value) {
+  ::capnp::_::PointerHelpers< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>> MR76State::Builder::disownObjects() {
+  return ::capnp::_::PointerHelpers< ::capnp::List< ::cereal::Target,  ::capnp::Kind::STRUCT>>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline  ::uint64_t MR76State::Reader::getLastUpdateMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t MR76State::Builder::getLastUpdateMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void MR76State::Builder::setLastUpdateMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t Target::Reader::getId() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t Target::Builder::getId() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setId( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS, value);
+}
+
+inline float Target::Reader::getDistLong() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline float Target::Builder::getDistLong() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setDistLong(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline float Target::Reader::getDistLat() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline float Target::Builder::getDistLat() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setDistLat(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline float Target::Reader::getVRelLong() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline float Target::Builder::getVRelLong() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setVRelLong(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline float Target::Reader::getVRelLat() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+
+inline float Target::Builder::getVRelLat() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setVRelLat(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t Target::Reader::getDynProp() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t Target::Builder::getDynProp() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setDynProp( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t Target::Reader::getTargetClass() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t Target::Builder::getTargetClass() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setTargetClass( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline float Target::Reader::getRcs() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+
+inline float Target::Builder::getRcs() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setRcs(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
+inline float Target::Reader::getDistance() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<6>() * ::capnp::ELEMENTS);
+}
+
+inline float Target::Builder::getDistance() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<6>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setDistance(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<6>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t Target::Reader::getLastUpdateMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t Target::Builder::getLastUpdateMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setLastUpdateMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint32_t Target::Reader::getFrameCount() const {
+  return _reader.getDataField< ::uint32_t>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint32_t Target::Builder::getFrameCount() {
+  return _builder.getDataField< ::uint32_t>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS);
+}
+inline void Target::Builder::setFrameCount( ::uint32_t value) {
+  _builder.setDataField< ::uint32_t>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS, value);
 }
 
 }  // namespace

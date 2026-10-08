@@ -1,2 +1,0 @@
-"""Mapd integration helpers."""
-

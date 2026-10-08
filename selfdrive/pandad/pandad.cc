@@ -4,6 +4,7 @@
 #include <array>
 #include <bitset>
 #include <cassert>
+#include <cstdio>
 #include <cerrno>
 #include <memory>
 #include <thread>
@@ -88,6 +89,8 @@ void can_send_thread(std::vector<Panda *> pandas, bool fake_send) {
 
   // run as fast as messages come in
   while (!do_exit && check_all_connected(pandas)) {
+    fprintf(stderr, "[PANDAD-TEST] ENTER main loop\n");
+    fflush(stderr);
     std::unique_ptr<Message> msg(subscriber->receive());
     if (!msg) {
       continue;
@@ -114,9 +117,44 @@ void can_recv(std::vector<Panda *> &pandas, PubMaster *pm) {
   {
     bool comms_healthy = true;
     raw_can_data.clear();
+
+    LOG("[PANDAD][CAN] can_recv ENTER pandas=%zu", pandas.size());
+
     for (const auto& panda : pandas) {
-      comms_healthy &= panda->can_receive(raw_can_data);
+      size_t before_count = raw_can_data.size();
+
+      uint64_t t_start = nanos_since_boot();
+
+      fprintf(stderr, "[PANDAD-CAN] BEFORE can_receive panda=%s\n",
+              panda->hw_serial().c_str());
+      fflush(stderr);
+
+      bool panda_ok = panda->can_receive(raw_can_data);
+
+      fprintf(stderr, "[PANDAD-CAN] AFTER can_receive panda=%s\n",
+              panda->hw_serial().c_str());
+      fflush(stderr);
+
+      uint64_t t_end = nanos_since_boot();
+
+      size_t received_count = raw_can_data.size() - before_count;
+
+      LOG(
+        "[PANDAD][CAN] panda=%s received=%zu elapsed_us=%" PRIu64 " healthy=%d",
+        panda->hw_serial().c_str(),
+        received_count,
+        (t_end - t_start) / 1000,
+        panda_ok
+      );
+
+      comms_healthy &= panda_ok;
     }
+
+    LOG(
+      "[PANDAD][CAN] publishing frames=%zu healthy=%d",
+      raw_can_data.size(),
+      comms_healthy
+    );
 
     MessageBuilder msg;
     auto evt = msg.initEvent();
@@ -417,6 +455,8 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control) 
 }
 
 void pandad_run(std::vector<Panda *> &pandas) {
+  fprintf(stderr, "[PANDAD-TEST] ENTER pandad_run pandas=%zu\n", pandas.size());
+  fflush(stderr);
   const bool no_fan_control = getenv("NO_FAN_CONTROL") != nullptr;
   const bool spoofing_started = getenv("STARTED") != nullptr;
   const bool fake_send = getenv("FAKESEND") != nullptr;
@@ -435,7 +475,13 @@ void pandad_run(std::vector<Panda *> &pandas) {
 
   // Main loop: receive CAN data and process states
   while (!do_exit && check_all_connected(pandas)) {
+    fprintf(stderr, "[PANDAD-TEST] BEFORE can_recv\n");
+    fflush(stderr);
+
     can_recv(pandas, &pm);
+
+    fprintf(stderr, "[PANDAD-TEST] AFTER can_recv\n");
+    fflush(stderr);
 
     // Process peripheral state at 20 Hz
     if (rk.frame() % 5 == 0) {

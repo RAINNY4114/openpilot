@@ -2639,14 +2639,14 @@ struct Event {
     dpControlsState @107 :Custom.DpControlsState;
     modelExt @108 :Custom.ModelExt;
     modelManagerSP @109 :Custom.ModelManagerSP;
-    amapNavi @110 :Custom.AmapNavi; #新加的导航和雷达消息
+    amapNavi @110 :Custom.AmapNavi; # ???      ?   ?
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;
     customReserved8 @115 :Custom.CustomReserved8;
     customReserved9 @116 :Custom.CustomReserved9;
-    customReserved10 @136 :Custom.CustomReserved10;
+    mr76State @136 :Custom.MR76State;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;

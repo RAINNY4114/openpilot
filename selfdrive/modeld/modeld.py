@@ -87,8 +87,8 @@ AUTO_LC_EDGE_PROB_MIN = 0.35
 
 # Auto-avoid trigger tightening: keep slowdown behavior, but avoid starting lane changes on weak/noisy detections.
 AVOID_CONE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_CONE_METRIC_MIN", "0.25"))
-AVOID_VEHICLE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN", "0.45"))
-AVOID_VEHICLE_METRIC_MIN_NO_LEAD = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN_NO_LEAD", "0.65"))
+AVOID_VEHICLE_METRIC_MIN = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN", "0.35"))
+AVOID_VEHICLE_METRIC_MIN_NO_LEAD = float(os.getenv("DP_LINCOLN_AVOID_VEHICLE_METRIC_MIN_NO_LEAD", "0.50"))
 AVOID_STOPPED_LEAD_SPEED_MS = float(os.getenv("DP_LINCOLN_AVOID_STOPPED_LEAD_SPEED_MS", "3.0"))
 
 

@@ -59,7 +59,6 @@ struct ModelManagerSP @0xf35cc4560bbf6ec2 {
       navigation @1;
       vision @2;
       policy @3;
-      offPolicy @4;
     }
   }
 
@@ -91,8 +90,8 @@ struct ModelManagerSP @0xf35cc4560bbf6ec2 {
 }
 
 struct AmapNavi @0xda96579883444c35 {
-        leftBlind @0 : Int32;
-        rightBlind @1 : Int32;
+	leftBlind @0 : Int32;
+	rightBlind @1 : Int32;
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {
@@ -113,7 +112,58 @@ struct CustomReserved8 @0xf416ec09499d9d19 {
 struct CustomReserved9 @0xa1680744031fdb2d {
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+struct MR76State @0xcb9fd56c7057593a {
+  valid @0 :Bool;
+
+  radarStateValid @1 :Bool;
+  statusValid @2 :Bool;
+  objectDataValid @3 :Bool;
+
+  nvmReadStatus @4 :UInt8;
+  nvmWriteStatus @5 :UInt8;
+
+  maxDistance @6 :Float32;
+  radarPower @7 :UInt8;
+  sensorId @8 :UInt8;
+  sortIndex @9 :UInt8;
+
+  outputType @10 :UInt8;
+  qualityInfo @11 :Bool;
+  extInfo @12 :Bool;
+
+  canBaudRate @13 :UInt8;
+  interfaceType @14 :UInt8;
+  rcsThreshold @15 :UInt8;
+  calibrationEnabled @16 :UInt8;
+
+  numObjects @17 :UInt16;
+  measCount @18 :UInt32;
+  interfaceVersion @19 :UInt8;
+
+  objectCount @20 :UInt16;
+
+  objects @21 :List(Target);
+
+  lastUpdateMonoTime @22 :UInt64;
+}
+
+struct Target {
+  id @0 :UInt8;
+
+  distLong @1 :Float32;
+  distLat @2 :Float32;
+
+  vRelLong @3 :Float32;
+  vRelLat @4 :Float32;
+
+  dynProp @5 :UInt8;
+  targetClass @6 :UInt8;
+
+  rcs @7 :Float32;
+  distance @8 :Float32;
+
+  lastUpdateMonoTime @9 :UInt64;
+  frameCount @10 :UInt32;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

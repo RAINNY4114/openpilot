@@ -22,6 +22,7 @@ static std::map<std::string, service> services = {
   { "pandaStates", {"pandaStates", true, 10.000000, 1}},
   { "peripheralState", {"peripheralState", true, 2.000000, 1}},
   { "radarState", {"radarState", true, 20.000000, 5}},
+  { "mr76State", {"mr76State", true, 20.000000, -1}},
   { "roadEncodeIdx", {"roadEncodeIdx", false, 20.000000, 1}},
   { "liveTracks", {"liveTracks", true, 20.000000, -1}},
   { "sendcan", {"sendcan", true, 100.000000, 139}},

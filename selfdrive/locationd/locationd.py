@@ -15,6 +15,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.locationd.helpers import rotate_std
 from openpilot.selfdrive.locationd.models.pose_kf import PoseKalman, States
 from openpilot.selfdrive.locationd.models.constants import ObservationKind, GENERATED_DIR
+from openpilot.system.sensord.imu import probe_lsm6ds3
 
 ACCEL_SANITY_CHECK = 100.0  # m/s^2
 ROTATION_SANITY_CHECK = 10.0  # rad/s
@@ -261,8 +262,11 @@ def main():
 
   pm = messaging.PubMaster(['livePose'])
   sm = messaging.SubMaster(['carState', 'liveCalibration', 'cameraOdometry'], poll='cameraOdometry')
+  imu_available, imu_probe_details = probe_lsm6ds3()
+  if not imu_available:
+    cloudlog.warning(f"locationd: no LSM6DS3 IMU detected, using camera odometry only: {imu_probe_details}")
   # separate sensor sockets for efficiency
-  sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']]
+  sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']] if imu_available else []
   sensor_alive, sensor_valid, sensor_recv_time = defaultdict(bool), defaultdict(bool), defaultdict(float)
 
   params = Params()
@@ -270,7 +274,9 @@ def main():
   estimator = LocationEstimator(DEBUG)
 
   filter_initialized = False
-  critcal_services = ["accelerometer", "gyroscope", "cameraOdometry"]
+  critcal_services = ["cameraOdometry"]
+  if imu_available:
+    critcal_services = ["accelerometer", "gyroscope"] + critcal_services
   observation_input_invalid = defaultdict(int)
 
   input_invalid_limit = {s: round(INPUT_INVALID_LIMIT * (SERVICE_LIST[s].frequency / 20.)) for s in critcal_services}
@@ -288,7 +294,10 @@ def main():
   while True:
     sm.update()
 
-    acc_msgs, gyro_msgs = (messaging.drain_sock(sock) for sock in sensor_sockets)
+    if imu_available:
+      acc_msgs, gyro_msgs = (messaging.drain_sock(sock) for sock in sensor_sockets)
+    else:
+      acc_msgs, gyro_msgs = [], []
 
     if filter_initialized:
       msgs = []
@@ -317,12 +326,17 @@ def main():
           elif res == HandleLogResult.SUCCESS:
             observation_input_invalid[which] *= input_invalid_decay[which]
     else:
-      filter_initialized = sm.all_checks() and sensor_all_checks(acc_msgs, gyro_msgs, sensor_valid, sensor_recv_time, sensor_alive, SIMULATION)
+      sensors_ready = True
+      if imu_available:
+        sensors_ready = sensor_all_checks(acc_msgs, gyro_msgs, sensor_valid, sensor_recv_time, sensor_alive, SIMULATION)
+      filter_initialized = sm.all_checks() and sensors_ready
 
     if sm.updated["cameraOdometry"]:
       critical_service_inputs_valid = all(observation_input_invalid[s] < input_invalid_threshold[s] for s in critcal_services)
       inputs_valid = sm.all_valid() and critical_service_inputs_valid
-      sensors_valid = sensor_all_checks(acc_msgs, gyro_msgs, sensor_valid, sensor_recv_time, sensor_alive, SIMULATION)
+      sensors_valid = True
+      if imu_available:
+        sensors_valid = sensor_all_checks(acc_msgs, gyro_msgs, sensor_valid, sensor_recv_time, sensor_alive, SIMULATION)
 
       msg = estimator.get_msg(sensors_valid, inputs_valid, filter_initialized)
       pm.send("livePose", msg)

@@ -1,12 +1,7 @@
-from __future__ import annotations
-
 import numpy as np
 import pyray as rl
-import time
 from cereal import car, log
 from msgq.visionipc import VisionStreamType
-from openpilot.common.params import Params
-from openpilot.selfdrive.modeld.cone_detections import decode_cone_detections
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import AlertRenderer
@@ -21,8 +16,6 @@ from openpilot.system.ui.widgets import Widget
 from openpilot.common.filter_simple import BounceFilter
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
-from openpilot.selfdrive.ui.onroad import augmented_road_view as det_hud
-from openpilot.selfdrive.ui.onroad.object_tracker import ObjectTracker
 from enum import IntEnum
 
 OpState = log.SelfdriveState.OpenpilotState
@@ -166,15 +159,6 @@ class AugmentedRoadView(CameraView):
                                        alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_MIDDLE)
 
     self._fade_texture = gui_app.texture("icons_mici/onroad/onroad_fade.png")
-    self._params = Params()
-
-    # Object detections (coned -> customReservedRawData0), shared with the big HUD path.
-    self._det_payload: dict | None = None
-    self._det_last_update_t = 0.0
-    self._det_img_w = 0
-    self._det_img_h = 0
-    self._det_tracker = ObjectTracker()
-    self._det_tracker_uses_sof_time = False
 
   def is_swiping_left(self) -> bool:
     """Check if currently swiping left (for scroller to disable)."""
@@ -242,7 +226,6 @@ class AugmentedRoadView(CameraView):
     if ui_state.started:
       self._alert_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
-    self._draw_object_detections(self._content_rect)
 
     # Draw fake rounded border
     rl.draw_rectangle_rounded_lines_ex(self._content_rect, 0.2 * 1.02, 10, 50, rl.BLACK)
@@ -357,182 +340,6 @@ class AugmentedRoadView(CameraView):
     self._model_renderer.set_transform(video_transform @ calib_transform)
 
     return self._cached_matrix
-
-  def _get_camera_dst_rect(self, rect: rl.Rectangle) -> rl.Rectangle | None:
-    if self.frame is None:
-      return None
-
-    transform = self._calc_frame_matrix(rect)
-    scale_x = rect.width * float(transform[0, 0])
-    scale_y = rect.height * float(transform[1, 1])
-
-    x_offset = rect.x + (rect.width - scale_x) / 2.0
-    y_offset = rect.y + (rect.height - scale_y) / 2.0
-    x_offset += float(transform[0, 2]) * rect.width / 2.0
-    y_offset += float(transform[1, 2]) * rect.height / 2.0
-
-    return rl.Rectangle(float(x_offset), float(y_offset), float(scale_x), float(scale_y))
-
-  def _draw_object_detections(self, rect: rl.Rectangle) -> None:
-    if not det_hud._det_features_enabled(self._params):
-      return
-
-    sm = ui_state.sm
-    det_t_s: float | None = None
-    if sm.updated.get("customReservedRawData0", False):
-      try:
-        raw = sm["customReservedRawData0"]
-        payload = decode_cone_detections(raw) if raw else None
-        if payload is not None:
-          self._det_payload = payload
-          self._det_last_update_t = time.monotonic()
-          det_ts_sof_ns = int(self._det_payload.get("timestampSof", 0) or 0)
-          if det_ts_sof_ns > 0:
-            det_t_s = float(det_ts_sof_ns) * 1e-9
-
-          img_w = int(self._det_payload.get("imgW", 0) or 0)
-          img_h = int(self._det_payload.get("imgH", 0) or 0)
-          if img_w > 0 and img_h > 0 and (img_w != self._det_img_w or img_h != self._det_img_h):
-            self._det_img_w = img_w
-            self._det_img_h = img_h
-            self._det_tracker.reset()
-
-          objs = det_hud._det_payload_objects(self._det_payload, prefer_refined=True)
-          if not det_hud.DET_DRAW_ALL:
-            objs = [o for o in objs if isinstance(o, dict) and int(o.get("c", -1)) in det_hud.DET_DRAW_CLASSES]
-          self._det_tracker_uses_sof_time = det_t_s is not None
-          self._det_tracker.update(objs=objs, now=det_t_s if det_t_s is not None else self._det_last_update_t)
-      except Exception:
-        self._det_payload = None
-        self._det_last_update_t = 0.0
-        self._det_img_w = 0
-        self._det_img_h = 0
-        self._det_tracker.reset()
-        self._det_tracker_uses_sof_time = False
-
-    if self._det_payload is None:
-      return
-
-    draw_now = time.monotonic()
-    if draw_now - self._det_last_update_t > det_hud.DET_STALE_TIMEOUT_S:
-      self._det_payload = None
-      self._det_img_w = 0
-      self._det_img_h = 0
-      self._det_tracker.reset()
-      self._det_tracker_uses_sof_time = False
-      return
-
-    cam_dst = self._get_camera_dst_rect(rect)
-    if cam_dst is None:
-      return
-
-    img_w = int(self._det_payload.get("imgW", 0) or 0)
-    img_h = int(self._det_payload.get("imgH", 0) or 0)
-    if img_w <= 0 or img_h <= 0:
-      return
-
-    focal_length_px = 0.0
-    try:
-      focal_length_px = float(self._det_payload.get("focalLengthPx", 0.0) or 0.0)
-    except Exception:
-      focal_length_px = 0.0
-
-    lane_left_x = np.empty((0,), dtype=np.float32)
-    lane_left_y = np.empty((0,), dtype=np.float32)
-    lane_right_x = np.empty((0,), dtype=np.float32)
-    lane_right_y = np.empty((0,), dtype=np.float32)
-    lane_lines_ok = False
-    try:
-      if sm.valid.get("modelV2", False):
-        model = sm["modelV2"]
-        lane_lines = getattr(model, "laneLines", [])
-        lane_probs = getattr(model, "laneLineProbs", [])
-        if len(lane_lines) >= 3 and len(lane_probs) >= 3:
-          if float(lane_probs[1]) >= det_hud.AUTO_LC_UI_LANE_LINE_PROB_MIN and float(lane_probs[2]) >= det_hud.AUTO_LC_UI_LANE_LINE_PROB_MIN:
-            lane_left_x = np.asarray(lane_lines[1].x, dtype=np.float32)
-            lane_left_y = np.asarray(lane_lines[1].y, dtype=np.float32)
-            lane_right_x = np.asarray(lane_lines[2].x, dtype=np.float32)
-            lane_right_y = np.asarray(lane_lines[2].y, dtype=np.float32)
-            if lane_left_x.size >= 2 and float(lane_left_x[0]) > float(lane_left_x[-1]):
-              lane_left_x = lane_left_x[::-1]
-              lane_left_y = lane_left_y[::-1]
-            if lane_right_x.size >= 2 and float(lane_right_x[0]) > float(lane_right_x[-1]):
-              lane_right_x = lane_right_x[::-1]
-              lane_right_y = lane_right_y[::-1]
-            lane_lines_ok = bool(lane_left_x.size >= 2 and lane_right_x.size >= 2 and
-                                 lane_left_x.size == lane_left_y.size and lane_right_x.size == lane_right_y.size)
-    except Exception:
-      lane_lines_ok = False
-
-    draw_t_s = draw_now
-    if self._det_tracker_uses_sof_time:
-      try:
-        frame_ts_sof_ns = int(getattr(self.frame, "timestamp_sof", 0) or 0) if self.frame is not None else 0
-        if frame_ts_sof_ns > 0:
-          draw_t_s = float(frame_ts_sof_ns) * 1e-9
-      except Exception:
-        draw_t_s = draw_now
-
-    tracks = self._det_tracker.get_tracked(now=draw_t_s)
-    if not tracks:
-      return
-
-    for o in tracks:
-      cls = int(o.cls)
-      x1 = float(max(0.0, min(float(img_w), o.x1)))
-      y1 = float(max(0.0, min(float(img_h), o.y1)))
-      x2 = float(max(0.0, min(float(img_w), o.x2)))
-      y2 = float(max(0.0, min(float(img_h), o.y2)))
-      if x2 <= x1 or y2 <= y1:
-        continue
-
-      lane_dir: int | None = None
-      obj_h_m = det_hud._det_obj_height_m(cls)
-      if focal_length_px > 1.0 and obj_h_m > 0.1 and lane_lines_ok:
-        h_px = float(max(1.0, y2 - y1))
-        dist_m = float(max(0.0, min(250.0, (float(focal_length_px) * float(obj_h_m)) / h_px)))
-        cx = 0.5 * (x1 + x2)
-        y_m = (float(cx) - float(img_w) * 0.5) * dist_m / max(float(focal_length_px), 1.0)
-        if np.isfinite(y_m):
-          y_left = det_hud._lane_y_at_x(lane_left_x, lane_left_y, dist_m)
-          y_right = det_hud._lane_y_at_x(lane_right_x, lane_right_y, dist_m)
-          if y_left is not None and y_right is not None:
-            left_boundary = min(float(y_left), float(y_right))
-            right_boundary = max(float(y_left), float(y_right))
-            margin = float(det_hud.AUTO_LC_UI_LANE_MARGIN_M)
-            if y_m < (left_boundary - margin):
-              lane_dir = 1
-            elif y_m > (right_boundary + margin):
-              lane_dir = -1
-            else:
-              lane_dir = 0
-
-      sx1 = cam_dst.x + (x1 / img_w) * cam_dst.width
-      sy1 = cam_dst.y + (y1 / img_h) * cam_dst.height
-      sx2 = cam_dst.x + (x2 / img_w) * cam_dst.width
-      sy2 = cam_dst.y + (y2 / img_h) * cam_dst.height
-      w = sx2 - sx1
-      h = sy2 - sy1
-      if w < 2.0 or h < 2.0:
-        continue
-
-      _, base_color = det_hud._det_label_and_color(cls, float(o.score))
-      min_dim = float(min(w, h))
-      thickness = int(max(1.0, min(4.0, min_dim / 90.0)))
-      fade = float(max(0.35, 1.0 - 0.14 * int(o.missed)))
-      color = rl.Color(base_color.r, base_color.g, base_color.b, int(base_color.a * fade))
-      box = rl.Rectangle(float(sx1), float(sy1), float(w), float(h))
-
-      if cls in det_hud.DET_VEHICLE_CLASS_IDS:
-        det_hud.AugmentedRoadView._draw_det_corner_box(box=box, thickness=float(thickness), color=color)
-        if lane_dir in (-1, 1):
-          det_hud.AugmentedRoadView._draw_det_lane_arrow(box=box, lane_dir=int(lane_dir), color=color)
-      elif cls == 0:
-        det_hud.AugmentedRoadView._draw_det_person_icon(box=box, thickness=float(thickness), color=color)
-      elif cls == 80:
-        det_hud.AugmentedRoadView._draw_det_cone_icon(box=box, thickness=float(thickness), color=color)
-      else:
-        rl.draw_rectangle_lines_ex(box, thickness, color)
 
 
 if __name__ == "__main__":

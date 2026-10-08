@@ -336,7 +336,7 @@ def create_button_msg(packer, bus: int, stock_values: dict, cancel=False, resume
 
   values.update({
     "CcAslButtnCnclPress": 1 if cancel else 0,      # CC cancel button
-    "CcAslButtnResPress": 1 if resume else 0,      # CC resume button
+    "CcAsllButtnResPress": 1 if resume else 0,      # CC resume button
     "TjaButtnOnOffPress": 1 if tja_toggle else 0,   # LCA/TJA toggle button
   })
 

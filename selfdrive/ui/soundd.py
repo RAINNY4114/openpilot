@@ -108,7 +108,7 @@ class Soundd:
     # dp lincoln auto-avoid chime (plays alert_chime.wav once when avoidance triggers)
     self._dp_auto_avoid_enabled = self._params.get_bool("dp_lincoln_auto_avoid")
     self._dp_auto_overtake_enabled = self._params.get_bool("dp_lincoln_auto_overtake")
-    self._dp_hazard_alert_enabled = self._dp_auto_avoid_enabled or self._params.get_bool("dp_lincoln_hazard_alert")
+    self._dp_hazard_alert_enabled = True
     self._dp_auto_avoid_last_param_check = 0.0
     self._dp_auto_avoid_prev_in_path = False
     self._dp_auto_avoid_last_det_t = 0.0
@@ -272,7 +272,7 @@ class Soundd:
     try:
       self._dp_auto_avoid_enabled = self._params.get_bool("dp_lincoln_auto_avoid")
       self._dp_auto_overtake_enabled = self._params.get_bool("dp_lincoln_auto_overtake")
-      self._dp_hazard_alert_enabled = self._dp_auto_avoid_enabled or self._params.get_bool("dp_lincoln_hazard_alert")
+      self._dp_hazard_alert_enabled = True
     except Exception:
       cloudlog.exception("Failed refreshing Lincoln auto-avoid params")
 

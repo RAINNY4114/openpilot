@@ -50,7 +50,7 @@ VEHICLE_AREA_MIN_FRAC = float(os.getenv("CONE_VEHICLE_AREA_MIN_FRAC", "0.010"))
 TWOWHEEL_AREA_MIN_FRAC = float(os.getenv("CONE_TWOWHEEL_AREA_MIN_FRAC", "0.006"))
 NMS_IOU_THRES = float(os.getenv("CONE_NMS_IOU", "0.45"))
 MAX_DET = int(os.getenv("CONE_MAX_DET", "64"))
-PUB_HZ = float(os.getenv("CONE_PUB_HZ", "20"))
+PUB_HZ = float(os.getenv("CONE_PUB_HZ", "10"))
 USE_ONNX = bool(int(os.getenv("CONE_USE_ONNX", "1")))
 
 # Optional edge-based bbox refinement (for visualization).
@@ -615,7 +615,7 @@ class ConeDetector:
 
 
 def main() -> None:
-  config_realtime_process(7, 5)
+  config_realtime_process(1, 3)
 
   pm = PubMaster(["customReservedRawData0"])
 
@@ -639,7 +639,7 @@ def main() -> None:
   # Debounce to reduce flicker (runs at PUB_HZ).
   cone_deb = _BoolDebouncer(on_cnt=2, off_cnt=3)
   person_deb = _BoolDebouncer(on_cnt=2, off_cnt=3)
-  vehicle_deb = _BoolDebouncer(on_cnt=2, off_cnt=3)
+  vehicle_deb = _BoolDebouncer(on_cnt=1, off_cnt=3)
   cone_metric_hold = 0.0
   person_metric_hold = 0.0
   vehicle_metric_hold = 0.0
@@ -741,7 +741,7 @@ def main() -> None:
       person_metric_hold = 0.0
     if not vehicle_in_path:
       vehicle_metric_hold = 0.0
-    obstacle_metric = max(cone_metric_hold, person_metric_hold, vehicle_metric_hold)
+    obstacle_metric = max(cone_metric_hold, vehicle_metric_hold)
     hazard_metric = max(person_metric_hold, vehicle_metric_hold)
 
     left_lane_haz_dist_m = 0.0
