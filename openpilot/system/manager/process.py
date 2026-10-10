@@ -71,6 +71,35 @@ class ManagerProcess(ABC):
   def start(self) -> None:
     pass
 
+  def _process_has_exited(self) -> bool:
+    """True when a Process object exists but its child has already exited."""
+    return self.proc is not None and self.proc.exitcode is not None
+
+  def _clear_exited_process(self) -> bool:
+    """Reap and drop a stale Process object whose child has exited.
+
+    The multiprocessing.Process object cannot be reused once the child is
+    gone, so it has to be discarded before a new child can be started.
+
+    Returns True when a dead Process object was cleared.
+
+    Without this, NativeProcess.start() / PythonProcess.start() return early
+    forever after a crash, because `self.proc is not None` stays true even
+    though the child is dead. That is what leaves processes such as
+    `micd` / `soundd` stuck at "not running" until the whole manager restarts.
+    """
+    if self.proc is None:
+      return False
+
+    exitcode = self.proc.exitcode
+    if exitcode is None:
+      return False
+
+    cloudlog.warning(f"{self.name} exited with {exitcode}, restarting")
+    self.proc = None
+    self.shutting_down = False
+    return True
+
   def stop(self, retry: bool = True, block: bool = True, sig: signal.Signals | None = None) -> int | None:
     if self.proc is None:
       return None
@@ -145,7 +174,12 @@ class NativeProcess(ManagerProcess):
       self.stop()
 
     if self.proc is not None:
-      return
+      # Child still alive -> nothing to do.
+      if not self._process_has_exited():
+        return
+      # Child exited but the Process object is still around; drop it so the
+      # process actually gets restarted instead of staying dead.
+      self._clear_exited_process()
 
     cwd = os.path.join(BASEDIR, self.cwd)
     cloudlog.info(f"starting process {self.name}")
@@ -169,7 +203,12 @@ class PythonProcess(ManagerProcess):
       self.stop()
 
     if self.proc is not None:
-      return
+      # Child still alive -> nothing to do.
+      if not self._process_has_exited():
+        return
+      # Child exited but the Process object is still around; drop it so the
+      # process actually gets restarted instead of staying dead.
+      self._clear_exited_process()
 
     cloudlog.info(f"starting python {self.module}")
     self.proc = Process(name=self.name, target=self.launcher, args=(self.module, self.name))
