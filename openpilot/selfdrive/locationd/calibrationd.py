@@ -268,7 +268,7 @@ def main() -> NoReturn:
   # 进而使 locationd 的 all_valid() 恒假 -> locationdTemporaryError (NO_ENTRY)。
   # 只放开 freq/valid 门，alive 检查保留（cameraOdometry 真死仍会判 False）。
   sm = messaging.SubMaster(['cameraOdometry', 'carState'], poll='cameraOdometry',
-                           ignore_avg_freq=['cameraOdometry'], ignore_valid=['cameraOdometry'])
+                           ignore_avg_freq=['cameraOdometry', 'carState'], ignore_valid=['cameraOdometry'])  # [CHX_LOCD_TICKRATE] carState 的 freq 是 tick 假象
 
   params_reader = Params()
   CP = messaging.log_from_bytes(params_reader.get("CarParams", block=True), car.CarParams)

@@ -249,7 +249,8 @@ def main():
   REPLAY = bool(int(os.getenv("REPLAY", "0")))
 
   pm = messaging.PubMaster(['vehicleParameters'])
-  sm = messaging.SubMaster(['deviceMotion', 'extrinsicsCalibration', 'carState'], poll='deviceMotion')
+  sm = messaging.SubMaster(['deviceMotion', 'extrinsicsCalibration', 'carState'], poll='deviceMotion',
+                           ignore_avg_freq=['deviceMotion', 'carState', 'extrinsicsCalibration'])  # [CHX_LOCD_TICKRATE] tick 假象
 
   params = Params()
   CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)

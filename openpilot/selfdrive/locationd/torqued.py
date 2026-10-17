@@ -258,7 +258,8 @@ def main(demo=False):
   DEBUG = bool(int(os.getenv("DEBUG", "0")))
 
   pm = messaging.PubMaster(['lateralTorqueParameters'])
-  sm = messaging.SubMaster(['carControl', 'carOutput', 'carState', 'extrinsicsCalibration', 'deviceMotion', 'lateralDelay'], poll='deviceMotion')
+  sm = messaging.SubMaster(['carControl', 'carOutput', 'carState', 'extrinsicsCalibration', 'deviceMotion', 'lateralDelay'], poll='deviceMotion',
+                           ignore_avg_freq=['deviceMotion', 'carState', 'extrinsicsCalibration'])  # [CHX_LOCD_TICKRATE] tick 假象
 
   params = Params()
   estimator = TorqueEstimator(messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams))

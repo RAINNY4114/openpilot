@@ -279,7 +279,7 @@ def main():
   # 仍含 cameraOdometry 的 20Hz+-20% 频率门，13Hz 时 KF 永不初始化
   # -> deviceMotion.valid 恒 False。
   sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'], poll='cameraOdometry',
-                           ignore_valid=['cameraOdometry'], ignore_avg_freq=['cameraOdometry'])
+                           ignore_valid=['cameraOdometry'], ignore_avg_freq=['cameraOdometry', 'carState', 'extrinsicsCalibration'])  # [CHX_LOCD_TICKRATE] tick 假象
   # separate sensor sockets for efficiency
   sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']]
   sensor_alive, sensor_valid, sensor_recv_time = defaultdict(bool), defaultdict(bool), defaultdict(float)
