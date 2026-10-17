@@ -275,8 +275,11 @@ def main():
   # 放开 cameraOdometry 的频率门：locationd 自身的逐观测时序/健全性检查
   # （_validate_timestamp/MAX_FILTER_REWIND_TIME、sanity check）仍生效，KF 完整性有保障。
   # 回滚：删 ignore_valid 参数，或还原 /data/locationd_backup/<ts>/。
+  # [CHX_LOCD_13HZ_FULL] 同时放开 freq 门：filter_initialized = sm.all_checks() 里
+  # 仍含 cameraOdometry 的 20Hz+-20% 频率门，13Hz 时 KF 永不初始化
+  # -> deviceMotion.valid 恒 False。
   sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'], poll='cameraOdometry',
-                           ignore_valid=['cameraOdometry'])
+                           ignore_valid=['cameraOdometry'], ignore_avg_freq=['cameraOdometry'])
   # separate sensor sockets for efficiency
   sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']]
   sensor_alive, sensor_valid, sensor_recv_time = defaultdict(bool), defaultdict(bool), defaultdict(float)

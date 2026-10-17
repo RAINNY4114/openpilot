@@ -177,7 +177,17 @@ def fill_model_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, 
 
 def fill_pose_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, np.ndarray],
                   vipc_frame_id: int, vipc_dropped_frames: int, timestamp_eof: int, extrinsics_calibration_seen: bool) -> None:
-  msg.valid = extrinsics_calibration_seen & (vipc_dropped_frames < 1)
+  # [CHX_POSE_FUSE_DROP 20261017] 掉帧时位姿仍覆盖完整时间跨度：trans/rot 是
+  # 「上一处理帧 -> 本帧」的相对运动，timestampEof 与上一次观测的时间戳间隔自洽，
+  # 几何上可直接融合。上游 `vipc_dropped_frames < 1` 是保守判据，在 eGPU 大模型
+  # ~13Hz 降级模式下会丢掉约一半位姿观测（route 39 实测 valid 383/791），
+  # 使 locationd 退化为纯 IMU 航位推算。
+  # 改为始终有效，但按掉帧数放大标准差，避免 KF 过度信任长间隔观测。
+  # 回滚：valid 改回 `extrinsics_calibration_seen & (vipc_dropped_frames < 1)`，
+  #       并删除 _drop / _std_scale 两行及下面 transStd/rotStd 的乘法。
+  _drop = max(0, min(int(vipc_dropped_frames), 10))
+  _std_scale = 1.0 + _drop
+  msg.valid = bool(extrinsics_calibration_seen)
   cameraOdometry = msg.cameraOdometry
 
   cameraOdometry.frameId = vipc_frame_id
@@ -187,7 +197,7 @@ def fill_pose_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, n
   cameraOdometry.rot = net_output_data['pose'][0,3:].tolist()
   cameraOdometry.wideFromDeviceEuler = net_output_data['wide_from_device_euler'][0,:].tolist()
   cameraOdometry.roadTransformTrans = net_output_data['road_transform'][0,:3].tolist()
-  cameraOdometry.transStd = net_output_data['pose_stds'][0,:3].tolist()
-  cameraOdometry.rotStd = net_output_data['pose_stds'][0,3:].tolist()
+  cameraOdometry.transStd = (np.asarray(net_output_data['pose_stds'][0,:3], dtype=np.float64) * _std_scale).tolist()
+  cameraOdometry.rotStd = (np.asarray(net_output_data['pose_stds'][0,3:], dtype=np.float64) * _std_scale).tolist()
   cameraOdometry.wideFromDeviceEulerStd = net_output_data['wide_from_device_euler_stds'][0,:].tolist()
   cameraOdometry.roadTransformTransStd = net_output_data['road_transform_stds'][0,:3].tolist()

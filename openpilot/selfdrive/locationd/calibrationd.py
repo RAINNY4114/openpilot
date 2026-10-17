@@ -263,7 +263,12 @@ def main() -> NoReturn:
   config_realtime_process([0, 1, 2, 3], 5)
 
   pm = messaging.PubMaster(['extrinsicsCalibration'])
-  sm = messaging.SubMaster(['cameraOdometry', 'carState'], poll='cameraOdometry')
+  # [CHX_LOCD_13HZ_FULL] cameraOdometry 由大模型每帧发布，eGPU 降级 ~13Hz 时
+  # valid/freq 双双为假。若在此处生效，extrinsicsCalibration.valid 会永久为 False,
+  # 进而使 locationd 的 all_valid() 恒假 -> locationdTemporaryError (NO_ENTRY)。
+  # 只放开 freq/valid 门，alive 检查保留（cameraOdometry 真死仍会判 False）。
+  sm = messaging.SubMaster(['cameraOdometry', 'carState'], poll='cameraOdometry',
+                           ignore_avg_freq=['cameraOdometry'], ignore_valid=['cameraOdometry'])
 
   params_reader = Params()
   CP = messaging.log_from_bytes(params_reader.get("CarParams", block=True), car.CarParams)
