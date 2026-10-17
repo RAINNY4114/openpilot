@@ -152,7 +152,10 @@ procs = [
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),
   PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=not PC),
-  PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=False),
+  # [UPDATER_RESTORE 20261017] 恢复系统更新功能：定制工作已推送 GitHub
+  # (ford-chestnut 分支 tip = 设备快照 86813af)，UpdaterTargetBranch 指向该分支，
+  # 更新器换入的内容与当前树一致，安全。回滚：改回 enabled=False。
+  PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=True),
   PythonProcess("uploader", "openpilot.system.loggerd.uploader", uploader_ready),
   PythonProcess("statsd", "openpilot.sunnypilot.system.statsd", always_run),
 

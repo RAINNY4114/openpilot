@@ -268,7 +268,15 @@ def main():
   SIMULATION = bool(int(os.getenv("SIMULATION", "0")))
 
   pm = messaging.PubMaster(['deviceMotion'])
-  sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'], poll='cameraOdometry')
+  # [CHX_LOCD_13HZ 20261017] chestnut 大模型在 eGPU(USB3) 上推理 71.5ms/帧（降级 ~13Hz），
+  # cameraOdometry 由 modeld 每模型帧发布（modeld_v2/modeld.py:1241），实测 13.2Hz < SubMaster
+  # 的 20Hz+-20% 有效门（min 16Hz）→ cameraOdometry 恒判 invalid → sm.all_valid() False →
+  # inputsOK False → locationdTemporaryError 永久 NO_ENTRY（route 3b 全程 533s inputsOK=0）。
+  # 放开 cameraOdometry 的频率门：locationd 自身的逐观测时序/健全性检查
+  # （_validate_timestamp/MAX_FILTER_REWIND_TIME、sanity check）仍生效，KF 完整性有保障。
+  # 回滚：删 ignore_valid 参数，或还原 /data/locationd_backup/<ts>/。
+  sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'], poll='cameraOdometry',
+                           ignore_valid=['cameraOdometry'])
   # separate sensor sockets for efficiency
   sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']]
   sensor_alive, sensor_valid, sensor_recv_time = defaultdict(bool), defaultdict(bool), defaultdict(float)

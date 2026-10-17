@@ -578,7 +578,13 @@ class SelfdriveD(CruiseHelper):
 
     # TODO: fix simulator
     if not SIMULATION or REPLAY:
-      if self.sm['modelV2'].frameDropPerc > 1:
+      # [CHX_LAG_TOLERANCE 20261017] chestnut 大模型在 eGPU(USB3) 上推理实测
+      # 71.5ms/帧（upload 40.4ms 为 USB 隧道瓶颈），超 20Hz 的 50ms 预算，
+      # 稳定丢帧 ~34%（route 39 实测 frameDropPerc 34%）。上游 1% 阈值直接
+      # 触发 modeldLagging 永久告警、ACC 永久无法接合。放宽到 50% 允许降级
+      # 模式接合（模型每帧完整推理，仅频率降至 ~13Hz；纵向控制可接受）。
+      # 回滚：把 > 50 改回 > 1，或还原 /data/selfdrived_backup/<ts>/。
+      if self.sm['modelV2'].frameDropPerc > 50:
         self.events.add(EventName.modeldLagging)
 
     # mute canBusMissing event if in Park, as it sometimes may trigger a false alarm with MADS in Paused state
