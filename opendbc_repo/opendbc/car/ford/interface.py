@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from opendbc.car import Bus, get_safety_config, structs
 from opendbc.car.carlog import carlog
@@ -17,7 +19,17 @@ class CarInterface(CarInterfaceBase):
   CarController = CarController
   RadarInterface = RadarInterface
 
-  DRIVABLE_GEARS = (structs.CarState.GearShifter.low, structs.CarState.GearShifter.manumatic)
+  # Gears in which openpilot may engage. `sport` is Ford's selector position 4
+  # ("Sport_DriveSport"). It must be listed here because car_events.py raises
+  # EventName.wrongGear for any gear that is neither `drive` nor in this tuple,
+  # and wrongGear carries a NO_ENTRY event ("Gear not D") that blocks cruise.
+  # Every other brand that can select a sport position declares it too
+  # (Hyundai `(sport, manumatic)`, VW, GM, Toyota, Honda).
+  DRIVABLE_GEARS = (
+    structs.CarState.GearShifter.low,
+    structs.CarState.GearShifter.manumatic,
+    structs.CarState.GearShifter.sport,
+  )
 
   @staticmethod
   def get_pid_accel_limits(CP, CP_SP, current_speed, cruise_speed):
@@ -46,22 +58,63 @@ class CarInterface(CarInterfaceBase):
       ret.radarDelay = 0.06
 
     CAN = CanBus(fingerprint=fingerprint)
-    cfgs = [get_safety_config(structs.CarParams.SafetyModel.ford)]
-    if CAN.main >= 4:
-      cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
+
+    # ========================================================================
+    # [C2_APA][路线A] 安全模式选择
+    #
+    # 路线 A 需要 panda 处于 allOutput, 才能发 0x3A8 ParkAid_Data。
+    # 读 /data/ford_params/dp_ford_apa_panda_alloutput: 1 -> allOutput
+    # 默认关闭 (文件不存在 -> 保持 ford), 保证行为与未打补丁时一致。
+    # ========================================================================
+    _apa_alloutput = False
+    try:
+      for _d in ("/data/ford_params", "/dev/shm/params", "/data/params/d"):
+        try:
+          with open(os.path.join(_d, "dp_ford_apa_panda_alloutput"), "r") as _f:
+            _apa_alloutput = int(float(_f.read().strip() or "0")) != 0
+          break
+        except (OSError, ValueError):
+          continue
+    except Exception:
+      _apa_alloutput = False
+
+    if _apa_alloutput:
+      cfgs = [get_safety_config(structs.CarParams.SafetyModel.allOutput)]
+    else:
+      cfgs = [get_safety_config(structs.CarParams.SafetyModel.ford)]
+      if CAN.main >= 4:
+        cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
     ret.safetyConfigs = cfgs
 
     ret.alphaLongitudinalAvailable = ret.radarUnavailable
     if alpha_long or not ret.radarUnavailable:
-      ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
+      if not _apa_alloutput:
+        ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
       ret.openpilotLongitudinalControl = True
 
     if ret.flags & FordFlags.CANFD:
-      ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.CANFD.value
+      if not _apa_alloutput:
+        ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.CANFD.value
 
-      # TRON (SecOC) platforms are not supported
+      # ======================================================================
+      # [C2_APA] SecOC dashcam 门控修复
+      #   移植来源: RAINNY4114/opendbc-sunnypilot 分支 `apa`
+      #             提交 b3a69f25 "apa: gate SecOC dashcam check on CANFD
+      #             (fixes Transit MK5 false dashcam)"
+      #
+      #   上游写法把 SecOC 检查提升为显式 CANFD 门控:
+      #       if ret.flags & FordFlags.CANFD and len(fingerprint[CAN.camera]):
+      #   原因: 非 CAN FD 车的 camera 总线上没有 0x3d6 (LateralMotionControl2)
+      #   与 0x186 (ACCDATA), `.get()` 返回 None, 而 `None != 8` 为真, 会把车
+      #   误判成 TRON/SecOC 平台并置 dashcamOnly。
+      #
+      #   我方此处已经嵌在 `if ret.flags & FordFlags.CANFD:` 之内, 因此内联的
+      #   CANFD 项恒为真 —— 保留它只为与上游逐字对齐, 便于后续合并; 语义等价,
+      #   对 FORD_EXPLORER_MK6 (非 CAN FD) 行为零变化。
+      # ======================================================================
+      # TRON (SecOC) platforms are not supported — CAN FD only
       # LateralMotionControl2, ACCDATA are 16 bytes on these platforms
-      if len(fingerprint[CAN.camera]):
+      if ret.flags & FordFlags.CANFD and len(fingerprint[CAN.camera]):
         if fingerprint[CAN.camera].get(0x3d6) != 8 or fingerprint[CAN.camera].get(0x186) != 8:
           carlog.error('dashcamOnly: SecOC is unsupported')
           ret.dashcamOnly = True

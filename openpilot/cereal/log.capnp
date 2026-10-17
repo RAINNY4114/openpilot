@@ -2643,6 +2643,9 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
+    # [FORD_PORT] carrot 外接雷达/激光雷达汇总消息（原 ford-chestnut 为 @153，
+    # 与上游新增的 chestnutGpuState @153 冲突，故改用空闲序号 @154）。
+    amapNavi @154 :Custom.AmapNavi;
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;

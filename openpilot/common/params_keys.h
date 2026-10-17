@@ -139,6 +139,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"UptimeOnroad", {PERSISTENT, FLOAT, "0.0"}},
     {"ChestnutActive", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, BOOL}},
     {"ChestnutLoading", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, BOOL}},
+    // [DEVICE_MERGE] 大模型链路正常但加载/运行失败（侧边栏显示 MODEL ERR）。modeld 在
+    // load_big 失败或运行期回退小模型时置 1，加载成功时 remove。
+    // 见 openpilot/sunnypilot/modeld_v2/modeld.py。
+    {"ChestnutModelError", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, BOOL}},
     {"Version", {PERSISTENT, STRING}},
 
     // --- sunnypilot params --- //
@@ -164,6 +168,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EnableCopyparty", {PERSISTENT | BACKUP, BOOL}},
     {"EnableGithubRunner", {PERSISTENT | BACKUP, BOOL}},
     {"GreenLightAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // [DEVICE_MERGE] 踩油门挂起纵向（gas_long_cancel.py）：踩下油门 -> 暂时取消 openpilot
+    // 纵向控制（CC.longActive 被压成 False），松开油门 GasLongCancelResumeMs 毫秒后自动恢复。
+    // 只作用于纵向，横向完全不受影响；被刹车 / 按键取消掉的纵向不会被本功能复活。
+    // 运行期热切换：改 /data/params/d/GasLongCancel（1 Hz 轮询生效，不用重启）。
+    {"GasLongCancel", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"GasLongCancelResumeMs", {PERSISTENT | BACKUP, INT, "0"}},
     {"GithubRunnerSufficientVoltage", {CLEAR_ON_MANAGER_START , BOOL}},
     {"HasAcceptedTermsSP", {PERSISTENT, STRING, "0"}},
     {"HideVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -295,4 +305,45 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TorqueParamsOverrideEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TorqueParamsOverrideFriction", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
     {"TorqueParamsOverrideLatAccelFactor", {PERSISTENT | BACKUP, FLOAT, "2.5"}},
+
+    // ------------------------------------------------------------------
+    // [FORD_PORT] 福特 / 林肯 定制参数
+    //
+    // 这些键**必须**登记在此表中。params.cc 会把本表编译进
+    // libparams_c.so，而 Params::clearAll() 会删除 /data/params/d 下
+    // 任何不在表中的文件（params.cc:217-220）。未登记的键会在
+    // manager 启动 / onroad / offroad / ignition-on 时被静默清除，
+    // 导致 dp_radar_loss_no_disable 与整套 AutoOvertake* 配置被重置。
+    // ------------------------------------------------------------------
+
+    // 弯道速度控制
+    {"dp_lincoln_curve_speed", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_curve_window_m", {PERSISTENT, INT, "130"}},
+    {"dp_lincoln_curve_k_enter", {PERSISTENT, INT, "4"}},
+    {"dp_lincoln_curve_decel", {PERSISTENT, INT, "-320"}},
+    {"dp_lincoln_osm_realtime_cruise", {PERSISTENT, BOOL, "0"}},
+    {"dp_lincoln_stop_distance_m", {PERSISTENT, INT, "4"}},
+
+    // 雷达 / MR76 / 激光雷达
+    {"dp_radar_loss_no_disable", {PERSISTENT, BOOL, "1"}},
+    {"dp_mr76_lane_enable", {PERSISTENT, BOOL, "0"}},
+    {"dp_mr76_log_enable", {PERSISTENT, BOOL, "0"}},
+    {"dp_amap_lidar_enable", {PERSISTENT, BOOL, "0"}},
+    {"dp_amap_lidar_mask", {PERSISTENT, INT, "5"}},
+
+    // 盲区语音警报
+    {"dp_bsm_voice_enabled", {PERSISTENT, BOOL, "1"}},
+    {"dp_bsm_voice_interval_sec", {PERSISTENT, INT, "3"}},
+    {"dp_bsm_voice_volume_pct", {PERSISTENT, INT, "100"}},
+
+    // 自动超车
+    {"AutoOvertakeEnabled", {PERSISTENT, BOOL, "1"}},
+    {"AutoOvertakeLanePref", {PERSISTENT, INT, "0"}},
+    {"AutoOvertakeConfirmSec", {PERSISTENT, FLOAT, "3.0"}},
+    {"AutoOvertakeMinCruiseKph", {PERSISTENT, FLOAT, "60.0"}},
+    {"AutoOvertakeLaneProbMin", {PERSISTENT, FLOAT, "0.0"}},
+
+    // 自动避让
+    {"AutoAvoidanceEnabled", {PERSISTENT, BOOL, "0"}},
+
 };

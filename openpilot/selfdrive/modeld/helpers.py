@@ -1,4 +1,5 @@
 import io
+import os
 import pickle
 import struct
 from pathlib import Path
@@ -35,6 +36,32 @@ def chestnut_present() -> bool:
   return False
 
 def chestnut_compiled() -> bool:
+  # 激活的 chestnut bundle 已下载齐备 -> 大模型本地可加载（tinygrad runner 读的就是它）
+  if _chestnut_bundle_local():
+    return True
+  # 回退：仓库内置的老 big_driving_* 路径（stock runner 用）
   path = modeld_pkl_path(chestnut=True)
   return (path.is_file() or Path(get_manifest_path(path)).is_file()) and all(
     (MODELS_DIR / f'big_driving_warp_{size}_tinygrad.pkl').is_file() for size in ('1344x760', '1928x1208'))
+
+
+def _chestnut_bundle_local() -> bool:
+  """只做 stat、不算 sha256 —— ui_state 每 ~5s 调一次 chestnut_compiled()，必须廉价。"""
+  try:
+    from openpilot.common.file_chunker import get_chunk_name
+    from openpilot.common.hardware.hw import Paths
+    from openpilot.sunnypilot.models.helpers import get_active_bundle
+    bundle = get_active_bundle(chestnut=True)
+    if bundle is None or not bundle.models:
+      return False
+    artifact = bundle.models[0].artifact
+    if not artifact.fileName:
+      return False
+    root = Paths.model_root()
+    num_chunks = len(artifact.chunks)
+    if num_chunks > 0:
+      return all(os.path.isfile(os.path.join(root, get_chunk_name(artifact.fileName, i, num_chunks)))
+                 for i in range(num_chunks))
+    return os.path.isfile(os.path.join(root, artifact.fileName))
+  except Exception:
+    return False

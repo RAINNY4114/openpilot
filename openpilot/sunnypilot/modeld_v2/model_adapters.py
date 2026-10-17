@@ -8,9 +8,11 @@ import codecs
 import math
 from pathlib import Path
 import pickle
+import time
 import numpy as np
 
 from openpilot.common.basedir import BASEDIR
+from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.modeld_v2.compile_modeld import (POLICY_INPUTS, derive_frame_skip,
                                                            make_split_input_queues, make_supercombo_input_queues)
 from openpilot.sunnypilot.modeld_v2.stock_dependencies import make_input_queues as stock_make_input_queues, nv12_copy_size
@@ -210,10 +212,49 @@ class NativeTinygradAdapter(BaseModelAdapter):
     for key in self.state_pairs:
       self.input_queues[key].assign(0).realize()
 
+  # [LAGFIX-E] run() 三段耗时诊断：upload / warp / policy。
+  # 每 100 帧（20Hz 下 5 s）汇总一次 avg/max，写 swaglog(cloudlog.info) 与
+  # /data/lagfix_prof.log。用实例属性累积，避免每帧做 I/O。
+  def _lf_diag(self, t0, t1, t2, t3):
+    try:
+      acc = getattr(self, '_lf_acc', None)
+      if acc is None:
+        acc = self._lf_acc = {'n': 0, 'u': 0.0, 'w': 0.0, 'p': 0.0, 'um': 0.0, 'wm': 0.0, 'pm': 0.0}
+      u = 1000.0 * (t1 - t0)
+      w = 1000.0 * (t2 - t1)
+      p = 1000.0 * (t3 - t2)
+      acc['n'] += 1
+      acc['u'] += u
+      acc['w'] += w
+      acc['p'] += p
+      acc['um'] = max(acc['um'], u)
+      acc['wm'] = max(acc['wm'], w)
+      acc['pm'] = max(acc['pm'], p)
+      if acc['n'] >= 100:
+        n = acc['n']
+        line = ('LAGFIX_PROF n=%d upload=%.2f/%.2f warp=%.2f/%.2f policy=%.2f/%.2f total_avg=%.2f ms'
+                % (n, acc['u'] / n, acc['um'], acc['w'] / n, acc['wm'], acc['p'] / n, acc['pm'],
+                   (acc['u'] + acc['w'] + acc['p']) / n))
+        self._lf_acc = {'n': 0, 'u': 0.0, 'w': 0.0, 'p': 0.0, 'um': 0.0, 'wm': 0.0, 'pm': 0.0}
+        cloudlog.info(line)
+        try:
+          with open('/data/lagfix_prof.log', 'a') as _f:
+            _f.write(line + '\n')
+        except Exception:
+          pass
+    except Exception:
+      pass
+
   def run(self):
+    # [LAGFIX-E] upload / warp / policy 三段计时
+    _lf_t0 = time.perf_counter()
     self.input_device.copy_from(self.input_host)
+    _lf_t1 = time.perf_counter()
     self.input_queues['new_img'] = self.run_warp(**self.warp_inputs)
+    _lf_t2 = time.perf_counter()
     self.run_model(output_buffers=self.outputs, **self.input_queues)
+    _lf_t3 = time.perf_counter()
+    self._lf_diag(_lf_t0, _lf_t1, _lf_t2, _lf_t3)
     return self.outputs['outputs']
 
 

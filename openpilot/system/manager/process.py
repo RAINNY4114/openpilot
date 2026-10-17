@@ -67,38 +67,20 @@ class ManagerProcess(ABC):
   name = ""
   shutting_down = False
 
+  # Restart this process when it dies. Off by default on purpose: most manager
+  # processes exit cleanly when they are done (for example `updated` calls
+  # exit(0) as soon as DisableUpdates is set), and restarting those would spin
+  # the manager in a tight loop. Only processes that are expected to stay
+  # alive and recover from a crash opt in.
+  restart_if_crash = False
+
   @abstractmethod
   def start(self) -> None:
     pass
 
-  def _process_has_exited(self) -> bool:
-    """True when a Process object exists but its child has already exited."""
-    return self.proc is not None and self.proc.exitcode is not None
-
-  def _clear_exited_process(self) -> bool:
-    """Reap and drop a stale Process object whose child has exited.
-
-    The multiprocessing.Process object cannot be reused once the child is
-    gone, so it has to be discarded before a new child can be started.
-
-    Returns True when a dead Process object was cleared.
-
-    Without this, NativeProcess.start() / PythonProcess.start() return early
-    forever after a crash, because `self.proc is not None` stays true even
-    though the child is dead. That is what leaves processes such as
-    `micd` / `soundd` stuck at "not running" until the whole manager restarts.
-    """
-    if self.proc is None:
-      return False
-
-    exitcode = self.proc.exitcode
-    if exitcode is None:
-      return False
-
-    cloudlog.warning(f"{self.name} exited with {exitcode}, restarting")
-    self.proc = None
-    self.shutting_down = False
-    return True
+  def restart(self) -> None:
+    self.stop(sig=signal.SIGKILL)
+    self.start()
 
   def stop(self, retry: bool = True, block: bool = True, sig: signal.Signals | None = None) -> int | None:
     if self.proc is None:
@@ -159,13 +141,14 @@ class ManagerProcess(ABC):
 
 
 class NativeProcess(ManagerProcess):
-  def __init__(self, name, cwd, cmdline, should_run, enabled=True, sigkill=False):
+  def __init__(self, name, cwd, cmdline, should_run, enabled=True, sigkill=False, restart_if_crash=False):
     self.name = name
     self.cwd = cwd
     self.cmdline = cmdline
     self.should_run = should_run
     self.enabled = enabled
     self.sigkill = sigkill
+    self.restart_if_crash = restart_if_crash
     self.launcher = nativelauncher
 
   def start(self) -> None:
@@ -174,12 +157,7 @@ class NativeProcess(ManagerProcess):
       self.stop()
 
     if self.proc is not None:
-      # Child still alive -> nothing to do.
-      if not self._process_has_exited():
-        return
-      # Child exited but the Process object is still around; drop it so the
-      # process actually gets restarted instead of staying dead.
-      self._clear_exited_process()
+      return
 
     cwd = os.path.join(BASEDIR, self.cwd)
     cloudlog.info(f"starting process {self.name}")
@@ -189,12 +167,13 @@ class NativeProcess(ManagerProcess):
 
 
 class PythonProcess(ManagerProcess):
-  def __init__(self, name, module, should_run, enabled=True, sigkill=False):
+  def __init__(self, name, module, should_run, enabled=True, sigkill=False, restart_if_crash=False):
     self.name = name
     self.module = module
     self.should_run = should_run
     self.enabled = enabled
     self.sigkill = sigkill
+    self.restart_if_crash = restart_if_crash
     self.launcher = launcher
 
   def start(self) -> None:
@@ -203,12 +182,7 @@ class PythonProcess(ManagerProcess):
       self.stop()
 
     if self.proc is not None:
-      # Child still alive -> nothing to do.
-      if not self._process_has_exited():
-        return
-      # Child exited but the Process object is still around; drop it so the
-      # process actually gets restarted instead of staying dead.
-      self._clear_exited_process()
+      return
 
     cloudlog.info(f"starting python {self.module}")
     self.proc = Process(name=self.name, target=self.launcher, args=(self.module, self.name))
@@ -267,6 +241,12 @@ def ensure_running(procs: ValuesView[ManagerProcess], started: bool, params: Par
   running = []
   for p in procs:
     if p.enabled and p.name not in not_run and p.should_run(started, params, CP):
+      # A process that opted in and is no longer alive has crashed; bring it
+      # back. Without this, a single crash leaves the process dead until the
+      # whole manager restarts.
+      if p.restart_if_crash and p.proc is not None and not p.proc.is_alive():
+        cloudlog.error(f'Restarting {p.name} (exitcode {p.proc.exitcode})')
+        p.restart()
       running.append(p)
     else:
       p.stop(block=False)

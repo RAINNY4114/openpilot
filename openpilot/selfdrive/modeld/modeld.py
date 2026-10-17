@@ -5,6 +5,8 @@ import ctypes
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
+# [DEVICE_MERGE] chestnut eGPU PPT 上限 (W)，见 launch_env.sh 的 AM_POWER_LIMIT
+os.environ.setdefault('AM_POWER_LIMIT', '100')
 from tinygrad.device import Buffer, Device
 from tinygrad.dtype import DType, dtypes
 from tinygrad.tensor import Tensor
@@ -118,6 +120,13 @@ class ChestnutGpuState:
     if self.big:
       for k, v in self.metrics.items():
         setattr(state, k, v)
+
+    # [LAGFIX-E] 每 10 s（sends%100==1，与上面读 SMU 指标同频）把 GPU 指标写 swaglog：
+    # gpuClockMhz / powerDrawW / powerLimitW / gpuUsagePercent 用于验证「掉频」假设。
+    # 注意 chestnutGpuState 的 should_log 由**预编译 loggerd** 内的 services.h 决定
+    # （本机无 SConstruct 无法重编）⇒ 只能走 swaglog，进不了 rlog。
+    if self.big and self.metrics and self.sends % 100 == 1:
+      cloudlog.info('LAGFIX_GPU ' + ' '.join('%s=%s' % (k, v) for k, v in self.metrics.items()))
 
     msg.valid = not self.big or (self.valid and bool(self.metrics))
     self.pm.send('chestnutGpuState', msg)
@@ -289,7 +298,22 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  # [FORD_PORT] 订阅 amapNavi（carrot 外接雷达/激光雷达汇总消息），与
+  # ford-chestnut 保持一致。
+  #
+  # ★ 与 ford-chestnut 的唯一差异（有意为之）：ford-chestnut 在这里把
+  #   DH.update() 改成 6 个位置参数、首个传 amapNavi，但
+  #   DesireHelper.update(self, carstate, lateral_active, lane_change_prob,
+  #   left_edge_detected=False, right_edge_detected=False,
+  #   auto_lane_change_direction=None, auto_confirm_delay_sec=None)
+  #   并不接受 amapNavi，实参会被整体错位并在 carstate.vEgo 处抛
+  #   AttributeError。该路径（is_stock_model 为真时才运行）在本车不会
+  #   被执行，所以上游一直没暴露。
+  #
+  #   自动超车 / 紧急避让 / 激光雷达融合全部接线在真正在跑的
+  #   sunnypilot/modeld_v2/modeld.py（modeld_tinygrad）里，本文件只保留
+  #   与上游一致的 DH.update 调用。
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay", "amapNavi"])
 
   publish_state = PublishState()
   params = Params()

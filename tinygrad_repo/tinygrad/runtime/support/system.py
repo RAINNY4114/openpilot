@@ -155,7 +155,13 @@ class _System:
     else: self.lock_fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
 
     try: fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError: raise RuntimeError(f"Failed to acquire lock file {name}. `sudo lsof {lock_name}` may help identify the process holding the lock.")
+    except OSError:
+      # [CHX_EGPU_LOCK] 抢锁失败必须关掉刚打开的 fd：否则 fd 泄漏、self.lock_fd 被覆盖，
+      # 之后所有重试都会撞到「自己泄漏出去的锁」而永久失败。
+      try: os.close(self.lock_fd)
+      except Exception: pass
+      self.lock_fd = None
+      raise RuntimeError(f"Failed to acquire lock file {name}. `sudo lsof {lock_name}` may help identify the process holding the lock.")
 
     return self.lock_fd
 
@@ -231,11 +237,22 @@ class USBPCIDevice(PCIDevice):
   def __init__(self, devpref:str, dev, pcibus):
     self.pcibus, self.peer_group = pcibus, f"USBPCIDevice_{pcibus}"
     self.lock_fd = System.flock_acquire(f"{devpref.lower()}_{pcibus.lower()}.lock")
-    usb = USB3(dev)
-    if DEBUG >= 1: print(f"am {self.pcibus}: product string: {usb.product!r}")
-    self.usb: CustomASM24Controller = CustomASM24Controller(usb)
-    self._bar_info = System.pci_setup_usb_bars(self.usb, gpu_bus=4, mem_base=0x10000000, pref_mem_base=(32 << 30))
-    self.sram = BumpAllocator(size=0x80000, wrap=False) # asm24 controller sram
+    try:
+      usb = USB3(dev)
+      if DEBUG >= 1: print(f"am {self.pcibus}: product string: {usb.product!r}")
+      self.usb: CustomASM24Controller = CustomASM24Controller(usb)
+      self._bar_info = System.pci_setup_usb_bars(self.usb, gpu_bus=4, mem_base=0x10000000, pref_mem_base=(32 << 30))
+      self.sram = BumpAllocator(size=0x80000, wrap=False) # asm24 controller sram
+    except BaseException:
+      # [CHX_EGPU_LOCK] 初始化中途失败（如 LTSSM 未就绪 / MMIO 超时）必须释放锁并关 fd，
+      # 否则锁泄漏，同进程内后续重试必然撞自己的锁。
+      try:
+        import fcntl as _fcntl
+        _fcntl.flock(self.lock_fd, _fcntl.LOCK_UN)
+        os.close(self.lock_fd)
+      except Exception: pass
+      self.lock_fd = None
+      raise
 
   def dma_view(self, ctrl_addr, size): return USBMMIOInterface(self.usb, ctrl_addr, size, fmt='B', pcimem=False)
   def alloc_sysmem(self, size:int, vaddr:int=0, contiguous:bool=False) -> tuple[MMIOInterface, list[int]]:

@@ -34,6 +34,62 @@ from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.con
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
+
+# ============================================================================
+# [FORD_PORT][P3] 雷达总线掉线容忍
+#
+# 与 opendbc/car/ford/radar_interface.py 中的同名辅助函数一致。opendbc 不得
+# 反向 import openpilot，所以这里重复这 20 行读取逻辑而不是共享。
+#
+# 本设备上的 libparams_c.so 是旧的（新键会抛 UnknownKeyName），因此直接读
+# 参数文件。热重载，且永不抛异常。
+# ============================================================================
+
+RADAR_LOSS_PARAM = "dp_radar_loss_no_disable"
+# [FORD_PORT][FORK_PARAM_DIR] /data/ford_params 是 fork 自有目录，**不在**
+# params 目录下，因此 Params::clearAll()（params.cc:208-224）永远不会删除它。
+# 本基线（staging-chestnut）的 libparams_c.so 是预编译产物，不认识这些
+# 自定义键，只把键登记在 params_keys.h 是不够的：clearAll() 会把
+# /data/params/d 下所有"不在 .so 编译进去的键表里"的文件 unlink 掉。
+# 所以自有目录必须排在候选列表最前面。
+RADAR_LOSS_PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
+_RADAR_LOSS_REFRESH_SEC = 2.0
+_RADAR_LOSS_LOG_SEC = 10.0
+
+_radar_loss_cache = {"t": -1e9, "v": False, "log_t": -1e9}
+
+
+def _radar_loss_no_disable():
+  """True 表示雷达总线 CAN 掉线时**不得**因此退出 openpilot。"""
+  now = time.monotonic()
+  if now - _radar_loss_cache["t"] < _RADAR_LOSS_REFRESH_SEC:
+    return _radar_loss_cache["v"]
+
+  val = False
+  for d in RADAR_LOSS_PARAM_DIRS:
+    try:
+      with open(os.path.join(d, RADAR_LOSS_PARAM), "r") as f:
+        raw = f.read().strip()
+    except Exception:
+      continue
+    if raw:
+      val = raw == "1" or raw.lower() == "true"
+      break
+
+  _radar_loss_cache["t"] = now
+  _radar_loss_cache["v"] = val
+  return val
+
+
+def _log_radar_loss_suppressed(reason):
+  """限频留痕，便于下次行车后核实。"""
+  now = time.monotonic()
+  if now - _radar_loss_cache["log_t"] < _RADAR_LOSS_LOG_SEC:
+    return
+  _radar_loss_cache["log_t"] = now
+  cloudlog.event("radar_loss_no_disable", reason=reason, error=False)
+
+
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
@@ -417,10 +473,26 @@ class SelfdriveD(CruiseHelper):
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
     if self.CP.openpilotLongitudinalControl:
+      # [FORD_PORT][P3] 雷达总线掉线容忍
+      #
+      # radarErrors.canError / radarUnavailableTemporary 由福特雷达接口在
+      # 专用雷达总线劣化时置位，二者都会映射为 NO_ENTRY 事件
+      # （IMMEDIATE_DISABLE / SOFT_DISABLE），导致 openpilot 退出且在总线恢复
+      # 前无法重新接管。
+      #
+      # radarFault 有意**不**放行：它代表真实的配置问题（例如 wrongConfig），
+      # 应当继续阻止接管。
+      radar_loss_tolerated = _radar_loss_no_disable()
       if self.sm['radarState'].radarErrors.canError:
-        self.events.add(EventName.canError)
+        if radar_loss_tolerated:
+          _log_radar_loss_suppressed("canError")
+        else:
+          self.events.add(EventName.canError)
       elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
-        self.events.add(EventName.radarTempUnavailable)
+        if radar_loss_tolerated:
+          _log_radar_loss_suppressed("radarUnavailableTemporary")
+        else:
+          self.events.add(EventName.radarTempUnavailable)
       elif any(self.sm['radarState'].radarErrors.to_dict().values()):
         self.events.add(EventName.radarFault)
     if CS.canTimeout:

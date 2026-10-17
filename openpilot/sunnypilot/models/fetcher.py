@@ -6,6 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import time
+import json
 import os
 import requests
 from requests.exceptions import (SSLError, RequestException, HTTPError)
@@ -146,6 +147,11 @@ class ModelFetcher:
     "chestnut": (MODEL_URL_CHESTNUT, "_Chestnut"),
   }
 
+  # [patch16] 本地清单优先（移植自 chx2025/openpilot@sp0920xl）。
+  # 上游会删除/重编模型文件，导致远端清单里的某条（例如 Cinque Terre V3）变成死链。
+  # 该文件存在时优先于远端 URL；删掉它即恢复走上游清单。
+  LOCAL_CHESTNUT_MANIFEST = "/data/openpilot/openpilot/sunnypilot/models/driving_models_chestnut_local.json"
+
   def __init__(self, params: Params):
     self.params = params
     self.model_parser = ModelParser()
@@ -168,6 +174,21 @@ class ModelFetcher:
     Returns None on transport errors. Raises on 404 and other fatal HTTP errors.
     """
     model_url, _ = self.MODEL_SOURCES[source]
+
+    # [patch16] prefer the local chestnut manifest when present
+    if source == "chestnut" and os.path.isfile(self.LOCAL_CHESTNUT_MANIFEST):
+      try:
+        with open(self.LOCAL_CHESTNUT_MANIFEST) as f:
+          local_data = json.load(f)
+        local_bundles = self.model_parser.parse_models(local_data)
+        if local_bundles:
+          self.model_caches[source].set(local_data)
+          cloudlog.debug(f"Using local chestnut manifest: {self.LOCAL_CHESTNUT_MANIFEST}")
+          return local_bundles
+        cloudlog.warning("Local chestnut manifest yielded no valid bundles; falling back to remote")
+      except Exception:
+        cloudlog.exception("Failed to load local chestnut manifest; falling back to remote")
+
     try:
       response = requests.get(model_url, timeout=10)
 

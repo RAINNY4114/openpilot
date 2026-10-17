@@ -15,6 +15,23 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import set_
 
 from openpilot.sunnypilot.sunnylink.statsd import STATSLOGSP
 
+import openpilot.system.sentry as sentry
+
+
+def log_fingerprint(CP: structs.CarParams) -> None:
+  """[FORD_PORT] 把识别到的车型上报给 sentry。
+
+  ford-chestnut 的 selfdrive/car/card.py 在 Car.__init__ 里会调用
+  `sunnypilot_interfaces.log_fingerprint(self.CP)`。SC 基线的本文件没有这个
+  函数（FC 的 interfaces.py 有），移植 card.py 时漏了，补回。
+  依赖 openpilot/system/sentry.py 的 capture_fingerprint(_mock)，两者均已随
+  本次移植带入。
+  """
+  if CP.carFingerprint == "MOCK":
+    sentry.capture_fingerprint_mock()
+  else:
+    sentry.capture_fingerprint(CP.carFingerprint, CP.brand)
+
 
 def _enforce_torque_lateral_control(CP: structs.CarParams, params: Params | None = None, enabled: bool = False) -> bool:
   if params is None:

@@ -1,3 +1,5 @@
+import os
+
 from opendbc.car import CanBusBase
 
 
@@ -16,6 +18,55 @@ class CanBus(CanBusBase):
   @property
   def camera(self) -> int:
     return self.offset + 2
+
+
+# ---------------------------------------------------------------------------
+# dp_ford: hot-reloadable Ford lateral signal tuning.
+#
+# These two signals are NOT validated by panda (see opendbc/safety/modes/ford.h
+# ford_tx_hook -- only LatCtl_D_Rq, LatCtlPath_An_Actl, LatCtlPathOffst_L_Actl
+# and LatCtlCurv_NoRate_Actl are checked), so they can be changed at runtime
+# without a panda firmware rebuild. Defaults reproduce the previous hard-coded
+# values exactly, so behaviour is unchanged until a parameter is set.
+#
+#   dp_ford_ramp_type      0=Slow (default), 1=Medium, 2=Fast, 3=Immediate
+#   dp_ford_precision_type 0=Comfortable, 1=Precise (default)
+#
+# Read with plain file I/O on purpose: these live outside params_keys.h, so
+# Params.get() would raise UnknownKeyName.
+# ---------------------------------------------------------------------------
+_DP_PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
+
+_DP_CACHE = {"ramp": None, "prec": None, "tick": 0}
+_DP_CACHE_TICKS = 400     # ~2 s at 20 Hz lateral rate (STEER_STEP=5 @ 100 Hz)
+
+
+def _dp_read_int(fname, default, lo, hi):
+  for d in _DP_PARAM_DIRS:
+    p = os.path.join(d, fname)
+    try:
+      with open(p, "r") as f:
+        raw = f.read().strip()
+    except (OSError, IOError):
+      continue
+    if not raw:
+      continue
+    try:
+      val = int(float(raw))
+    except ValueError:
+      continue
+    return max(lo, min(hi, val))
+  return default
+
+
+def _dp_tuning():
+  """Return (ramp_type, precision_type), cached for ~2 s."""
+  _DP_CACHE["tick"] += 1
+  if _DP_CACHE["ramp"] is None or _DP_CACHE["tick"] >= _DP_CACHE_TICKS:
+    _DP_CACHE["tick"] = 0
+    _DP_CACHE["ramp"] = _dp_read_int("dp_ford_ramp_type", 0, 0, 3)
+    _DP_CACHE["prec"] = _dp_read_int("dp_ford_precision_type", 1, 0, 3)
+  return _DP_CACHE["ramp"], _DP_CACHE["prec"]
 
 
 def calculate_lat_ctl2_checksum(mode: int, counter: int, dat: bytearray) -> int:
@@ -71,10 +122,10 @@ def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float
     "HandsOffCnfm_B_Rq": 0,                     # Unknown: 0=Inactive, 1=Active [0|1]
     "LatCtl_D_Rq": 1 if lat_active else 0,      # Mode: 0=None, 1=ContinuousPathFollowing, 2=InterventionLeft,
                                                 #       3=InterventionRight, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
-                                                #             Makes no difference with curvature control
-    "LatCtlPrecision_D_Rq": 1,                  # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
-                                                #            The stock system always uses comfortable
+    "LatCtlRampType_D_Rq": _dp_tuning()[0],     # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
+                                                #             dp_ford_ramp_type, default 0 (unchanged)
+    "LatCtlPrecision_D_Rq": _dp_tuning()[1],    # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+                                                #            dp_ford_precision_type, default 1 (unchanged)
     "LatCtlPathOffst_L_Actl": path_offset,      # Path offset [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # Path angle [-0.5|0.5235] radians
     "LatCtlCurv_NoRate_Actl": curvature_rate,   # Curvature rate [-0.001024|0.00102375] 1/meter^2
@@ -97,8 +148,8 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path
   values = {
     "LatCtl_D2_Rq": mode,                       # Mode: 0=None, 1=PathFollowingLimitedMode, 2=PathFollowingExtendedMode,
                                                 #       3=SafeRampOut, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
-    "LatCtlPrecision_D_Rq": 1,                  # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+    "LatCtlRampType_D_Rq": _dp_tuning()[0],     # dp_ford_ramp_type, default 0 (unchanged)
+    "LatCtlPrecision_D_Rq": _dp_tuning()[1],    # dp_ford_precision_type, default 1 (unchanged)
     "LatCtlPathOffst_L_Actl": path_offset,      # [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # [-0.5|0.5235] radians
     "LatCtlCurv_No_Actl": curvature,            # [-0.02|0.02094] 1/meter
@@ -115,7 +166,8 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path
   return packer.make_can_msg("LateralMotionControl2", CAN.main, values)
 
 
-def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: float, stopping: bool, brake_request, v_ego_kph: float):
+def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: float, stopping: bool, brake_request,
+                   v_ego_kph: float, acc_enabled: bool = True):
   """
   Creates a CAN message for the Ford ACC Command.
 
@@ -126,11 +178,21 @@ def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: fl
   """
   values = {
     "AccBrkTot_A_Rq": accel,                          # Brake total accel request: [-20|11.9449] m/s^2
-    "Cmbb_B_Enbl": 1 if long_active else 0,           # Enabled: 0=No, 1=Yes
+    # [FIX A1 / D17] Cmbb_B_Enbl 的语义是「ACC 控制器就绪/使能」，
+    # **不是**「纵向此刻正在控制」。实测原厂 IPMA 在 Standby(CcStat=3) 与
+    # Active(CcStat=5) 下**恒为 1**（3000/3000 帧，17 号文档 §3.1）。
+    # 用 long_active 驱动会在踩油门时（ET.OVERRIDE_LONGITUDINAL → longActive=False）
+    # 把使能位清零 → PCM 拒绝 resume 并在仪表弹错误提示。
+    "Cmbb_B_Enbl": 1 if acc_enabled else 0,           # Enabled: 0=No, 1=Yes
     "AccPrpl_A_Rq": gas,                              # Acceleration request: [-5|5.23] m/s^2
     # No observed acceleration seen from this signal alone. During stock system operation, it appears to
     # be the raw acceleration request (AccPrpl_A_Rq when positive, AccBrkTot_A_Rq when negative)
-    "AccPrpl_A_Pred": -5.0,                           # Acceleration request: [-5|5.23] m/s^2
+    # [FIX] ACC_PRED_REQUEST_CHANNEL
+    # Measured: the stock IPMA drives this car with AccPrpl_A_Rq pinned at
+    # -5.00 and the real bidirectional request on AccPrpl_A_Pred.  openpilot
+    # had it backwards, so the PCM applied no torque (braking, which uses
+    # AccBrkTot_A_Rq, kept working -- aEgo was +0.00 while cmd was 1.11).
+    "AccPrpl_A_Pred": gas,  # [FIX] ACC_PRED_REQUEST_CHANNEL
     "AccResumEnbl_B_Rq": 1 if long_active else 0,
     # No observed acceleration seen from this signal alone
     "AccVeh_V_Trg": v_ego_kph,                        # Target speed: [0|255] km/h
@@ -338,3 +400,118 @@ def create_button_msg(packer, bus: int, stock_values: dict, cancel=False, resume
     "TjaButtnOnOffPress": 1 if tja_toggle else 0,   # LCA/TJA toggle button
   })
   return packer.make_can_msg("Steering_Data_FD1", bus, values)
+
+
+# ===========================================================================
+# [C2_APA] Ford Active Park Assist (APA) steering command
+#
+# 移植来源: C2 (DragonPilot 0.8.1) fordcan.py create_steer_command()
+#   C2 原版:
+#       def create_steer_command(packer, angle_cmd, enabled, action, angleReq):
+#         values = {"ApaSys_D_Stat": action,
+#                   "EPASExtAngleStatReq": angleReq,
+#                   "ExtSteeringAngleReq2": angle_cmd}
+#         return packer.make_can_msg("ParkAid_Data", 2, values)
+#
+# 设备 DBC 实测 (ford_lincoln_base_pt.dbc BO_ 936) + CANPacker 往返验证:
+#   ExtSteeringAngleReq2 : 22|15@0+ (0.1,-1000)  -> raw = ((d[2]&0x7F)<<8)|d[3]
+#   EPASExtAngleStatReq  : 23|1@0+               -> d[2] bit7
+#   ApaSys_D_Stat        : 61|3@0+               -> d[7] bit3..5
+#
+# ⚠️ 总线路由: C2 硬编码 bus=2; 设备经 FINGERPRINTS 核对 0x3A8 在 main(0),
+#    且设备 carstate.py 用 cp (Bus.pt) 读 ParkAid_Data -> 用 CAN.main。
+# ===========================================================================
+
+APA_STEER_MSG_NAME = "ParkAid_Data"
+
+# ApaSys_D_Stat 取值 (设备 DBC VAL_ table)
+APA_STAT_NULL = 0            # Null
+APA_STAT_OFF = 1             # Off
+APA_STAT_ON = 2              # On
+APA_STAT_OVERSPEED = 3       # Overspeed
+APA_STAT_CANCELLED = 4       # ApaCancelled
+APA_STAT_NOT_ACCESSIBLE = 5  # NotAccessible
+APA_STAT_FINISHED = 6        # Finished
+APA_STAT_FAULTY = 7          # Faulty
+
+
+def create_apa_steer_msg(packer, CAN: CanBus, apa_stat: int,
+                         ext_angle_req: int, angle_deg: float,
+                         sapp_config: int = 0, sapp_chime: int = 0):
+  """创建 Ford APA 转向指令 (ParkAid_Data, 0x3A8)
+
+  Args:
+    packer:         CANPacker
+    CAN:            设备 fordcan.CanBus 对象
+    apa_stat:       ApaSys_D_Stat, 推荐 0/1/2
+    ext_angle_req:  EPASExtAngleStatReq, 0=NoRequest 1=Request
+    angle_deg:      ExtSteeringAngleReq2, 方向盘绝对角度 (deg)
+    sapp_config:    SAPPStatusCoding, PSCM 握手编码 (0/70/86/224/16)
+                    —— 见 apa_controller 的 SAPP 握手状态机
+    sapp_chime:     ApaChime_D_Rq, 0..7
+
+  Returns: packer 结果 (可直接 append 到 can_sends)
+  频率: 20Hz
+  """
+  values = {
+    "ApaSys_D_Stat": int(apa_stat),
+    "EPASExtAngleStatReq": int(ext_angle_req),
+    "ExtSteeringAngleReq2": float(angle_deg),
+    "SAPPStatusCoding": int(sapp_config) & 0xFF,
+    "ApaChime_D_Rq": int(sapp_chime) & 0x07,
+  }
+  return packer.make_can_msg(APA_STEER_MSG_NAME, CAN.main, values)
+
+
+def create_apa_steer_msg_raw(angle_deg: float, apa_stat: int = 2,
+                             ext_angle_req: int = 1,
+                             sapp_config: int = 0, sapp_chime: int = 0):
+  """不依赖 packer 的原始字节打包 (离线验证 / 单元测试)
+
+  位布局 (对照设备 DBC ford_lincoln_base_pt.dbc BO_ 936,
+  已用 CANPacker/CANParser 往返实测确认一致):
+
+    SAPPStatusCoding     :  7|8@0+   -> d[0]
+    ExtSteeringAngleReq2 : 22|15@0+  -> d[2] bit6..0 + d[3]
+    EPASExtAngleStatReq  : 23|1@0+   -> d[2] bit7
+    ApaChime_D_Rq        : 39|3@0+   -> d[4] bit7..5
+    ApaSys_D_Stat        : 61|3@0+   -> d[7] bit5..3
+
+  Returns: (0x3A8, bytes(8))
+  """
+  raw_angle = int(round((float(angle_deg) + 1000.0) / 0.1))
+  raw_angle = max(0, min(0x7FFF, raw_angle))   # 15 bit
+
+  data = bytearray(8)
+  data[0] = int(sapp_config) & 0xFF            # SAPPStatusCoding
+  data[2] = (raw_angle >> 8) & 0x7F            # raw 高 7 位
+  data[3] = raw_angle & 0xFF                   # raw 低 8 位
+  data[2] |= (int(ext_angle_req) & 0x01) << 7  # EPASExtAngleStatReq
+  data[4] = (int(sapp_chime) & 0x07) << 5      # ApaChime_D_Rq
+  data[7] = (int(apa_stat) & 0x07) << 3        # ApaSys_D_Stat
+
+  return 0x3A8, bytes(data)
+
+
+def apa_unpack_steer_msg(data):
+  """反解 ParkAid_Data 的 APA 三位 (与 panda ford.h 校验公式一致)
+
+  Returns: (angle_deg, ext_angle_req, apa_stat)
+  """
+  raw = ((data[2] & 0x7F) << 8) | data[3]
+  return raw * 0.1 - 1000.0, (data[2] >> 7) & 0x01, (data[7] >> 3) & 0x07
+
+
+def apa_unpack_steer_msg_full(data):
+  """反解 ParkAid_Data 的全部 APA 字段 (调试 / 影子日志用)
+
+  Returns: dict
+  """
+  raw = ((data[2] & 0x7F) << 8) | data[3]
+  return {
+    "ExtSteeringAngleReq2": raw * 0.1 - 1000.0,
+    "EPASExtAngleStatReq": (data[2] >> 7) & 0x01,
+    "ApaSys_D_Stat": (data[7] >> 3) & 0x07,
+    "SAPPStatusCoding": data[0],
+    "ApaChime_D_Rq": (data[4] >> 5) & 0x07,
+  }

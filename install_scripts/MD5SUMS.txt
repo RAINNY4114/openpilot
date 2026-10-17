@@ -1,0 +1,22 @@
+01f91db34e6ee9e6932b1d5e2d22f899 *openpilot-ford-chestnut-installable.tar.gz
+
+# 构建信息 / build info
+# 日期   : 2026-10-12
+# 提交   : 6fd4a9a3fb334dbaf9a074e08ab7e30dae46162f
+# 大小   : 947422597 bytes (903 MB)
+# 条目数 : 5046
+# 版本   : sunnypilot 2026.003.000 / AGNOS 19.7
+# SHA256 : fd3894837bd9d1ded38714b617ddb90f511f1feacf1ff37e9666fc19f5cdb13e
+#
+# 说明   : 归档顶层目录为 openpilot/，解压到 /data 即得 /data/openpilot/
+#          不含 .git；msgq / opendbc / rednose / teleoprtc / tinygrad
+#          五个符号链接由 install-ford-chestnut.sh 在部署时创建。
+#
+# 打包方式（勿改）:
+#   git -c core.autocrlf=false archive --format=tar --prefix=openpilot/ HEAD > base.tar
+#   tar -rf base.tar -C <repo> --transform='s|^|openpilot/|' -T pyclist.txt  # 44 个 .pyc
+#   gzip -6 -c base.tar > openpilot-ford-chestnut-installable.tar.gz
+#
+#   `-c core.autocrlf=false` 是必须的：本仓库 core.autocrlf=true，默认的
+#   `git archive` 也会把文本文件转成 CRLF，会导致 .sh 在设备上
+#   `bad interpreter` 无法启动。上一版（25fca3a）即因此报废。

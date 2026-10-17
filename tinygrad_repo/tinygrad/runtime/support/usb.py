@@ -134,14 +134,41 @@ class USB3:
       assert (sig, rtag, status) == (0x53425355, tag, 0)
 
 class CustomASM24Controller:
+  def _wait_link_up(self, timeout:float, interval:float=0.1) -> int:
+    # [CHX_EGPU_LINK] 轮询等待 PCIe 链路训练完成。
+    # 原实现上电后立刻复读，必然读到中间态(0x01/0x00)，导致 eGPU 永远起不来。
+    t0 = time.monotonic()
+    ltssm = self.read(0xB450, 1)[0]
+    while ltssm != 0x78 and time.monotonic() - t0 < timeout:
+      time.sleep(interval)
+      ltssm = self.read(0xB450, 1)[0]
+    return ltssm
+
   def __init__(self, usb:USB3):
     self.usb = usb
 
     # Custom firmware now boots with PCIe off. Power it on before probing the link.
+    # [CHX_EGPU_LINK] 1) 上电后轮询等待链路训练（不再只读一次）
+    #                 2) 仍不 up 说明停在「已上电但链路未训练」的卡死态，
+    #                    此时单纯再上电无效，必须断电重上电才能恢复。
     ltssm = self.read(0xB450, 1)[0]
-    if ltssm != 0x78: self.set_pcie_power(True)
-    ltssm = self.read(0xB450, 1)[0]
+    did_cycle = False
+    if ltssm != 0x78:
+      self.set_pcie_power(True)
+      ltssm = self._wait_link_up(3.0)
+      if ltssm != 0x78:
+        print(f"[usb] LTSSM=0x{ltssm:02X} after power-on, cycling PCIe power ...", flush=True)
+        self.set_pcie_power(False)
+        time.sleep(1.5)
+        self.set_pcie_power(True)
+        ltssm = self._wait_link_up(15.0)
+        did_cycle = True
     if ltssm != 0x78: raise RuntimeError(f"PCIe link not up (LTSSM=0x{ltssm:02X}), custom firmware not ready")
+    # [CHX_EGPU_LINK] 链路刚训练完就立刻访问 GPU MMIO 会 bulk IN 超时
+    # (实测 "bulk IN 0x81 failed: Operation timed out")，需要等 GPU 就绪。
+    settle = 3.0 if did_cycle else 0.5
+    if DEBUG >= 1: print(f"[usb] LTSSM=0x78, settling {settle}s before MMIO access", flush=True)
+    time.sleep(settle)
 
   def set_pcie_power(self, enabled:bool, timeout:int=10000): self.usb.control_write(0xF3, value=int(enabled), timeout=timeout)
 

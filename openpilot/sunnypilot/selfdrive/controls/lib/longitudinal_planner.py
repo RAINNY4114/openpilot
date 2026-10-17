@@ -89,6 +89,10 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.aTarget = float(self.output_a_target)
     longitudinalPlanSP.events = self.events_sp.to_msg()
 
+    # 弯道减速真实目标（HUD 直接读这两个字段，不再自己重算）
+    longitudinalPlanSP.curveSpeedTarget = float(getattr(self, 'curve_speed_target', 0.0))
+    longitudinalPlanSP.curveSpeedActive = bool(getattr(self, 'curve_speed_active', False))
+
     # Dynamic Experimental Control
     dec = longitudinalPlanSP.dec
     dec.state = DecState.blended if self.dec.mode() == 'blended' else DecState.acc

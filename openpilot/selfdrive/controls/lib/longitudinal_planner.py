@@ -16,6 +16,9 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+from openpilot.selfdrive.controls.lib.ford_curve_speed import FordCurveController, _read_param_bool_direct
+from openpilot.selfdrive.controls.lib.ford_curve_speed_fusion import FordCurveSpeedFusion
+from openpilot.common.params import Params
 
 A_CRUISE_MAX_VALS = [2.2, 1.6, 1.2, 0.9, 0.75, 0.62, 0.58, 0.50, 0.45,  0.40]
 A_CRUISE_MAX_BP = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
@@ -58,7 +61,7 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
 class LongitudinalPlanner(LongitudinalPlannerSP):
   def __init__(self, CP, CP_SP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
-    self.mpc = LongitudinalMpc(dt=dt)
+    self.mpc = LongitudinalMpc(dt=dt, CP=self.CP)
     LongitudinalPlannerSP.__init__(self, self.CP, CP_SP, self.mpc)
     self.fcw = False
     self.dt = dt
@@ -68,6 +71,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.a_cruise = init_a
     self.output_a_target = init_a
     self.output_should_stop = False
+
+    # Ford/Lincoln dynamic curve speed controller
+    self._ford_curve = FordCurveController(self.CP, dt)
+    self._curve_speed_fusion = FordCurveSpeedFusion()
+    self._params = Params()
+
+    # 对外发布的弯道减速真实值
+    # -> cereal: LongitudinalPlanSP.curveSpeedTarget / curveSpeedActive
+    self.curve_speed_target = 0.0
+    self.curve_speed_active = False
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -115,7 +128,38 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # Get new v_cruise and a_target from Smart Cruise Control and Speed Limit Assist
     v_cruise, self.output_a_target = LongitudinalPlannerSP.update_targets(self, sm, self.v_desired_filter.x, self.output_a_target, v_cruise)
 
+    # Ford/Lincoln dynamic curve speed control
+    map_turn_limit_active = False
+    map_a_target = 0.0
+    if getattr(self.CP, "brand", "") == "ford":
+      # 弯道减速：视觉(模型曲率) + 地图(OSM) 双源，**默认开启**。
+      # 参数文件存在时以文件为准（写 "0" 即可关闭）；文件缺失时用代码默认值兜底，
+      # 因为 manager 的 Params::clearAll() 会删掉所有未注册进已编译 params_keys.h 的 key。
+      lincoln_curve_speed = _read_param_bool_direct("dp_lincoln_curve_speed", default=True)
+      lincoln_osm_realtime_cruise = _read_param_bool_direct("dp_lincoln_osm_realtime_cruise", default=True)
+      v_cruise, map_turn_limit_active, map_a_target = self._ford_curve.update(
+        sm, v_ego, v_cruise, reset_state, long_control_off, sm['selfdriveState'].enabled,
+        lincoln_curve_speed=lincoln_curve_speed,
+        lincoln_osm_realtime_cruise=lincoln_osm_realtime_cruise)
+
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
+
+    # Ford curve speed fusion: vision + map predictive curve speed management
+    if hasattr(self, '_curve_speed_fusion') and self._curve_speed_fusion is not None:
+      try:
+        # 注意：SubMaster 没有 __contains__/__iter__，`'modelV2' in sm` 会退化成
+        # 旧式迭代 -> sm[0] -> KeyError(0)，且会被下面的 except 静默吞掉，
+        # 导致本段（FordCurveSpeedFusion）从未真正执行过。必须查 sm.data。
+        model_msg = sm['modelV2'] if 'modelV2' in sm.data else None
+        v_ego_f = float(sm['carState'].vEgo) if 'carState' in sm.data else 0.0
+        scc_vision = getattr(self, 'scc_vision', None)
+        scc_map = getattr(self, 'scc_map', None)
+        fusion_a_max = self._curve_speed_fusion.update(v_ego_f, model_msg, scc_vision=scc_vision, scc_map=scc_map)
+        if fusion_a_max is not None:
+          self.output_a_target = min(self.output_a_target, float(np.min(fusion_a_max)))
+      except Exception:
+        pass
+
     self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
 
@@ -153,6 +197,47 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+
+    # Apply Ford/Lincoln curve decel
+    if getattr(self.CP, "brand", "") == "ford":
+      curve_decel = self._ford_curve.get_curve_decel(long_control_off)
+      if curve_decel is not None:
+        self.output_a_target = min(self.output_a_target, curve_decel)
+      if map_turn_limit_active and not long_control_off and map_a_target < -1e-3:
+        self.output_a_target = min(self.output_a_target, float(map_a_target))
+
+      # --- 汇总"真正在起作用的弯道目标车速"，供 HUD 显示 ---
+      # 只发布此刻确实在施加约束的源；多个源同时有效时取最保守（最小）的那个。
+      # 注意：这里发布的是控制器自己的值，HUD 不再自己重算，显示与控制天然一致。
+      curve_target = 0.0
+      curve_active = False
+
+      # (a) FordCurveSpeedFusion（当前唯一默认开启的一条）
+      fusion = self._curve_speed_fusion
+      if fusion is not None and bool(getattr(fusion, "active", False)):
+        t = float(getattr(fusion, "target_speed_ms", 0.0) or 0.0)
+        if t > 0.1:
+          curve_target = t
+          curve_active = True
+
+      if not long_control_off:
+        # (b) FordCurveController 视觉腿（dp_lincoln_curve_speed，当前关闭）
+        fc_v = getattr(self._ford_curve, "curve_v_target", None)
+        if fc_v is not None and float(fc_v) > 0.1:
+          fc_v = float(fc_v)
+          curve_target = fc_v if curve_target <= 0.1 else min(curve_target, fc_v)
+          curve_active = True
+        # (c) FordCurveController 地图腿（dp_lincoln_osm_realtime_cruise，当前关闭）
+        if map_turn_limit_active and float(self._ford_curve.map_v_target) > 0.1:
+          mv = float(self._ford_curve.map_v_target)
+          curve_target = mv if curve_target <= 0.1 else min(curve_target, mv)
+          curve_active = True
+
+      self.curve_speed_target = float(curve_target)
+      self.curve_speed_active = bool(curve_active)
+    else:
+      self.curve_speed_target = 0.0
+      self.curve_speed_active = False
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 

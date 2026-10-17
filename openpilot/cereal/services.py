@@ -26,7 +26,7 @@ _services: dict[str, tuple] = {
   "temperatureSensor": (True, 2., 200),
   "deviceState": (True, 2., 1),
   "chestnutState": (True, 10., 1),
-  "chestnutGpuState": (False, 10.),
+  "chestnutGpuState": (True, 10.),  # [LAGFIX-E] 记录 GPU 时钟/功耗；需重编 loggerd 才进 rlog（本机改走 swaglog）
   "touch": (True, 20., 1),
   "can": (True, 100., 2053, QueueSize.BIG),  # decimation gives ~3 msgs in a full segment
   "controlsState": (True, 100., 10, QueueSize.MEDIUM),
@@ -94,6 +94,8 @@ _services: dict[str, tuple] = {
   "liveMapDataSP": (True, 1., 1),
   "modelDataV2SP": (True, 20., None, QueueSize.BIG),
   "liveLocationKalman": (True, 20.),
+  # [FORD_PORT] carrot 外接雷达/激光雷达汇总（amap_navi 进程发布）
+  "amapNavi": (True, 0.),
 
   # debug
   "uiDebug": (True, 0., 1),

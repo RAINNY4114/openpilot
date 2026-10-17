@@ -23,6 +23,17 @@ from openpilot.sunnypilot.models.helpers import (ACTIVE_BUNDLE_KEYS, get_active_
 # (connect, read) seconds. read is per-request inactivity, not a total cap
 DOWNLOAD_TIMEOUT = (30, 30)
 
+# Network resilience. A bundle is up to ~1.7 GB spread over ~38 sequential 45 MB
+# chunks straight from huggingface.co, so a single dropped connection must never
+# cost the bytes that already made it to disk:
+#   * every request retries in place, resuming the partial file with a Range request
+#   * a failed attempt keeps its chunks on disk, so the next pass only fetches
+#     what is still missing instead of restarting the whole bundle
+CHUNK_ATTEMPTS = 6         # per-file attempts before the failure bubbles up
+CHUNK_RETRY_BACKOFF = 3.0  # seconds, grows linearly per attempt
+RETRY_BACKOFF_BASE = 30.0  # seconds before the bundle download is auto-restarted
+RETRY_BACKOFF_MAX = 900.0  # cap on that auto-restart delay
+
 
 class DownloadCancelled(Exception):
   pass
@@ -44,6 +55,8 @@ class ModelManagerSP:
     self._chunk_size = 128 * 1000  # 128 KB chunks
     self._download_start_times: dict[str, float] = {}  # Track start time per model
     self._download_ref: bytes | str | None = None
+    self._retry_not_before = 0.0  # auto-restart gate, so a dead link is not hammered
+    self._failure_streak = 0
 
   def _download_interrupted(self) -> bool:
     # only removal cancels: a different ref is a queued selection that
@@ -81,30 +94,86 @@ class ModelManagerSP:
 
     return max(1, int(eta))  # Return at least 1 second if download is ongoing
 
+  @staticmethod
+  def _remote_total_size(response, resume_from: int) -> int:
+    """Total size of the resource being fetched.
+
+    With a Range request content-length only covers the remainder, so prefer the
+    denominator of content-range ("bytes 100-999/47185920").
+    """
+    content_range = response.headers.get("content-range", "")
+    if "/" in content_range:
+      try:
+        return int(content_range.rsplit("/", 1)[1])
+      except ValueError:
+        pass
+    return int(response.headers.get("content-length", 0)) + resume_from
+
+  def _download_with_resume(self, session, url: str, path: str, on_progress) -> None:
+    """Stream `url` into `path`, picking up from a partial file where supported.
+
+    Each attempt asks for `Range: bytes=<current size>-` and appends, so a dropped
+    connection only costs the bytes that never arrived. Falls back to a clean write
+    when the server ignores Range, and restarts the file when it reports 416 (the
+    local copy is already at/over the remote length but failed verification).
+    `on_progress(bytes_done, total_bytes)` is called as data lands.
+    """
+    for attempt in range(CHUNK_ATTEMPTS):
+      resume_from = os.path.getsize(path) if os.path.isfile(path) else 0  # noqa: ASYNC240
+      headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else {}
+      try:
+        with session.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT, headers=headers) as response:
+          if response.status_code == 416:
+            if os.path.isfile(path):  # noqa: ASYNC240
+              os.remove(path)
+            raise requests.exceptions.ChunkedEncodingError("range not satisfiable, restarting file")
+          response.raise_for_status()
+          if resume_from > 0 and response.status_code != 206:
+            resume_from = 0  # server ignored Range, write from the start
+
+          total_size = self._remote_total_size(response, resume_from)
+          if resume_from > 0:
+            cloudlog.info(f"[ModelDL] resuming {os.path.basename(path)} at {resume_from} of {total_size} bytes")
+          bytes_downloaded = resume_from
+          with open(path, 'ab' if resume_from > 0 else 'wb') as f:  # noqa: ASYNC230
+            for chunk in response.iter_content(chunk_size=self._chunk_size):
+              f.write(chunk)
+              bytes_downloaded += len(chunk)
+
+              if self._download_interrupted():
+                raise DownloadCancelled("Download cancelled")
+
+              on_progress(bytes_downloaded, total_size)
+
+        if total_size > 0 and bytes_downloaded < total_size:
+          raise requests.exceptions.ChunkedEncodingError(
+            f"short read: {bytes_downloaded} of {total_size} bytes")
+        return
+      except DownloadCancelled:
+        raise
+      except Exception as e:
+        if attempt + 1 >= CHUNK_ATTEMPTS:
+          raise
+        delay = CHUNK_RETRY_BACKOFF * (attempt + 1)
+        cloudlog.error(f"[ModelDL] {os.path.basename(path)} attempt {attempt + 1}/{CHUNK_ATTEMPTS} failed "
+                       f"({type(e).__name__}: {str(e)[:80]}), resuming in {delay:.0f}s")
+        time.sleep(delay)
+
   async def _download_file(self, url: str, path: str, model) -> None:
     """Downloads a file with progress tracking"""
-    self._download_start_times[model.fileName] = time.monotonic()
+    self._download_start_times.setdefault(model.fileName, time.monotonic())
 
-    with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:  # noqa: ASYNC210
-      response.raise_for_status()
-      total_size = int(response.headers.get("content-length", 0))
-      bytes_downloaded = 0
+    def on_progress(bytes_downloaded: int, total_size: int) -> None:
+      if total_size > 0:
+        progress = (bytes_downloaded / total_size) * 100
+        model.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
+        model.downloadProgress.progress = progress
+        model.downloadProgress.eta = self._calculate_eta(model.fileName, progress)
+        self._sync_artifact_progress(model)
+        self._report_status()
 
-      with open(path, 'wb') as f:  # noqa: ASYNC230
-        for chunk in response.iter_content(chunk_size=self._chunk_size):  # type: bytes
-          f.write(chunk)
-          bytes_downloaded += len(chunk)
-
-          if self._download_interrupted():
-            raise DownloadCancelled("Download cancelled")
-
-          if total_size > 0:
-            progress = (bytes_downloaded / total_size) * 100
-            model.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
-            model.downloadProgress.progress = progress
-            model.downloadProgress.eta = self._calculate_eta(model.fileName, progress)
-            self._sync_artifact_progress(model)
-            self._report_status()
+    with requests.Session() as session:  # noqa: ASYNC210
+      self._download_with_resume(session, url, path, on_progress)
 
     # Clean up start time after download completes
     del self._download_start_times[model.fileName]
@@ -117,7 +186,7 @@ class ModelManagerSP:
       raise ValueError("No chunks defined in artifact")
 
     manifest_path = get_manifest_path(base_path)
-    self._download_start_times[artifact.fileName] = time.monotonic()
+    self._download_start_times.setdefault(artifact.fileName, time.monotonic())
 
     # Shared connection saves a TCP+TLS handshake per chunk.
     # Keep sequential: the link saturates on one stream and Session is not thread-safe.
@@ -128,23 +197,20 @@ class ModelManagerSP:
           continue
         chunk_url = get_chunk_name(base_url, i, num_chunks)
         chunk_path = get_chunk_name(base_path, i, num_chunks)
-        chunk_downloaded = 0
-        with session.get(chunk_url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
-          response.raise_for_status()
-          chunk_size = int(response.headers.get("content-length", 0))
-          with open(chunk_path, 'wb') as f:  # noqa: ASYNC230
-            for data in response.iter_content(chunk_size=self._chunk_size):
-              f.write(data)
-              chunk_downloaded += len(data)
-              if self._download_interrupted():
-                raise DownloadCancelled("Download cancelled")
-              intra = chunk_downloaded / max(chunk_size, 1)
-              progress = min(99.0, ((completed + intra) / num_chunks) * 100)
-              artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
-              artifact.downloadProgress.progress = progress
-              artifact.downloadProgress.eta = self._calculate_eta(artifact.fileName, progress)
-              self._sync_artifact_progress(artifact)
-              self._report_status()
+
+        def on_progress(bytes_downloaded: int, total_size: int) -> None:
+          intra = bytes_downloaded / max(total_size, 1)
+          progress = min(99.0, ((completed + intra) / num_chunks) * 100)
+          artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
+          artifact.downloadProgress.progress = progress
+          artifact.downloadProgress.eta = self._calculate_eta(artifact.fileName, progress)
+          self._sync_artifact_progress(artifact)
+          self._report_status()
+
+        chunk_before = os.path.getsize(chunk_path) if os.path.isfile(chunk_path) else 0  # noqa: ASYNC240
+        self._download_with_resume(session, chunk_url, chunk_path, on_progress)
+        cloudlog.info(f"[ModelDL] {artifact.fileName} chunk {i + 1}/{num_chunks} ok"
+                      + (f" (resumed from {chunk_before} bytes)" if chunk_before else ""))
         completed += 1
 
     with open(manifest_path, 'w') as f:  # noqa: ASYNC230
@@ -160,6 +226,8 @@ class ModelManagerSP:
       raise DownloadCancelled("Download cancelled")
 
     url = artifact.downloadUri.uri
+    # [CN-MIRROR] huggingface.co 在国内不可达 -> 改走 hf-mirror.com 镜像
+    url = url.replace('https://huggingface.co/', 'https://hf-mirror.com/')
     expected_hash = artifact.downloadUri.sha256
     filename = artifact.fileName
     full_path = os.path.join(destination_path, filename)
@@ -225,16 +293,16 @@ class ModelManagerSP:
 
     except Exception as e:
       cloudlog.error(f"Error downloading {filename}: {str(e)}")
-      for f in [full_path] + [p for p in (os.path.join(destination_path, f) for f in os.listdir(destination_path)) if filename in p]:
-        if os.path.isfile(f):  # noqa: ASYNC240
-          os.remove(f)
+      # Deliberately keep the files that are already on disk. Chunks that passed
+      # verification are skipped on the next pass and partial ones resume with a
+      # Range request, so a dropped connection no longer throws away the whole
+      # bundle and starts over from chunk 1.
       artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.failed
       artifact.downloadProgress.eta = 0
       self._sync_artifact_progress(artifact)
       if self.selected_bundle:
         self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
       self._report_status()
-      self._download_start_times.pop(artifact.fileName, None)
       raise
 
   async def _process_model(self, model, destination_path: str) -> None:
@@ -309,8 +377,17 @@ class ModelManagerSP:
       self._download_ref = ref_to_download
       try:
         self.download(model_to_download, Paths.model_root(), source)
+        self._failure_streak = 0
+        self._retry_not_before = 0.0
       except Exception as e:
         cloudlog.exception(e)
+        # Back off before the auto-restart in main_thread re-queues the ref: on a dead
+        # link every attempt fails instantly, which would otherwise retry (and log)
+        # once per second forever. A manual selection bypasses this gate.
+        self._failure_streak += 1
+        delay = min(RETRY_BACKOFF_BASE * (2 ** (self._failure_streak - 1)), RETRY_BACKOFF_MAX)
+        self._retry_not_before = time.monotonic() + delay
+        cloudlog.error(f"[ModelDL] download failed {self._failure_streak}x, next auto-retry in {delay:.0f}s")
       finally:
         self._release_download_ref()
         self.selected_bundle = None
@@ -329,9 +406,11 @@ class ModelManagerSP:
         self.active_bundle = get_active_bundle(self.params, chestnut=self.chestnut_present)
 
         if get_selected_bundle(self.params, "chestnut") is not None and get_selected_bundle(self.params, "qcom") is None:
-          if self.params.get("ModelManager_DownloadRef") is None:
+          # time gate keeps a failing download from being re-queued every single tick
+          if self.params.get("ModelManager_DownloadRef") is None and time.monotonic() >= self._retry_not_before:
             from openpilot.sunnypilot.models.model_name import DEFAULT_MODEL_REF
-            self.params.put("ModelManager_DownloadRef", DEFAULT_MODEL_REF)
+            if DEFAULT_MODEL_REF:
+              self.params.put("ModelManager_DownloadRef", DEFAULT_MODEL_REF)
 
         self._process_download_requests()
 

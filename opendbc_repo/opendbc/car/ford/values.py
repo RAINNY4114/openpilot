@@ -35,6 +35,28 @@ class CarControllerParams:
   MIN_GAS = -0.5
   INACTIVE_GAS = -5.0
 
+  # ==========================================================================
+  # [C2_APA] Active Park Assist —— 速度调度角度 / 速率限制表
+  #
+  # 移植来源: RAINNY4114/opendbc-sunnypilot 分支 `apa`
+  #          (上游注释标注: values from phoenixpilot 0.8.0)
+  #
+  #   APA_ANGLE_MAX_*   : 目标方向盘角的车速调度上限
+  #   APA_ANGLE_DELTA_* : 每 20ms(即 50Hz 基准帧) 允许的角度变化
+  #       V  = windup  (同向且 |target| > |last|, 角度继续增大)
+  #       VU = unwind  (其余情形, 角度回中 / 反向)
+  #
+  # ⚠️ 表值以 **20ms 帧** 为基准。实际发送周期不同时由
+  #    apa_controller._apply_rate_limit() 按 dt 线性缩放,
+  #    以保证物理角速度与参考实现一致。
+  # ==========================================================================
+  APA_ANGLE_MAX_BP = [0., 11., 36.]       # m/s
+  APA_ANGLE_MAX_V = [410., 25., 15.]      # deg (方向盘角)
+  APA_ANGLE_DELTA_BP = [0., 5., 15.]      # m/s
+  APA_ANGLE_DELTA_V = [5., .8, .15]       # deg / 20ms   windup
+  APA_ANGLE_DELTA_VU = [5., 3.5, 0.4]     # deg / 20ms   unwind
+  APA_STEER_STEP = 2                      # 50Hz (参考实现); 设备当前 FORD_APA_STEP=5 (20Hz)
+
   def __init__(self, CP):
     pass
 

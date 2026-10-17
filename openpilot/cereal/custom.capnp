@@ -205,6 +205,14 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
 
+  # --- 弯道减速控制器对外发布的"真实目标"（HUD 用）---
+  # 此前 cereal 里没有任何弯道字段，HUD 只能自己用另一套参数重算，
+  # 于是"标志显示的速度"和"车实际被约束到的速度"必然对不上。
+  #   curveSpeedTarget : 控制器当前认定的弯道目标车速 (m/s)；0 表示无目标
+  #   curveSpeedActive : 控制器此刻是否真的在施加弯道减速约束
+  curveSpeedTarget @8 :Float32;
+  curveSpeedActive @9 :Bool;
+
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;
     enabled @1 :Bool;
@@ -468,6 +476,54 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
     turnLeft @1;
     turnRight @2;
   }
+}
+
+# ============================================================================
+# [FORD_PORT] carrot 外接雷达 / 左右激光雷达汇总消息。
+#
+# 来源：openpilot/carrot/amap_navi.py（由 system/manager/process_config.py
+#       以 always_run 启动，通过 UDP 与外部客户端通讯）。
+#
+# 消费方：
+#   * openpilot/sunnypilot/modeld_v2/modeld.py
+#     -> AutoOvertakeHelper.update / AutoAvoidanceHelper.update（超车 / 避让融合）
+#   * openpilot/selfdrive/selfdrived/selfdrived.py（变道阻挡 laneChangeBlocked）
+#   * openpilot/selfdrive/controls/lib/desire_helper.py（驾驶员变道准入）
+#
+# ⚠️ 用途边界（不要接错）：
+#   本消息只参与 **变道阻挡 / 主动超车 / 紧急转向避让** 的融合判定。
+#   "左右两侧有车"的语音 / 图标警报**只认原车 SOD/BSM**
+#   （carState.leftBlindspot / rightBlindspot），不得并入激光雷达结果。
+#
+# leftBlind / rightBlind 位域含义：
+#   bit0 (1) = 激光雷达盲区
+#   bit1 (2) = 原车盲点
+#   bit2 (4) = 车身雷达盲区
+#   bit3 (8) = 车道线  ← 不是障碍物！融合侧必须排除
+# ============================================================================
+struct AmapNavi @0xb7c9e2a41d6f5831 {
+       leftBlind @0 :Int32;
+       rightBlind @1 :Int32;
+
+       # ---- 左右两侧激光雷达健康度 + 盲区（独立字段，避免消费方误取 bit3）----
+       #
+       # present / valid 语义（与 auto_overtake._lidar_lane_safe 严格对应）：
+       #   present=False              -> 该侧未接入，门必须放行（不阻断）
+       #   present=True, valid=False  -> 已接入但数据异常/过期 -> fail-closed 否决
+       #   present=True, valid=True   -> obstacle / age 参与严格判定
+       #
+       # age 单位秒；<0 表示从未收到过有效数据。
+       lidarLeftPresent @2 :Bool;
+       lidarRightPresent @3 :Bool;
+       lidarLeftValid @4 :Bool;
+       lidarRightValid @5 :Bool;
+       lidarLeftAge @6 :Float32;
+       lidarRightAge @7 :Float32;
+       leftLidarObstacle @8 :Bool;
+       rightLidarObstacle @9 :Bool;
+       leftBodyRadarObstacle @10 :Bool;
+       rightBodyRadarObstacle @11 :Bool;
+       stamp @12 :Float64;
 }
 
 struct CustomReserved10 @0xcb9fd56c7057593a {
