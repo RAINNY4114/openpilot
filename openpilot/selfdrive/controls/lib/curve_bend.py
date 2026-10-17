@@ -72,7 +72,10 @@ def load_config(force: bool = False) -> dict:
         return _CACHE["cfg"]
     _CACHE["last_check"] = now
 
-    cfg = dict(DEFAULTS)
+    # CHX_CURVE_BEND_CACHE: 必须沿用上次读到的配置。本函数每 1 秒刷新一次，
+    # 若 mtime 未变则跳过读文件；此时若从 DEFAULTS 重建，
+    # 用户配置（如 bend_deg_min=22）会在 1 秒后被打回 45。
+    cfg = dict(_CACHE["cfg"]) if _CACHE["cfg"] is not None else dict(DEFAULTS)
     try:
         st = os.stat(CONFIG_PATH)
         if force or _CACHE["mtime"] != st.st_mtime:

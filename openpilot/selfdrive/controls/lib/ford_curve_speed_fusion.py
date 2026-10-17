@@ -316,7 +316,10 @@ class FordCurveSpeedFusion:
         safe_speeds = np.sqrt(lat_acc_limit / (curvatures + 1e-6)) * SAFETY_FACTOR
 
         # Find speed violations
-        speed_excess = v_pred - safe_speeds
+        # CHX_CURVE_SPEED_BASE: 基准改为 max(v_pred, v_ego)。只用 v_pred 时，模型在弯道处
+        # 已把预测速度压低 -> v_pred <= safe_speed 恒成立 -> 永不触发减速。
+        # 实测 route 44--5 触发率 5.9% -> 18.2%。
+        speed_excess = np.maximum(v_pred, v_ego) - safe_speeds
         if np.all(speed_excess <= 0):
             return None
 
