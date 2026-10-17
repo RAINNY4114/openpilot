@@ -54,7 +54,7 @@ def register(show_spinner=False) -> str | None:
     # Block until we get the imei
     serial = HARDWARE.get_serial()
     start_time = time.monotonic()
-    imei = '865420071781912'
+    imei: str | None = None
     while imei is None:
       try:
         imei = HARDWARE.get_imei()
