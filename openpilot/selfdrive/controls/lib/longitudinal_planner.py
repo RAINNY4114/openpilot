@@ -18,6 +18,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 from openpilot.selfdrive.controls.lib.ford_curve_speed import FordCurveController, _read_param_bool_direct
 from openpilot.selfdrive.controls.lib.ford_curve_speed_fusion import FordCurveSpeedFusion
+from openpilot.selfdrive.controls.lib.curve_speed_tsc import CurveSpeedTSC
 from openpilot.common.params import Params
 
 A_CRUISE_MAX_VALS = [2.2, 1.6, 1.2, 0.9, 0.75, 0.62, 0.58, 0.50, 0.45,  0.40]
@@ -76,6 +77,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._ford_curve = FordCurveController(self.CP, dt)
     self._curve_speed_fusion = FordCurveSpeedFusion()
     self._params = Params()
+
+    # 弯道减速（Ford 分支 V-TSC / M-TSC 移植）。
+    # 只读 modelV2.orientationRate.z * velocity.x，不改神经网络链路。
+    self._tsc = CurveSpeedTSC()
+    self._tsc_active = False
+    self._tsc_takeover = False
 
     # 对外发布的弯道减速真实值
     # -> cereal: LongitudinalPlanSP.curveSpeedTarget / curveSpeedActive
@@ -137,15 +144,45 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       # 因为 manager 的 Params::clearAll() 会删掉所有未注册进已编译 params_keys.h 的 key。
       lincoln_curve_speed = _read_param_bool_direct("dp_lincoln_curve_speed", default=True)
       lincoln_osm_realtime_cruise = _read_param_bool_direct("dp_lincoln_osm_realtime_cruise", default=True)
+
+      # TSC 接管时，旧的两条弯道腿让位，避免三套减速逻辑并联、
+      # 各自按不同判据抢 v_cruise（这是"重新整理"的核心一步）。
+      _tsc_cfg = self._tsc._cfg()
+      self._tsc_takeover = bool(_tsc_cfg["mode"] > 0 and _tsc_cfg["replace"])
+      if self._tsc_takeover:
+        lincoln_curve_speed = False
+        lincoln_osm_realtime_cruise = False
+
       v_cruise, map_turn_limit_active, map_a_target = self._ford_curve.update(
         sm, v_ego, v_cruise, reset_state, long_control_off, sm['selfdriveState'].enabled,
         lincoln_curve_speed=lincoln_curve_speed,
         lincoln_osm_realtime_cruise=lincoln_osm_realtime_cruise)
 
+      # ---- 弯道减速（Ford 分支移植）----
+      # 放在旧腿之后取 min，保证 v_cruise 一定包含弯道约束。
+      _gps = None
+      if _tsc_cfg["mode"] >= 2 and 'liveLocationKalman' in sm.data:
+        try:
+          _llk = sm['liveLocationKalman']
+          if _llk.gpsOK and _llk.positionGeodetic.valid:
+            _gps = (float(_llk.positionGeodetic.value[0]),
+                    float(_llk.positionGeodetic.value[1]))
+        except Exception:
+          _gps = None
+      _tsc_enabled = bool(sm['selfdriveState'].enabled) and not long_control_off
+      v_cruise, self._tsc_active = self._tsc.update(
+        sm['modelV2'] if 'modelV2' in sm.data else None,
+        v_ego, v_cruise,
+        enabled=_tsc_enabled,
+        left_blinker=bool(sm['carState'].leftBlinker),
+        right_blinker=bool(sm['carState'].rightBlinker),
+        gps=_gps)
+
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
 
     # Ford curve speed fusion: vision + map predictive curve speed management
-    if hasattr(self, '_curve_speed_fusion') and self._curve_speed_fusion is not None:
+    if (not getattr(self, "_tsc_takeover", False)
+        and hasattr(self, '_curve_speed_fusion') and self._curve_speed_fusion is not None):
       try:
         # 注意：SubMaster 没有 __contains__/__iter__，`'modelV2' in sm` 会退化成
         # 旧式迭代 -> sm[0] -> KeyError(0)，且会被下面的 except 静默吞掉，
@@ -203,6 +240,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       curve_decel = self._ford_curve.get_curve_decel(long_control_off)
       if curve_decel is not None:
         self.output_a_target = min(self.output_a_target, curve_decel)
+
+      # TSC 弯道制动请求。
+      # 巡航通道的 target_accel 被 A_CRUISE_MIN(-1.2 m/s^2) 钳住，仅靠降
+      # v_cruise 无法在弯道前把速度降下来。这里把 TSC 算出的 -dv/2（上限
+      # dp_curve_tsc_decel_max，默认 2.0 m/s^2）作为 a_target 上界。
+      if getattr(self, "_tsc_active", False):
+        _a_tsc = float(getattr(self._tsc, "a_target", 0.0))
+        if _a_tsc < -1e-3:
+          self.output_a_target = min(self.output_a_target, _a_tsc)
       if map_turn_limit_active and not long_control_off and map_a_target < -1e-3:
         self.output_a_target = min(self.output_a_target, float(map_a_target))
 
@@ -212,13 +258,21 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       curve_target = 0.0
       curve_active = False
 
-      # (a) FordCurveSpeedFusion（当前唯一默认开启的一条）
-      fusion = self._curve_speed_fusion
-      if fusion is not None and bool(getattr(fusion, "active", False)):
-        t = float(getattr(fusion, "target_speed_ms", 0.0) or 0.0)
-        if t > 0.1:
-          curve_target = t
+      # (0) TSC（Ford 分支移植，视觉/地图）——优先级最高的发布源
+      if getattr(self, "_tsc_active", False):
+        _tv = float(self._tsc.v_target)
+        if _tv > 0.1:
+          curve_target = _tv
           curve_active = True
+
+      # (a) FordCurveSpeedFusion —— TSC 接管时跳过，否则取小
+      if not getattr(self, "_tsc_takeover", False):
+        fusion = self._curve_speed_fusion
+        if fusion is not None and bool(getattr(fusion, "active", False)):
+          t = float(getattr(fusion, "target_speed_ms", 0.0) or 0.0)
+          if t > 0.1:
+            curve_target = t if curve_target <= 0.1 else min(curve_target, t)
+            curve_active = True
 
       if not long_control_off:
         # (b) FordCurveController 视觉腿（dp_lincoln_curve_speed，当前关闭）

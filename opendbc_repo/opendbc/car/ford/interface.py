@@ -143,7 +143,9 @@ class CarInterface(CarInterfaceBase):
 
     # BSM: Side_Detect_L_Stat, Side_Detect_R_Stat
     # TODO: detect bsm in car_fw?
-    ret.enableBsm = 0x3A6 in fingerprint[CAN.main] and 0x3A7 in fingerprint[CAN.main]
+    # [ford 分支] 部分平台把 BSM 报文路由在 camera 总线上，两处都查。
+    ret.enableBsm = ((0x3A6 in fingerprint[CAN.main] and 0x3A7 in fingerprint[CAN.main]) or
+                     (0x3A6 in fingerprint[CAN.camera] and 0x3A7 in fingerprint[CAN.camera]))
 
     # LCA can steer down to zero
     ret.minSteerSpeed = 0.

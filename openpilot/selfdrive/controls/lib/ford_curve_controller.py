@@ -27,6 +27,8 @@ import math
 import time
 from enum import Enum, auto
 
+import os
+
 import numpy as np
 
 from openpilot.common.params import Params
@@ -381,6 +383,11 @@ class FordCurveController:
 
     self.params = Params()
 
+    # 当前曲率误差门限。
+    # 设备原值 0.002（~6 度 @10m/s）；ford 分支改成 0.06，等价于关闭该保护。
+    # 做成参数便于实车 A/B：写 0.002 回到原状，写 0.06 对齐 ford 分支。
+    self.curvature_error = self._read_curv_error()
+
     self.last_curvature = 0.0
 
     self.last_requested_curvature = 0.0
@@ -507,6 +514,24 @@ class FordCurveController:
   # Ford current curvature error limit
   # ==========================================================================
 
+  def _read_curv_error(self):
+    """读 dp_ford_curv_error，缺省 0.002。夹在 [0.001, 0.06]。"""
+    val = CURVATURE_ERROR
+    for d in ("/data/ford_params", "/dev/shm/params", "/data/params/d"):
+      try:
+        with open(os.path.join(d, "dp_ford_curv_error"), "r") as f:
+          raw = f.read().strip()
+        if raw:
+          val = float(raw)
+          break
+      except (OSError, ValueError):
+        continue
+    try:
+      val = float(np.clip(float(val), 0.001, 0.06))
+    except Exception:
+      val = CURVATURE_ERROR
+    return val
+
   def _current_curvature_limit(
       self,
       curvature,
@@ -525,11 +550,12 @@ class FordCurveController:
     if speed <= CURRENT_CURVATURE_MIN_SPEED:
       return curvature
 
+    err = float(getattr(self, "curvature_error", CURVATURE_ERROR))
     return float(
       np.clip(
         curvature,
-        current_curvature - CURVATURE_ERROR,
-        current_curvature + CURVATURE_ERROR,
+        current_curvature - err,
+        current_curvature + err,
       )
     )
 
