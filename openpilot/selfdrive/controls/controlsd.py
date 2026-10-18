@@ -21,6 +21,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.lateral_clearance import LateralClearance
 from openpilot.selfdrive.controls.lib.curve_lane_bias import CurveLaneBias
 from openpilot.selfdrive.controls.lib.lane_trim_governor import LaneTrimGovernor
+from openpilot.selfdrive.controls.lib.model_curv_governor import ModelCurvatureGovernor
 from openpilot.selfdrive.controls.lib.lateral_planner_avoid import ObstacleAvoidance
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordPlanLead
 from openpilot.selfdrive.controls.lib.curve_bend import (bend_from_model, bend_deg_min,
@@ -72,6 +73,10 @@ class Controls(ControlsExt):
     self.lateral_planner_avoid = ObstacleAvoidance()
     # 三路叠加修正的统一整形器（低通 -> 速率限制 -> 幅值限制）
     self.trim_governor = LaneTrimGovernor()
+    # 模型直出曲率(modelV2.action.desiredCurvature)的整型器：
+    # 只压 0.2~0.5 Hz 的模型输出噪声（实测占转向功率 ~17%，即高速左右
+    # 摇晃的指令源），真实道路曲率(0.03 Hz)与真实弯道/变道完全不受影响。
+    self.model_curv_gov = ModelCurvatureGovernor()
     self.dp_ford_lead = FordPlanLead()
 
     # [AA_BRAKE_FALLBACK] 紧急刹车纵向落地通道。
@@ -219,6 +224,17 @@ class Controls(ControlsExt):
     new_desired_curvature = self.dp_ford_lead.apply(
       model_v2, CS.vEgo, new_desired_curvature, self.sm['lateralDelay'].lateralDelay,
       active=bool(CC.latActive), bend_ok=_bend_ok, bend_w=_bend_w)
+    # 2026-10-18: 模型直出曲率整型。放在 FordPlanLead 之后、三路叠加修正之前，
+    # 让"主项"和"修正项"都建立在同一个平滑过的曲率基础上。
+    # 实测（seg8, >50km/h）：未整型前动作曲率 std=6.0e-4 1/m，其中 0.24/0.49 Hz
+    # 分量是模型输出噪声，舵角 pp50=4.7°，指令->实际滞后 280 ms，即高速左右
+    # 摇晃的指令源。整型只在小信号区生效，真实弯道/变道直通。
+    try:
+      _lane_change = (model_v2.meta.laneChangeState != LaneChangeState.off)
+    except Exception:
+      _lane_change = False
+    new_desired_curvature = self.model_curv_gov.update(
+      new_desired_curvature, CS.vEgo, bool(CC.latActive), bool(_lane_change), DT_CTRL)
     # 2026-10-18: 三路横向叠加修正先求和，再过统一整形器。
     #
     # 三路各自都是「车道中心误差 -> 曲率」的位置环，各带积分器和饱和，

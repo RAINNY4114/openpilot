@@ -35,9 +35,9 @@ V-TSC 的输入是
     dp_curve_tsc            0=关  1=视觉(V-TSC)  2=视觉+地图(V/M-TSC)  默认 1
     dp_curve_tsc_replace    1=接管并关闭旧弯道腿  0=与旧腿并存取小      默认 1
     dp_curve_tsc_lat_a      目标横向加速度 m/s^2                      默认 2.0
-    dp_curve_tsc_sens       弯道灵敏度（越大越保守）                    默认 2.0
+    dp_curve_tsc_sens       弯道灵敏度（越大越保守）                    默认 2.4
     dp_curve_tsc_agg        过弯积极度（越大越快）                      默认 1.0
-    dp_curve_tsc_detect     触发阈值 m/s^2                            默认 1.0
+    dp_curve_tsc_detect     触发阈值 m/s^2                            默认 0.6
     dp_curve_tsc_decel_max  弯道最大减速度 m/s^2                       默认 2.0
     dp_curve_tsc_log        1=写 /data/media/0/tsc.log                默认 0
 """
@@ -53,8 +53,16 @@ import numpy as np
 # 常量（与 ford 分支保持一致）
 # ---------------------------------------------------------------------------
 TARGET_LAT_A = 2.0          # _FP_TARGET_LAT_A
-CURVE_SENSITIVITY = 2.0     # _FP_CURVE_SENSITIVITY
-CURVE_DETECT_LAT_A = 1.0    # _FP_CURVE_DETECT_LAT_A
+# 2026-10-18 修正方向（先别改错）：
+#   v_safe = sqrt(lat_a*agg/(|kappa|*sens))
+#   sens 越大 -> v_safe 越低 -> 减速越早越深；sens 越小越激进（不减速）。
+# 用户现场反馈"弯道不减速、车被带出车道"，要的是**更早更深**的减速，
+# 所以 sens 往上调 2.0 -> 2.4（弯内实际横向加速度 = lat_a/sens = 0.83 m/s^2）。
+# 注意 detect 只决定"弯道标志什么时候亮"，不影响减速度：
+# 1.0 -> 0.6 m/s^2，让标志在缓弯就出现（实测高速缓弯的模型预测横向加速度
+# 峰值只有 0.26~0.46 m/s^2，旧阈值连"检测到"都过不了）。
+CURVE_SENSITIVITY = 2.4     # _FP_CURVE_SENSITIVITY
+CURVE_DETECT_LAT_A = 0.6    # _FP_CURVE_DETECT_LAT_A（只影响标志与锁存）
 TURN_AGGRESSIVENESS = 1.0   # _FP_TURN_AGGRESSIVENESS
 CRUISING_SPEED = 5.0        # _FP_CRUISING_SPEED
 

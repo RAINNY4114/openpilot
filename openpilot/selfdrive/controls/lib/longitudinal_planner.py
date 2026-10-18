@@ -153,13 +153,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         lincoln_curve_speed = False
         lincoln_osm_realtime_cruise = False
 
-      v_cruise, map_turn_limit_active, map_a_target = self._ford_curve.update(
-        sm, v_ego, v_cruise, reset_state, long_control_off, sm['selfdriveState'].enabled,
-        lincoln_curve_speed=lincoln_curve_speed,
-        lincoln_osm_realtime_cruise=lincoln_osm_realtime_cruise)
-
       # ---- 弯道减速（Ford 分支移植）----
-      # 放在旧腿之后取 min，保证 v_cruise 一定包含弯道约束。
+      # 2026-10-18 调整顺序：TSC 移到旧腿**之前**。
+      #
+      # 原来 TSC 在 _ford_curve.update() 之后跑，拿到的 v_cruise 已经被旧腿压过，
+      # 于是 TSC 要跟"已经被压过的目标"比 min —— 实车实测 active 只占 4.3%，
+      # 比同样喂原始 v_cruise 的模拟(11.1%)低一倍多。旧腿的判据(OSM/几何)和
+      # TSC(模型曲率)不是一回事，谁先算谁就抢到了"最低目标"的名义。
+      # 换序后：TSC 拿驾驶员设定速度，旧腿再对 TSC 的结果取 min，
+      # 三条弯道腿都还是 min 关系（v_cruise 只会更保守），但 active 标志
+      # 和 HUD 上的弯道目标速度恢复为真。
       _gps = None
       if _tsc_cfg["mode"] >= 2 and 'liveLocationKalman' in sm.data:
         try:
@@ -177,6 +180,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         left_blinker=bool(sm['carState'].leftBlinker),
         right_blinker=bool(sm['carState'].rightBlinker),
         gps=_gps)
+
+      v_cruise, map_turn_limit_active, map_a_target = self._ford_curve.update(
+        sm, v_ego, v_cruise, reset_state, long_control_off, sm['selfdriveState'].enabled,
+        lincoln_curve_speed=lincoln_curve_speed,
+        lincoln_osm_realtime_cruise=lincoln_osm_realtime_cruise)
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
 

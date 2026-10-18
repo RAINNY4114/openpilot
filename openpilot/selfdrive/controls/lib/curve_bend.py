@@ -57,7 +57,10 @@ CONFIG_PATH = "/data/ford_curve.json"
 # Sharing one 45 deg gate is why the sign "never triggered" on the highway.
 DEFAULTS = {
     "bend_deg_min": 45.0,
-    "bend_deg_min_display": 20.0,
+    # 2026-10-18: 20 -> 12 度。实测高速路段的弯角很少到 20 度（190 m 窗、
+    # k_enter 门限下），弯道标志因此"从来不亮"。12 度只影响 HUD 图标是否显示，
+    # 不影响 dp_lincoln_curve_speed / TSC 的控制闸门（仍用 bend_deg_min）。
+    "bend_deg_min_display": 12.0,
     # 横向前瞻混合（FordPlanLead）单独一个闸门，默认 10 度。
     # 纵向减速仍用 bend_deg_min（默认 45 度），两者互不影响：
     # 缓弯里不需要减速，但横向确实需要提前打方向补延迟。
