@@ -59,7 +59,13 @@ MID_GAIN = 1.10
 EXIT_GAIN = 1.05
 
 # Output filter.
+# 2026-10-18: 保留常量作为「低速」参考值（0.15 @20Hz <=> tau 0.31 s），
+# 实际 alpha 由 FordCurveController._filter_tau() 按车速计算。
 CURVATURE_FILTER = 0.15
+
+# 输出低通时间常数 vs 车速 (m/s -> s)
+_FILTER_TAU_SPEEDS = (0.0, 8.0, 13.0, 18.0, 25.0, 35.0)
+_FILTER_TAU_VALUES = (0.30, 0.26, 0.18, 0.09, 0.05, 0.04)
 
 
 # ============================================================================
@@ -452,6 +458,26 @@ class FordCurveController:
   # ==========================================================================
   # Lateral acceleration limit
   # ==========================================================================
+
+  def _filter_tau(self, speed):
+    """输出低通时间常数（秒）。低速柔和、高速跟手。
+
+    dp_ford_curv_tau_ms > 0 时直接用它（固定值，便于对比测试）；
+    否则按车速查表：0 m/s -> 0.30 s（与旧行为一致），18 m/s -> 0.09 s。
+    """
+    try:
+      fixed = _read_float("dp_ford_curv_tau_ms", 0.0, 0.0, 1000.0)
+      if fixed > 0.0:
+        return fixed / 1000.0
+      return float(
+        np.interp(
+          max(float(speed), 0.0),
+          _FILTER_TAU_SPEEDS,
+          _FILTER_TAU_VALUES,
+        )
+      )
+    except Exception:
+      return 0.30
 
   def _speed_limit(self, curvature, speed):
 
@@ -1227,9 +1253,22 @@ class FordCurveController:
     # Keep this mild because Ford rate limiting is already active.
     # ------------------------------------------------------------------------
 
+    # ------------------------------------------------------------------------
+    # 2026-10-18: 输出低通改为「随车速变快」
+    #
+    # 原实现固定 CURVATURE_FILTER=0.15 @20Hz，等价一阶低通 tau≈0.31 s。
+    # 叠加 lateralDelay(实测 400 ms) 后横向命令链路总滞后约 0.7 s，22 m/s 时
+    # 相当于 15 m 的"盲区"。环路相位裕度不足 -> 车道内 0.2~1 Hz 自激，
+    # 且被控对象增益 ∝ v^2 -> 速度越高越明显。
+    #
+    # 这里按车速给 tau 做表：低速保持原手感，高速把无谓滞后还回去。
+    # 速率限制仍然在后面兜底，所以不会把阶跃直接送给 PSCM。
+    # ------------------------------------------------------------------------
+    tau = self._filter_tau(speed)
+    alpha_keep = math.exp(-0.05 / max(tau, 1e-3))
     filtered = (
-      self.last_curvature * CURVATURE_FILTER
-      + curvature * (1.0 - CURVATURE_FILTER)
+      self.last_curvature * alpha_keep
+      + curvature * (1.0 - alpha_keep)
     )
 
     # Never exceed the Ford rate-limited value by filtering.

@@ -63,16 +63,24 @@ DEFAULTS = {
     "min_speed_ms": 4.0,    # 低于此速度不介入
     "smooth_alpha": 0.10,   # 避让量低通系数
     "bias_max_m": 1.0,      # 总横向偏置限幅 (m)
+    "bias_slew_mps": 0.10,  # 偏置目标最大变化率 (m/s)：消除阶跃扰动
+    "v_ref_ms": 15.0,       # 增益调度参考车速
+    "gain_min": 0.20,       # (v_ref/v)^2 缩放下限
+    "gain_max": 3.00,       # (v_ref/v)^2 缩放上限
     "lane_prob_thr": 0.50,  # 车道线可信度阈值
     "log": False,
     "barrier": {
-        "enable": True,
+        # 2026-10-18: 默认关闭。高速上左侧护栏长期存在，roadEdgeStds 一旦在
+        # 阈值附近抖动，偏置就在 0 / +0.30 m 之间来回跳 -> 车道内左右摇。
+        # 需要时在 /data/lateral_clearance.json 里显式打开。
+        "enable": False,
         "bias_m": 0.30,         # 中央护栏 -> 向右让
         "edge_std_thr": 0.40,   # roadEdgeStds[0] 置信度阈值 (m, 越小越可信)
         "max_edge_dist_m": 4.0  # 左路沿进入此距离才认为"贴着护栏"
     },
     "vehicle": {
-        "enable": True,
+        # 2026-10-18: 默认关闭（邻车偏置 0.25~0.45 m 同样是阶跃扰动源）
+        "enable": False,
         "bias_m": 0.25,        # 相邻车道有车 -> 让开
         "large_bias_m": 0.45,  # 判定为"大车"时让更多
         "large_dwell_s": 2.5,  # 相邻车道持续存在超过该时长 -> 视为大车
@@ -106,6 +114,7 @@ class LateralClearance:
 
         self.integral = 0.0
         self.bias_filtered = 0.0
+        self._bias_target_last = 0.0
         self.lead_dwell = 0.0
         self.last_error = 0.0
         self.last_trim = 0.0
@@ -257,6 +266,32 @@ class LateralClearance:
             return 0.0, "veh_both"
         return net, ("veh_L" + ("_large" if large else "")) if net > 0 else ("veh_R" + ("_large" if large else ""))
 
+    # ------------------------------------------------------------- scheduling
+    def _slew(self, target: float, dt: float) -> float:
+        """偏置目标斜率限制（m/s），消除阶跃。"""
+        try:
+            step = max(0.0, self._f(None, "bias_slew_mps", 0.10)) * max(float(dt), 1e-3)
+            if step <= 0.0:
+                self._bias_target_last = float(target)
+                return float(target)
+            out = max(self._bias_target_last - step,
+                      min(self._bias_target_last + step, float(target)))
+            self._bias_target_last = out
+            return out
+        except Exception:
+            return float(target)
+
+    def _gain_scale(self, v_ego: float) -> float:
+        """(v_ref/v)^2 增益调度：让位置环带宽与车速解耦。"""
+        try:
+            v_ref = max(1.0, self._f(None, "v_ref_ms", 15.0))
+            v = max(1.0, float(v_ego))
+            g = (v_ref / v) ** 2
+            return max(self._f(None, "gain_min", 0.20),
+                       min(self._f(None, "gain_max", 3.0), g))
+        except Exception:
+            return 1.0
+
     # ------------------------------------------------------------------ update
     def update(self, active: bool, model_v2, v_ego: float, dt: float,
                steering_pressed: bool = False) -> float:
@@ -275,6 +310,7 @@ class LateralClearance:
             if (not cfg_enabled) or (not active) or v_ego < self._f(None, "min_speed_ms", 4.0):
                 self.integral = 0.0
                 self.bias_filtered = 0.0
+                self._bias_target_last = 0.0
                 self.lead_dwell = 0.0
                 self.last_trim = 0.0
                 self.last_bias = 0.0
@@ -286,6 +322,7 @@ class LateralClearance:
             if self._b(None, "steer_override_gate", True) and steering_pressed:
                 self.integral = 0.0
                 self.bias_filtered = 0.0
+                self._bias_target_last = 0.0
                 self.lead_dwell = 0.0
                 self.last_trim = 0.0
                 self.last_bias = 0.0
@@ -306,14 +343,20 @@ class LateralClearance:
             bmax = self._f(None, "bias_max_m", 1.0)
             bias_raw = max(-bmax, min(bmax, bias_raw))
 
+            # 偏置目标先做斜率限制：护栏/邻车判据都是硬切换，直接低通
+            # (alpha=0.10 @100Hz => 70 ms) 等于给转向一个阶跃。
+            bias_raw = self._slew(bias_raw, dt)
+
             a = self._f(None, "smooth_alpha", 0.10)
             a = max(0.01, min(1.0, a))
             self.bias_filtered += a * (bias_raw - self.bias_filtered)
 
             # ---- PI 位置闭环 ----
             error = lane_center_y + self.bias_filtered
-            kp = self._f(None, "kp", 0.0010)
-            ki = self._f(None, "ki", 0.0006)
+            # 增益调度：位置环带宽 ∝ 车速，固定增益在高速相位裕度不足。
+            _g = self._gain_scale(v_ego)
+            kp = self._f(None, "kp", 0.0010) * _g
+            ki = self._f(None, "ki", 0.0006) * _g
             max_curv = self._f(None, "max_curv", 0.0004)
 
             p_term = kp * error

@@ -95,11 +95,15 @@ CONFIG_PATH = "/data/curve_lane_bias.json"
 
 DEFAULTS = {
     "enabled": True,        # 默认开启（写成 false 即可完全关闭，行为回到原生）
-    "bias_max_m": 0.20,     # 最大横向偏置（米），>0 = 往弯道内侧挪
+    "bias_max_m": 0.15,     # 最大横向偏置（米），>0 = 往弯道内侧挪
     "k_ref": 0.004,         # 达到 bias_max_m 所需的曲率 (1/m)，0.004 = 半径 250 m
-    "kp": 0.0010,           # 位置环比例增益（曲率 / 米）
-    "ki": 0.0004,           # 位置环积分增益
-    "max_curv": 0.00040,    # 输出硬限幅 (1/m)
+    "kp": 0.0008,           # 位置环比例增益（曲率 / 米）
+    "ki": 0.0002,           # 位置环积分增益
+    "max_curv": 0.00035,    # 输出硬限幅 (1/m)
+    "bias_slew_mps": 0.10,  # 偏置目标最大变化率 (m/s)：消除阶跃扰动
+    "v_ref_ms": 15.0,       # 增益调度参考车速
+    "gain_min": 0.20,       # (v_ref/v)^2 缩放下限
+    "gain_max": 3.00,       # (v_ref/v)^2 缩放上限
     "min_speed_ms": 8.0,    # 低于此速度不介入
     "lane_prob_thr": 0.50,  # 车道线可信度阈值
     "smooth_alpha": 0.15,   # 偏置低通系数
@@ -121,6 +125,7 @@ class CurveLaneBias:
 
     self.integral = 0.0
     self.bias_filtered = 0.0
+    self._bias_target_last = 0.0
     self.last_error = 0.0
     self.last_trim = 0.0
     self.last_reason = "off"
@@ -207,9 +212,41 @@ class CurveLaneBias:
       k_w = abs_k[mask]
       s_w = signed_k[mask]
       idx = int(np.argmax(k_w))
-      return float(k_w[idx]), float(s_w[idx])
+      # 2026-10-18: 旧实现返回「峰值样本的符号」。近直线 / S 弯时那个样本
+      # 的符号会来回翻转，bias_target 于是在 +bias_max 与 -bias_max 之间
+      # 跳变（0.15~0.2 m 的横向目标阶跃），是车道内左右摇晃的直接来源。
+      # 改为按 |κ| 加权的带符号均值：连续、无跳变，S 弯自然相互抵消。
+      w_sum = float(np.sum(k_w))
+      k_signed_mean = float(np.sum(k_w * s_w) / w_sum) if w_sum > 1e-9 else 0.0
+      return float(k_w[idx]), k_signed_mean
     except Exception:
       return 0.0, 0.0
+
+  # ------------------------------------------------------------- scheduling
+  def _slew(self, target: float, dt: float) -> float:
+    """偏置目标斜率限制（m/s），消除阶跃。"""
+    try:
+      step = max(0.0, self._f("bias_slew_mps", 0.10)) * max(float(dt), 1e-3)
+      if step <= 0.0:
+        self._bias_target_last = float(target)
+        return float(target)
+      out = max(self._bias_target_last - step,
+                min(self._bias_target_last + step, float(target)))
+      self._bias_target_last = out
+      return out
+    except Exception:
+      return float(target)
+
+  def _gain_scale(self, v_ego: float) -> float:
+    """(v_ref/v)^2 增益调度：让位置环带宽与车速解耦。"""
+    try:
+      v_ref = max(1.0, self._f("v_ref_ms", 15.0))
+      v = max(1.0, float(v_ego))
+      g = (v_ref / v) ** 2
+      return max(self._f("gain_min", 0.20),
+                 min(self._f("gain_max", 3.0), g))
+    except Exception:
+      return 1.0
 
   # ------------------------------------------------------------------ update
   def update(self, active: bool, model_v2, v_ego: float, dt: float,
@@ -256,17 +293,28 @@ class CurveLaneBias:
       bias_max = max(0.0, self._f("bias_max_m", 0.20))
       amount = bias_max * min(1.0, k_abs / k_ref)
       # 右转 κ>0 -> 内圈在右 -> bias>0
-      bias_target = math.copysign(amount, k_signed) if k_abs > 1e-4 else 0.0
+      # k_signed 现在是 |κ| 加权带符号均值（连续量，|k_signed| <= k_abs），
+      # 幅值仍由峰值 |κ| 决定，方向由加权均值决定 -> 不再有符号翻转。
+      if k_abs > 1e-4 and abs(k_signed) > 1e-5:
+        ratio = max(-1.0, min(1.0, k_signed / max(k_abs, 1e-6)))
+        bias_target = amount * ratio
+      else:
+        bias_target = 0.0
       if not math.isfinite(bias_target):
         bias_target = 0.0
+
+      # 偏置目标先做斜率限制，避免任何判据切换变成横向目标阶跃
+      bias_target = self._slew(bias_target, dt)
 
       a = max(0.01, min(1.0, self._f("smooth_alpha", 0.15)))
       self.bias_filtered += a * (bias_target - self.bias_filtered)
 
       # ---- PI 位置闭环 ----
       error = lane_center_y + self.bias_filtered
-      kp = self._f("kp", 0.0010)
-      ki = self._f("ki", 0.0004)
+      # 增益调度：位置环带宽 ∝ 车速，固定增益在高速相位裕度不足
+      _g = self._gain_scale(v_ego)
+      kp = self._f("kp", 0.0010) * _g
+      ki = self._f("ki", 0.0004) * _g
       max_curv = self._f("max_curv", 0.00040)
 
       p_term = kp * error
@@ -303,6 +351,7 @@ class CurveLaneBias:
   def _reset(self, reason: str) -> None:
     self.integral = 0.0
     self.bias_filtered = 0.0
+    self._bias_target_last = 0.0
     self.last_trim = 0.0
     self.last_reason = reason
 

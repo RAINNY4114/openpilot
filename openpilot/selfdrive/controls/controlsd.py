@@ -20,6 +20,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurv
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.lateral_clearance import LateralClearance
 from openpilot.selfdrive.controls.lib.curve_lane_bias import CurveLaneBias
+from openpilot.selfdrive.controls.lib.lane_trim_governor import LaneTrimGovernor
 from openpilot.selfdrive.controls.lib.lateral_planner_avoid import ObstacleAvoidance
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordPlanLead
 from openpilot.selfdrive.controls.lib.curve_bend import bend_from_model, bend_deg_min
@@ -68,6 +69,8 @@ class Controls(ControlsExt):
     # 通用静止障碍避让（故障车/落石/锥桶）：>80km/h 自动关闭，交给紧急转向避让
     # disabled by default -> /data/lateral_planner_avoid.json 里 enabled=true 才生效
     self.lateral_planner_avoid = ObstacleAvoidance()
+    # 三路叠加修正的统一整形器（低通 -> 速率限制 -> 幅值限制）
+    self.trim_governor = LaneTrimGovernor()
     self.dp_ford_lead = FordPlanLead()
 
     # [AA_BRAKE_FALLBACK] 紧急刹车纵向落地通道。
@@ -208,19 +211,28 @@ class Controls(ControlsExt):
     new_desired_curvature = self.dp_ford_lead.apply(
       model_v2, CS.vEgo, new_desired_curvature, self.sm['lateralDelay'].lateralDelay,
       active=bool(CC.latActive), bend_ok=_bend_ok)
+    # 2026-10-18: 三路横向叠加修正先求和，再过统一整形器。
+    #
+    # 三路各自都是「车道中心误差 -> 曲率」的位置环，各带积分器和饱和，
+    # 作用于同一个误差。并联后总积分增益翻倍、饱和点不一致，实车表现为
+    # 车道内左右摇晃且越快越厉害。这里把三者合成一路，由 LaneTrimGovernor
+    # 统一做 低通 -> 速率限制 -> 幅值限制（见 lane_trim_governor.py）。
+    _trim_raw = 0.0
     # 2026-10-05: 传入 steering_pressed, 与 curve_lane_bias 的让权判据对齐
-    new_desired_curvature += self.lateral_clearance.update(
+    _trim_raw += self.lateral_clearance.update(
       CC.latActive, model_v2, CS.vEgo, DT_CTRL,
       steering_pressed=bool(CS.steeringPressed))
     # 弯道内圈偏移：变道过程中不介入，避免跟变道抢方向
-    new_desired_curvature += self.curve_lane_bias.update(
+    _trim_raw += self.curve_lane_bias.update(
       CC.latActive, model_v2, CS.vEgo, DT_CTRL,
       lane_change_active=model_v2.meta.laneChangeState != LaneChangeState.off,
       steering_pressed=bool(CS.steeringPressed))
     # 通用静止障碍避让：返回曲率修正量（1/m）；变道中不介入，避免抢方向
-    new_desired_curvature += self.lateral_planner_avoid.update(
+    _trim_raw += self.lateral_planner_avoid.update(
       CC.latActive, model_v2, CS.vEgo, DT_CTRL, sm=self.sm,
       lane_change_active=model_v2.meta.laneChangeState != LaneChangeState.off)
+    new_desired_curvature += self.trim_governor.update(
+      _trim_raw, CS.vEgo, bool(CC.latActive), DT_CTRL)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 
