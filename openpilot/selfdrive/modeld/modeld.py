@@ -87,7 +87,6 @@ class ChestnutGpuState:
     self.valid = True
     self.sends = 0
     self.metrics = {}
-    self.dbg = {}
 
   @cached_property
   def power_limit(self) -> int:
@@ -112,21 +111,12 @@ class ChestnutGpuState:
                         'gpuUsagePercent': metrics.AverageGfxActivity,
                         'gpuClockMhz': metrics.AverageGfxclkFrequencyPostDs,
                         'fanSpeedRpm': metrics.AvgFanRpm}
-        # [GPU-RAILS] 额外记录板功耗与各电压平面电流；独立 try，绝不影响主路径
-        try:
-          self.dbg = {'boardPowerW': int(metrics.AverageTotalBoardPower),
-                      'gfxMv': int(metrics.AvgVoltage[0]), 'gfxMa': int(metrics.AvgCurrent[0]),
-                      'socMv': int(metrics.AvgVoltage[1]), 'socMa': int(metrics.AvgCurrent[1]),
-                      'memMv': int(metrics.AvgVoltage[2]), 'memMa': int(metrics.AvgCurrent[2])}
-        except Exception:
-          self.dbg = {}
         self.valid = True
       except Exception:
         if self.valid:
           cloudlog.exception("chestnut state read failed")
         self.valid = False
         self.metrics.clear()
-        self.dbg = {}
     if self.big:
       for k, v in self.metrics.items():
         setattr(state, k, v)
@@ -136,8 +126,7 @@ class ChestnutGpuState:
     # 注意 chestnutGpuState 的 should_log 由**预编译 loggerd** 内的 services.h 决定
     # （本机无 SConstruct 无法重编）⇒ 只能走 swaglog，进不了 rlog。
     if self.big and self.metrics and self.sends % 100 == 1:
-      _kv = list(self.metrics.items()) + list(getattr(self, 'dbg', {}).items())
-      cloudlog.info('LAGFIX_GPU ' + ' '.join('%s=%s' % (k, v) for k, v in _kv))
+      cloudlog.info('LAGFIX_GPU ' + ' '.join('%s=%s' % (k, v) for k, v in self.metrics.items()))
 
     msg.valid = not self.big or (self.valid and bool(self.metrics))
     self.pm.send('chestnutGpuState', msg)
