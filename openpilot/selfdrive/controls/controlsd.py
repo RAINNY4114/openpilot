@@ -23,7 +23,8 @@ from openpilot.selfdrive.controls.lib.curve_lane_bias import CurveLaneBias
 from openpilot.selfdrive.controls.lib.lane_trim_governor import LaneTrimGovernor
 from openpilot.selfdrive.controls.lib.lateral_planner_avoid import ObstacleAvoidance
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordPlanLead
-from openpilot.selfdrive.controls.lib.curve_bend import bend_from_model, bend_deg_min
+from openpilot.selfdrive.controls.lib.curve_bend import (bend_from_model, bend_deg_min,
+                                                          bend_deg_min_lat, bend_weight)
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.controls.lib.aa_brake_apply import AABrakeApply
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
@@ -200,17 +201,24 @@ class Controls(ControlsExt):
     # Inserted BEFORE the lateral_clearance / curve_lane_bias trims so those
     # centering corrections are added at full strength afterwards, instead of
     # being scaled by (1 - b) along with the planner term.
-    # 弯道闸门：与纵向 FordCurveSpeedFusion 共用同一个 curve_bend 判据，
-    # 使横向预打方向与纵向减速同步触发。bend_from_model 是纯函数，各进程
-    # 各自用同一份 modelV2 调用，结果按构造一致，无需跨进程传状态。
+    # 弯道闸门：bend_from_model 是纯函数，各进程各自用同一份 modelV2 调用，
+    # 结果按构造一致，无需跨进程传状态。
+    # 横向前瞻用独立的、更低的闸门（bend_deg_min_lat，默认 10 度），
+    # 不再和纵向弯道减速共用 bend_deg_min（默认 45 度）——缓弯不需要减速，
+    # 但横向确实需要提前打方向补 400 ms 延迟。
+    # 闸门做成 0..1 软权重（smoothstep），避免阈值处给转向一个阶跃。
     # 计算异常时不闸门（保持旧行为），避免整体失效。
     try:
-      _bend_ok = bool(float(bend_from_model(model_v2, CS.vEgo)) >= bend_deg_min())
+      _bend_deg = float(bend_from_model(model_v2, CS.vEgo))
+      _bend_gate_lat = bend_deg_min_lat()
+      _bend_ok = bool(_bend_deg >= _bend_gate_lat)
+      _bend_w = bend_weight(_bend_deg, _bend_gate_lat)
     except Exception:
       _bend_ok = True
+      _bend_w = 1.0
     new_desired_curvature = self.dp_ford_lead.apply(
       model_v2, CS.vEgo, new_desired_curvature, self.sm['lateralDelay'].lateralDelay,
-      active=bool(CC.latActive), bend_ok=_bend_ok)
+      active=bool(CC.latActive), bend_ok=_bend_ok, bend_w=_bend_w)
     # 2026-10-18: 三路横向叠加修正先求和，再过统一整形器。
     #
     # 三路各自都是「车道中心误差 -> 曲率」的位置环，各带积分器和饱和，

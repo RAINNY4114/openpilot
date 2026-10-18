@@ -1468,7 +1468,7 @@ class FordPlanLead:
     if self.delay_hi < self.delay_lo:
       self.delay_hi = self.delay_lo
 
-  def apply(self, model_v2, v_ego, base_curvature, lat_delay, active=True, bend_ok=None):
+  def apply(self, model_v2, v_ego, base_curvature, lat_delay, active=True, bend_ok=None, bend_w=None):
     """Return the lead-resampled curvature, or base_curvature untouched."""
     base = float(base_curvature)
 
@@ -1573,6 +1573,17 @@ class FordPlanLead:
       b = float(np.clip(b, _LEAD_BLEND_MIN, _LEAD_BLEND_MAX))
       if not entering:
         b *= 0.25              # exit bias: do not let the model hold the unwind
+
+      # 弯道闸门软权重（0..1）：必须在 _LEAD_BLEND_MIN 钳位之后乘，
+      # 否则闸门关闭时仍会被抬到 0.10 的最小混合，闸门形同虚设。
+      if bend_w is None:
+        gate_w = 1.0 if bend_ok is not False else 0.0
+      else:
+        gate_w = float(np.clip(bend_w, 0.0, 1.0))
+      b *= gate_w
+      if b <= 1e-6:
+        return base
+
       out = model_term * b + base * (1.0 - b)
       if not math.isfinite(out):
         return base

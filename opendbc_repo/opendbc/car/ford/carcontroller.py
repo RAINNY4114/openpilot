@@ -1,4 +1,6 @@
 import math
+import os
+
 import numpy as np
 
 from opendbc.can import CANPacker
@@ -9,6 +11,58 @@ from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 from opendbc.car.ford.apa_controller import FordAPAController
 
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordCurveController
+
+
+# ===========================================================================
+# c1 (LatCtlPath_An_Actl / path angle) 下发开关
+#
+# 背景：FordCurveController 里那套 bp-7.0 的 path_angle 算法一直在算
+# （_finalize_path_angle，含 VLT / PSCM 饱和处理 / 软 ROC），但 carcontroller
+# 把 c1 位置固定传 0.，算完就丢了。c1 是"车道多项式在车头的航向角"，
+# 相当于给 PSCM 一个相位超前项，正好补 400 ms 的横向延迟。
+#
+# ⚠️ 重要：panda 安全模型 opendbc/safety/modes/ford.h 目前**硬性要求**
+#    raw_path_angle == 1000（即 0.0 rad），否则整帧 LateralMotionControl 被丢弃
+#    （tx = false）。也就是说 panda 未刷补丁固件时，把开关设成 2 会让横向
+#    指令完全发不出去 —— 表现为居中彻底失效。所以：
+#        0 = 不发（默认）
+#        1 = 影子：只写 /data/media/0/path_angle_shadow.log，CAN 上仍发 0
+#        2 = 实发：需要 panda 刷过 patch_panda_path_angle.py 的固件
+# ===========================================================================
+_PA_PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
+_PA_MAX_RAD = 0.10      # DBC 允许 [-0.5, 0.5235]，这里只用到 1/5，留足余量
+_PA_TAU_S = 0.12        # 一阶低通时间常数，抑制 13 Hz 模型带来的台阶
+_PA_LOG = "/data/media/0/path_angle_shadow.log"
+_PA_CACHE = {"tick": 0, "cfg": None}
+_PA_CACHE_TICKS = 40    # 20 Hz 下约 2 s
+
+
+def _pa_read(key, default):
+  for d in _PA_PARAM_DIRS:
+    try:
+      with open(os.path.join(d, key), "r") as f:
+        val = f.read().strip()
+      if val:
+        return val
+    except Exception:
+      continue
+  return default
+
+
+def _pa_cfg():
+  _PA_CACHE["tick"] += 1
+  if _PA_CACHE["cfg"] is None or _PA_CACHE["tick"] >= _PA_CACHE_TICKS:
+    _PA_CACHE["tick"] = 0
+    try:
+      mode = int(float(_pa_read("dp_ford_send_path_angle", "0")))
+    except Exception:
+      mode = 0
+    try:
+      scale = float(_pa_read("dp_ford_path_angle_scale", "0.25"))
+    except Exception:
+      scale = 0.25
+    _PA_CACHE["cfg"] = (max(0, min(2, mode)), max(0.0, min(1.0, scale)))
+  return _PA_CACHE["cfg"]
 
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -106,6 +160,11 @@ class CarController(CarControllerBase):
     # ========================================================================
     self.apa_controller = FordAPAController(CP)
 
+    # c1 下发状态（见文件头 _pa_cfg 注释）
+    self._pa_last = 0.0
+    self._pa_frame = 0
+    self._pa_fh = None
+
   # ======================================================================
   # Dual-source curvature telemetry
   # ======================================================================
@@ -131,6 +190,59 @@ class CarController(CarControllerBase):
         "%.3f,%.3f,%.8f,%.8f,%.8f\n"
         % (_time.monotonic(), v_ego, cc_curv, yaw_curv, diff)
       )
+    except Exception:
+      pass
+
+  def _path_angle_cmd(self, CC, v_ego):
+    """返回本周期要下发的 c1 (rad)。任何异常都回落为 0（安全侧）。"""
+    try:
+      mode, scale = _pa_cfg()
+      if mode < 1:
+        self._pa_last = 0.0
+        return 0.0
+
+      raw = float(getattr(self.curve_controller, 'path_angle', 0.0) or 0.0)
+      if not math.isfinite(raw):
+        raw = 0.0
+
+      # 符号约定与 curvature 一致：carcontroller 下发的是 -curvature，
+      # path_angle 由同一个 curvature 推出来，所以同样取负。
+      target = -raw * scale
+      target = max(-_PA_MAX_RAD, min(_PA_MAX_RAD, target))
+
+      active = bool(CC.latActive)
+      if not active:
+        target = 0.0
+
+      dt = DT_CTRL * CarControllerParams.STEER_STEP
+      alpha = 1.0 if not active else (1.0 - math.exp(-dt / _PA_TAU_S))
+      self._pa_last += alpha * (target - self._pa_last)
+      if abs(self._pa_last) < 1e-6:
+        self._pa_last = 0.0
+
+      if mode == 1:
+        self._pa_shadow_log(v_ego, raw, self._pa_last)
+
+      # 影子模式或未激活时，CAN 上必须严格是 0.0（panda 要求 inactive 常量）
+      if mode < 2 or not active:
+        return 0.0
+      return float(self._pa_last)
+    except Exception:
+      self._pa_last = 0.0
+      return 0.0
+
+  def _path_angle_shadow_log(self, v_ego, raw, scaled):
+    """影子模式：约 2 Hz 记录"如果实发会发什么"，用于实车验证后再开 mode=2。"""
+    try:
+      self._pa_frame += 1
+      if self._pa_frame % 10 != 0:
+        return
+      if self._pa_fh is None:
+        self._pa_fh = open(_PA_LOG, "a", buffering=1)
+      import time as _time
+      self._pa_fh.write("%.3f,%.3f,%.8f,%.8f,%.8f\n"
+                        % (_time.monotonic(), float(v_ego),
+                           float(self.apply_curvature_last), float(raw), float(scaled)))
     except Exception:
       pass
 
@@ -359,8 +471,8 @@ class CarController(CarControllerBase):
         current_curvature=current_curvature,
       )
 
-      # Extract path_angle (c1) from FordCurveController (BluePilot bp-7.0)
-      apply_path_angle = getattr(self.curve_controller, 'path_angle', 0.0)
+      # c1 (path angle)：由 dp_ford_send_path_angle 控制，默认恒为 0
+      apply_path_angle = self._path_angle_cmd(CC, v_ego)
 
       self.apply_curvature_last = float(apply_curvature)
 
@@ -388,7 +500,7 @@ class CarController(CarControllerBase):
             self.CAN,
             mode,
             0.,
-            0.,
+            apply_path_angle,        # c1，默认 0.0（见 _pa_cfg）
             -self.apply_curvature_last,
             0.,
             counter,
@@ -406,7 +518,7 @@ class CarController(CarControllerBase):
             self.CAN,
             CC.latActive,
             0.,
-            0.,
+            apply_path_angle,        # c1，默认 0.0（见 _pa_cfg）
             -self.apply_curvature_last,
             0.,
           )

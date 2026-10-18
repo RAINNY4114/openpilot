@@ -58,6 +58,10 @@ CONFIG_PATH = "/data/ford_curve.json"
 DEFAULTS = {
     "bend_deg_min": 45.0,
     "bend_deg_min_display": 20.0,
+    # 横向前瞻混合（FordPlanLead）单独一个闸门，默认 10 度。
+    # 纵向减速仍用 bend_deg_min（默认 45 度），两者互不影响：
+    # 缓弯里不需要减速，但横向确实需要提前打方向补延迟。
+    "bend_deg_min_lat": 10.0,
     "bend_extend_m": 400.0,
 }
 
@@ -124,6 +128,38 @@ def bend_deg_min_display() -> float:
                                        DEFAULTS["bend_deg_min_display"]))
     except Exception:
         return float(DEFAULTS["bend_deg_min_display"])
+
+
+def bend_deg_min_lat() -> float:
+    """横向前瞻混合（FordPlanLead）的弯道闸门 —— 与纵向减速闸门分离。
+
+    纵向用 bend_deg_min（默认 45 度）决定要不要减速；横向只需要"前方确实
+    在转弯"就该提前打方向。实测高速缓弯（8~20 度累计转角）占比很高，用
+    45 度闸门时横向前瞻只有约 8% 的时间能介入，等于没开。
+
+    配置写在 /data/ford_curve.json 的 "bend_deg_min_lat"，热生效。
+    """
+    try:
+        return float(load_config().get("bend_deg_min_lat",
+                                       DEFAULTS["bend_deg_min_lat"]))
+    except Exception:
+        return float(DEFAULTS["bend_deg_min_lat"])
+
+
+def bend_weight(bend_deg: float, gate: float = None, ramp: float = 8.0) -> float:
+    """累计转角 -> 0..1 软权重（smoothstep）。
+
+    硬闸门在阈值处会突变：横向前瞻一开，混合项立刻从 0 跳到 b*(model-base)，
+    等效于给转向一个阶跃。这里让权重在 [gate, gate+ramp] 之间平滑爬升，
+    闸门附近不再有台阶。
+    """
+    try:
+        g = float(bend_deg_min_lat() if gate is None else gate)
+        x = (float(bend_deg) - g) / max(float(ramp), 1e-3)
+        x = 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
+        return float(x * x * (3.0 - 2.0 * x))
+    except Exception:
+        return 0.0
 
 
 def path_curvature(positions, turn_rates, v_preds, v_ego):
