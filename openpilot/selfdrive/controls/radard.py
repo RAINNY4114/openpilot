@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
+from openpilot.selfdrive.controls.lib.cutin_risk import CutInRiskEstimator  # [CHX_CUTIN 20261019]
 
 from opendbc.car import structs
 from opendbc.car.hyundai.values import HyundaiFlags
@@ -210,6 +211,9 @@ class RadarD:
 
     self.ready = False
 
+    # [CHX_CUTIN 20261019] cut-in 风险评估（写 radarState.leadCutInRisk）
+    self.cutin = CutInRiskEstimator()
+
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
 
@@ -262,6 +266,18 @@ class RadarD:
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
                                           self.CP, self.CP_SP, low_speed_override=False)
 
+    # [CHX_CUTIN 20261019] cut-in 风险评估 → radarState.leadCutInRisk
+    try:
+      self.radar_state.leadCutInRisk = self.cutin.update(
+        rr.points, self.v_ego,
+        model_msg=sm['modelV2'],
+        amap_msg=sm['amapNavi'],
+        car_state=sm['carState'],
+        stamp=int(sm.logMonoTime.get('radarTracks', 0)),
+      )
+    except Exception as e:
+      cloudlog.debug(f'cutin risk failed: {e}')
+
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
 
@@ -285,7 +301,11 @@ def main() -> None:
   cloudlog.info("radard got CarParamsSP")
 
   # *** setup messaging
-  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2')
+  # [CHX_CUTIN 20261019] amapNavi 提供左右激光雷达占用；该服务可能未运行，必须全部 ignore，
+  # 否则 sm.all_checks() 会把 radarState.valid 拖成 False（会连带影响控制）。
+  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks', 'amapNavi'], poll='modelV2',
+                           ignore_alive=['amapNavi'], ignore_avg_freq=['amapNavi'],
+                           ignore_valid=['amapNavi'])
   pm = messaging.PubMaster(['radarState'])
 
   RD = RadarD(CP, CP_SP, CP.radarDelay)

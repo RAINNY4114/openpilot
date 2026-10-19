@@ -735,6 +735,27 @@ struct RadarState @0x9a185389d6fdd05f {
   leadOne @3 :LeadData;
   leadTwo @4 :LeadData;
 
+  # [CHX_CUTIN 20261019] cut-in 预减速风险（radard 计算，plannerd 消费）
+  # score  : 0..1 置信度
+  # source : 传感器位图 1=前雷达 2=视觉 4=左激光 8=右激光
+  #          16=左盲点 32=右盲点 64=MR76左 128=MR76右
+  leadCutInRisk @14 :CutInRisk;
+
+  struct CutInRisk {
+    status @0 :Bool;          # 风险成立且可用
+    radar @1 :Bool;           # 来源为雷达轨迹（false = 仅视觉）
+    score @2 :Float32;        # 0..1
+    dRel @3 :Float32;         # m，自前保险杠
+    yRel @4 :Float32;         # m，左正
+    vRel @5 :Float32;         # m/s
+    ttc @6 :Float32;          # s
+    inwardSpeed @7 :Float32;  # m/s，朝本车道中心的横向速度
+    source @8 :UInt16;
+    trackId @9 :Int32 = -1;
+    ageFrames @10 :Int32;
+    stamp @11 :UInt64;
+  }
+
   struct LeadData {
     dRel @0 :Float32;  # m from the front bumper of the car
     yRel @1 :Float32;  # m in car frame, left positive

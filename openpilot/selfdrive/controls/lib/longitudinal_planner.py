@@ -22,6 +22,9 @@ from openpilot.selfdrive.controls.lib.ford_curve_speed_fusion import FordCurveSp
 from openpilot.selfdrive.controls.lib.curve_speed_tsc import CurveSpeedTSC
 from openpilot.selfdrive.controls.lib.nn import FordNNCurveControl  # [CHX_NN 20261019]
 from openpilot.selfdrive.controls.lib.traffic_light import TrafficLightControl  # [CHX_TRAFFIC 20261019]
+from openpilot.selfdrive.controls.lib.cutin_risk import (  # [CHX_CUTIN 20261019]
+  get_cutin_predecel_accel_limit, apply_cutin_predecel_accel_limit,
+)
 from openpilot.common.params import Params
 
 A_CRUISE_MAX_VALS = [2.2, 1.6, 1.2, 0.9, 0.75, 0.62, 0.58, 0.50, 0.45,  0.40]
@@ -354,6 +357,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     else:
       self.curve_speed_target = 0.0
       self.curve_speed_active = False
+
+    # [CHX_CUTIN 20261019] cut-in 预减速：radard 的 leadCutInRisk → 加速度上界（mode>=2 才生效）
+    if not long_control_off:
+      try:
+        _cutin_limit = get_cutin_predecel_accel_limit(radar_state)
+        if _cutin_limit is not None:
+          self.output_a_target = apply_cutin_predecel_accel_limit(
+            self.output_a_target, a_prev, _cutin_limit)
+      except Exception:
+        pass
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 
