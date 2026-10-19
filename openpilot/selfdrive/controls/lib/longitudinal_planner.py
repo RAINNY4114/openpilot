@@ -102,7 +102,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
 
-  def update(self, sm):
+  def update(self, sm, radar_state=None):
+    # [CHX_AVOID 20261019] radar_state 允许由 plannerd 传入「起步证据过滤」后的副本；
+    # 缺省（None）时行为与原来完全一致：直接读 sm['radarState']。
+    if radar_state is None:
+      radar_state = sm['radarState']
     LongitudinalPlannerSP.update(self, sm)
 
     if len(sm['carControl'].orientationNED) == 3:
@@ -237,7 +241,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         pass
 
     self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
-    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
+    self.mpc.update(radar_state, personality=sm['selfdriveState'].personality)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
