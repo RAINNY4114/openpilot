@@ -11,6 +11,7 @@ from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 from opendbc.car.ford.apa_controller import FordAPAController
 
 from openpilot.selfdrive.controls.lib.ford_curve_controller import FordCurveController
+from openpilot.selfdrive.controls.lib.nn import FordNNCurveControl  # [CHX_NN 20261019]
 
 
 # ===========================================================================
@@ -132,6 +133,14 @@ class CarController(CarControllerBase):
     # CarController itself only supplies vehicle state and sends the
     # resulting curvature to the Ford CAN message.
     self.curve_controller = FordCurveController(CP)
+
+    # [CHX_NN_LATERAL 20261019] NN 弯道控制运行时（card 进程：横向权威 + 风格唯一写者）。
+    # mode=0 时 update() 直接返回全 0 且不推进状态，与打补丁前逐位一致。
+    # 四道安全边界见 nn/ford_nn_curve_control.py 模块 docstring。
+    self.nn_curve = FordNNCurveControl(
+      CP,
+      config={"style_enabled": True, "style_save_period_s": 300.0},
+    )
 
     # ------------------------------------------------------------------
     # Dual-source curvature telemetry
@@ -450,6 +459,27 @@ class CarController(CarControllerBase):
       sport_gear = bool(
         CS.out.gearShifter == structs.CarState.GearShifter.sport
       )
+
+      # [CHX_NN_LATERAL 20261019] NN 横向前馈残差：requested_curvature *= (1+d_gain)。
+      # mode<2 或 NN 不可用时 engaged=False，曲率保持原值；任何异常都禁用 NN 保原值，
+      # 绝不允许把异常抛进控制环。
+      try:
+        _nn = self.nn_curve.update(
+          t=now_nanos * 1e-9,
+          kappa=float(requested_curvature),
+          v_ego=float(v_ego),
+          steering_angle_deg=float(steering_angle_deg),
+          yaw_rate=float(CS.out.yawRate),
+          lateral_active=bool(CC.latActive),
+          a_ego=float(getattr(CC.actuators, "accel", 0.0) or 0.0),
+          gas=float(getattr(CS.out, "gas", 0.0) or 0.0),
+          override=bool(steering_pressed),
+        )
+        if _nn.get("engaged"):
+          requested_curvature = float(requested_curvature) * (1.0 + float(_nn["d_gain"]))
+      except Exception:
+        self.nn_curve.disabled = True
+        self.nn_curve.disabled_reason = "carcontroller_exception"
 
       # ---------------------------------------------------------------
       # Ford Curve Controller

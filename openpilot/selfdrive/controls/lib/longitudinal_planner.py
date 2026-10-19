@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
@@ -19,6 +20,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 from openpilot.selfdrive.controls.lib.ford_curve_speed import FordCurveController, _read_param_bool_direct
 from openpilot.selfdrive.controls.lib.ford_curve_speed_fusion import FordCurveSpeedFusion
 from openpilot.selfdrive.controls.lib.curve_speed_tsc import CurveSpeedTSC
+from openpilot.selfdrive.controls.lib.nn import FordNNCurveControl  # [CHX_NN 20261019]
 from openpilot.common.params import Params
 
 A_CRUISE_MAX_VALS = [2.2, 1.6, 1.2, 0.9, 0.75, 0.62, 0.58, 0.50, 0.45,  0.40]
@@ -83,6 +85,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._tsc = CurveSpeedTSC()
     self._tsc_active = False
     self._tsc_takeover = False
+
+    # [CHX_NN_LONG 20261019] NN 弯道横向加速度预算腿（controlsd 进程：纵向从属，
+    # 不学风格，每 30s 读一次 card 侧写好的 style.json）。mode<3 时 a_lat_budget=None，
+    # 本腿完全静默。
+    self.nn_curve = FordNNCurveControl(
+      config={"style_enabled": False, "style_reload_period_s": 30.0},
+    )
 
     # 对外发布的弯道减速真实值
     # -> cereal: LongitudinalPlanSP.curveSpeedTarget / curveSpeedActive
@@ -185,6 +194,28 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         sm, v_ego, v_cruise, reset_state, long_control_off, sm['selfdriveState'].enabled,
         lincoln_curve_speed=lincoln_curve_speed,
         lincoln_osm_realtime_cruise=lincoln_osm_realtime_cruise)
+
+      # [CHX_NN_LONG 20261019] NN 弯道预算腿：v = sqrt(a_lat_budget / |kappa|)，与其余
+      # 弯道腿保持 min 关系（只会更保守）。a_lat_budget 只在 mode>=3 时非 None。
+      try:
+        _nn_kappa = float(sm['modelV2'].action.desiredCurvature) if 'modelV2' in sm.data else 0.0
+        _nn_out = self.nn_curve.update(
+          t=time.monotonic(),
+          kappa=_nn_kappa,
+          v_ego=float(v_ego),
+          lateral_active=bool(sm['selfdriveState'].enabled),
+          a_ego=float(sm['carState'].aEgo),
+          gas=float(getattr(sm['carState'], "gas", 0.0) or 0.0),
+          override=bool(sm['carState'].steeringPressed),
+        )
+        _nn_budget = _nn_out.get("a_lat_budget")
+        if _nn_budget is not None:
+          _nn_abs_k = abs(_nn_kappa)
+          if _nn_abs_k > 1e-4:
+            v_cruise = min(v_cruise, math.sqrt(_nn_budget / _nn_abs_k))
+      except Exception:
+        self.nn_curve.disabled = True
+        self.nn_curve.disabled_reason = "planner_exception"
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
 
