@@ -47,6 +47,10 @@ DEFAULTS = {
     "rate_max": 2.5e-4,     # 输出最大变化率 (1/m)/s：任何阶跃都过不去
     "max_trim": 5.0e-4,     # 总修正幅值上限 (1/m)
     "min_speed_ms": 3.0,    # 低于此速度不介入
+    # 速度自适应收缩（2026-10-19）：rate_max/max_trim 按 (v_ref/v)^2 收缩。
+    # 修正量是曲率量纲，高速时等效 a_lat 按 v^2 放大。0 = 关闭。
+    "speed_scale_v_ref": 0.0,
+    "speed_scale_floor": 0.30,
     "log": False,
 }
 
@@ -122,19 +126,29 @@ class LaneTrimGovernor:
 
             dt = max(1e-3, min(0.1, float(dt)))
 
+            # ---- 速度自适应收缩（2026-10-19）----
+            # 修正量是曲率量纲：同样幅值的修正，高速时等效横向加速度按
+            # v^2 放大。速率与幅值上限一并按 (v_ref/v)^2 收缩，避免高速时
+            # 修正项把车推来推去。v_ref<=0 时 _sc=1.0，与原行为逐位一致。
+            _sc = 1.0
+            _vref = max(0.0, self._f("speed_scale_v_ref", 0.0))
+            _v = float(v_ego)
+            if _vref > 0.0 and _v > 0.5:
+                _sc = max(self._f("speed_scale_floor", 0.30), min(1.0, (_vref / _v) ** 2))
+
             # ---- 1) 低通 -----------------------------------------------------
             fc = max(0.02, min(10.0, self._f("lp_hz", 0.60)))
             a = 1.0 - math.exp(-2.0 * math.pi * fc * dt)
             y = self.out + a * (x - self.out)
 
             # ---- 2) 速率限制 -------------------------------------------------
-            rate = max(0.0, self._f("rate_max", 2.5e-4))
+            rate = max(0.0, self._f("rate_max", 2.5e-4)) * _sc
             if rate > 0.0:
                 step = rate * dt
                 y = max(self.out - step, min(self.out + step, y))
 
             # ---- 3) 幅值限制 -------------------------------------------------
-            lim = max(0.0, self._f("max_trim", 5.0e-4))
+            lim = max(0.0, self._f("max_trim", 5.0e-4)) * _sc
             if lim > 0.0:
                 y = max(-lim, min(lim, y))
 

@@ -62,6 +62,11 @@ DEFAULTS = {
     "jerk": 2.0e-2,         # (1/m)/s^3
     # 直通门限：变道中、或曲率大于此值（急弯/变道起步）时完全直通
     "knee_curv": 6.0e-3,    # 1/m
+    # 速度自适应收缩（2026-10-19）：rate/jerk 按 (v_ref/v)^2 收缩。
+    # 同样的曲率抖动在高速时等效 a_lat 按 v^2 放大（"越快越晃"的根源）。
+    # 0 = 关闭（保持原行为）。
+    "speed_scale_v_ref": 0.0,
+    "speed_scale_floor": 0.30,
     "min_speed_ms": 3.0,
     "log": False,
 }
@@ -163,8 +168,18 @@ class ModelCurvatureGovernor:
       else:
         self.z = x
 
+      # ---- 速度自适应收缩（2026-10-19）----
+      # 参考 bp-7.0 VLT（高速把额外前瞻收敛到 0）与 RAINNY Ford 分支
+      # （曲率速率限制随速度收紧）：把同一思路作用在指令整型上。
+      # speed_scale_v_ref <= 0 时 _sc 恒 1.0，行为与原来逐位一致。
+      _sc = 1.0
+      _vref = max(0.0, self._f("speed_scale_v_ref", 0.0))
+      _v = float(v_ego)
+      if _vref > 0.0 and _v > 0.5:
+        _sc = max(self._f("speed_scale_floor", 0.30), min(1.0, (_vref / _v) ** 2))
+
       # ---- 2) 速率限制（一阶）----
-      rate = max(0.0, self._f("rate", 6.0e-4))
+      rate = max(0.0, self._f("rate", 6.0e-4)) * _sc
       d_target = (x - self.out) / dt
       if rate > 0.0:
         d_target = max(-rate, min(rate, d_target))
@@ -173,7 +188,7 @@ class ModelCurvatureGovernor:
       # 变化率只能以 jerk 的加速度逼近目标速率，于是输出是 S 曲线而不是
       # 折线；来回变号的噪声（需要很高的加加速度）被显著衰减，
       # 而单调变化的真实道路曲率几乎不受影响。
-      jerk = max(0.0, self._f("jerk", 2.0e-2))
+      jerk = max(0.0, self._f("jerk", 2.0e-2)) * _sc
       if jerk > 0.0:
         max_dr = jerk * dt
         self.rate_state += max(-max_dr, min(max_dr, d_target - self.rate_state))
