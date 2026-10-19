@@ -132,8 +132,16 @@ def _ao_read_num(key, default, cast=float):
 AA_LOG_PATH = "/data/media/0/auto_avoidance.log"
 AA_LOG_MAX_BYTES = 5_000_000
 
+# [AA_DEFAULT_OFF 2026-10-19] 紧急转向避让默认关闭。
+#
+# 现场实测（2026-10-19，route 0000004d--22d427bd80）：打开后 110 分钟产生
+# 49 次逃逸车道请求、4 次真实自动变道，多数发生时无障碍物（od=-1）或
+# 障碍物在 50~60m 外，且两侧激光雷达未接入(llid=rlid=0)时安全门弃权放行
+# —— 即"没有变道必要、也没有达到变道安全性要求"的提示与变道动作。
+# 恢复上周(86813af 快照期)的设备行为：AA 关闭。需要时显式写参数
+# AutoAvoidanceEnabled=1 打开。
 AA_CFG_DEFAULTS = {
-  "enabled": 1,
+  "enabled": 0,
   # ------------------------------------------------------------------
   # [AA_STABLE_RATIO] 逃逸车道稳定性判定模式。
   #
