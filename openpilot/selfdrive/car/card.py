@@ -262,7 +262,10 @@ carlog.addHandler(ForwardingHandler(cloudlog))
 # ============================================================================
 # Auxiliary obstacle sensors -> carState blind-spot veto
 #
-# >>> CURRENTLY DISABLED (both sources default OFF).  See __init__. <<<
+# >>> DISABLED AT THE CODE LEVEL since 2026-10-19 (AUX_BSM_VETO_ENABLED=False).
+# >>> Runtime params dp_amap_lidar_enable / dp_mr76_lane_enable are also set
+# >>> to 0 on the device.  See __init__ and the header of
+# >>> apply_aux_blindspot_veto().  Left/right car alerts are OEM-BSM-only. <<<
 #
 # Road test 2026-09-28: OR-ing these sensors into the blind-spot check made the
 # check assert almost continuously.  That is NOT acceptable -- the blind-spot
@@ -305,6 +308,21 @@ MR76_LANE_ENABLE_PARAM = "dp_mr76_lane_enable"
 
 # Param refresh period, in card cycles.  card runs at 100 Hz.
 AUX_VETO_PARAM_PERIOD = 100
+
+# [BSM_VETO_DISABLED 2026-10-19] 辅助传感器禁止再 OR 进 carState 盲区。
+#
+# 现场要求：左右侧有车的警报只依赖 OEM 盲点检测（Side_Detect_L/R_Stat）。
+# 历史问题（route 0000004d--22d427bd80 实测）：侧向激光雷达 amapNavi 左侧
+# "障碍物"位常驻（llob=1 占 59%），OR 进盲区后 carState.leftBlindspot 被锁死
+# 68%~84%（seg13 连续 45.6s），而 OEM BSM 回放全程为 0。后果：盲区语音/HUD
+# 常亮、laneChangeBlocked 常报、自动超车变道确认计时器永不停摆。
+#
+# 辅助占用数据本身仍照常计算并发布（AOMr76Fresh/AOMr76Lane/AOMr76GainLane、
+# 激光雷达位诊断），供自动超车收益门等使用，只是不再影响 carState。
+# 如需恢复辅助否决，把此常量改回 True（并确保 dp_amap_lidar_enable /
+# dp_mr76_lane_enable 非 0）。
+AUX_BSM_VETO_ENABLED = False
+
 
 
 def read_param_direct(key: str) -> str | None:
@@ -653,10 +671,14 @@ class Car:
     self._ao_publish_mr76_lane()
 
     # ---- OR into carState (OEM BSM already set by the car port) -----------
-    if block_left:
-      CS.leftBlindspot = True
-    if block_right:
-      CS.rightBlindspot = True
+    # [BSM_VETO_DISABLED] 2026-10-19：辅助传感器不再 OR 进盲区，左右侧有车
+    # 只依赖 OEM 盲点检测结果（见上方 AUX_BSM_VETO_ENABLED 注释：激光雷达
+    # 左侧位常驻会把 leftBlindspot 锁死，连带把自动超车确认永久暂停）。
+    if AUX_BSM_VETO_ENABLED:
+      if block_left:
+        CS.leftBlindspot = True
+      if block_right:
+        CS.rightBlindspot = True
 
   def state_update(self) -> tuple[car.CarState, custom.CarStateSP, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
