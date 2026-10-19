@@ -21,6 +21,7 @@ from openpilot.selfdrive.controls.lib.ford_curve_speed import FordCurveControlle
 from openpilot.selfdrive.controls.lib.ford_curve_speed_fusion import FordCurveSpeedFusion
 from openpilot.selfdrive.controls.lib.curve_speed_tsc import CurveSpeedTSC
 from openpilot.selfdrive.controls.lib.nn import FordNNCurveControl  # [CHX_NN 20261019]
+from openpilot.selfdrive.controls.lib.traffic_light import TrafficLightControl  # [CHX_TRAFFIC 20261019]
 from openpilot.common.params import Params
 
 A_CRUISE_MAX_VALS = [2.2, 1.6, 1.2, 0.9, 0.75, 0.62, 0.58, 0.50, 0.45,  0.40]
@@ -92,6 +93,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.nn_curve = FordNNCurveControl(
       config={"style_enabled": False, "style_reload_period_s": 30.0},
     )
+
+    # [CHX_TRAFFIC 20261019] 红绿灯（导航推送）。mode 0=off 1=shadow 2=active，
+    # 配置 /data/traffic_light.json，默认 1（只算不用）。
+    self.traffic_light = TrafficLightControl()
+    self.traffic_light_out = {}
 
     # 对外发布的弯道减速真实值
     # -> cereal: LongitudinalPlanSP.curveSpeedTarget / curveSpeedActive
@@ -220,6 +226,19 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       except Exception:
         self.nn_curve.disabled = True
         self.nn_curve.disabled_reason = "planner_exception"
+
+      # [CHX_TRAFFIC 20261019] 红绿灯：只压 v_cruise 上限（速度目标），不给负加速度，
+      # 减速度仍由 MPC 正常求解。mode<2 时 v_target 恒 None（影子）。
+      try:
+        _tl = self.traffic_light.update(v_ego=float(v_ego))
+        self.traffic_light_out = _tl
+        _tl_v = _tl.get("v_target")
+        if _tl_v is not None:
+          v_cruise = min(v_cruise, float(_tl_v))
+        if _tl.get("_log"):
+          cloudlog.info(_tl["_log"])
+      except Exception:
+        pass
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
 

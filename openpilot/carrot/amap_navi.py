@@ -1696,6 +1696,13 @@ class AmapNaviServ:
 
 def main():
   amap_navi = AmapNaviServ()
+  # [CHX_TRAFFIC 20261019] 红绿灯导航推送接收（HTTP :7713，carrot_man 同协议）。
+  # 独立 daemon 线程；端口被占/异常都不影响盲区 UDP 主链路。
+  try:
+    from openpilot.carrot.traffic_light_recv import start as _start_traffic_light
+    _start_traffic_light()
+  except Exception as _e:
+    print(f"[traffic_light] receiver start failed: {_e}", flush=True)
   amap_navi.udp_recv_thread()
 
 if __name__ == "__main__":
