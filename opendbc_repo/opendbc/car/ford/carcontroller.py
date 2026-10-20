@@ -499,6 +499,7 @@ class CarController(CarControllerBase):
         lat_active=bool(CC.latActive),
         cruise_enabled=cruise_enabled,
         current_curvature=current_curvature,
+        sport_gear=sport_gear,
       )
 
       # c1 (path angle)：由 dp_ford_send_path_angle 控制，默认恒为 0

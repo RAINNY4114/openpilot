@@ -206,16 +206,31 @@ class CarState(CarStateBase, MadsCarState):
       )
 
     # gear
+    #
+    # GearLvrPos_D_Actl VAL_TABLE (ford_lincoln_base_pt.dbc):
+    #   1 = Reverse, 3 = Drive, 4 = Sport_DriveSport (S), 5 = Low
+    #
+    # S is reported as GearShifter.sport so openpilot can tell it apart from D
+    # (the FordCurveController Sport profile consumes it). This REQUIRES
+    # `GearShifter.sport` to be listed in Ford's `DRIVABLE_GEARS`
+    # (opendbc/car/ford/interface.py): car_events.py flags any gear that is
+    # neither `drive` nor in `DRIVABLE_GEARS` as EventName.wrongGear, and
+    # wrongGear carries a NO_ENTRY event ("Gear not D") that blocks cruise
+    # engagement outright.
     if self.CP.transmissionType == TransmissionType.automatic:
-      if (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] in (3, 4, 5)):
+      gear_lvr_pos = cp.vl["TransGearData"]["GearLvrPos_D_Actl"]
+
+      if gear_lvr_pos == 4:
+        ret.gearShifter = GearShifter.sport
+      elif gear_lvr_pos in (3, 5):
         ret.gearShifter = GearShifter.drive
-      elif (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] == 1):
-        ret.gearShifter = GearShifter.reverse      
+      elif gear_lvr_pos == 1:
+        ret.gearShifter = GearShifter.reverse
 
     elif self.CP.transmissionType == TransmissionType.manual:
       ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
       if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
-        ret.gearShifter = GearShifter.reverse      
+        ret.gearShifter = GearShifter.reverse
       else:
         ret.gearShifter = GearShifter.drive
 

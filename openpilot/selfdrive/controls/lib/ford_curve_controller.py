@@ -60,6 +60,21 @@ ENTRY_GAIN = 1.15
 MID_GAIN = 1.10
 EXIT_GAIN = 1.05
 
+# ============================================================================
+# Sport (S-gear) profile
+#
+# Ford selector position 4 ("Sport_DriveSport") is reported by carstate.py as
+# GearShifter.sport. When `dp_ford_sport_enable` is set AND the car is in S,
+# the controller overlays this more aggressive profile. With the param unset
+# (default) the effective values are identical to the base tuning above.
+# ============================================================================
+
+SPORT_MAX_LATERAL_ACCEL = 3.0
+SPORT_ENTRY_GAIN = 1.20
+SPORT_MID_GAIN = 1.15
+SPORT_EXIT_GAIN = 1.10
+SPORT_RATE_SCALE = 1.25
+
 # Output filter.
 # 2026-10-18: 保留常量作为「低速」参考值（0.15 @20Hz <=> tau 0.31 s），
 # 实际 alpha 由 FordCurveController._filter_tau() 按车速计算。
@@ -435,6 +450,39 @@ class FordCurveController:
     self.path_angle = 0.0
     self.path_angle_last = 0.0
 
+    # ------------------------------------------------------------------------
+    # Sport (S-gear) profile
+    # ------------------------------------------------------------------------
+
+    self.sport_enable = _read_bool("dp_ford_sport_enable", False)
+    self.sport_active = False
+
+    self.sport_max_lateral_accel = _read_float(
+      "dp_ford_sport_max_lat_accel", SPORT_MAX_LATERAL_ACCEL, 0.5, 3.6,
+    )
+    self.sport_entry_gain = _read_float(
+      "dp_ford_sport_entry_gain", SPORT_ENTRY_GAIN, 0.5, 1.5,
+    )
+    self.sport_mid_gain = _read_float(
+      "dp_ford_sport_mid_gain", SPORT_MID_GAIN, 0.5, 1.5,
+    )
+    self.sport_exit_gain = _read_float(
+      "dp_ford_sport_exit_gain", SPORT_EXIT_GAIN, 0.5, 1.5,
+    )
+    self.sport_rate_scale = _read_float(
+      "dp_ford_sport_rate_scale", SPORT_RATE_SCALE, 1.0, 3.0,
+    )
+
+    # Effective tuning: base values until _refresh_sport() says otherwise.
+    self.max_lateral_accel = MAX_LATERAL_ACCEL
+    self.gain_entry = ENTRY_GAIN
+    self.gain_mid = MID_GAIN
+    self.gain_exit = EXIT_GAIN
+    self.rate_scale = 1.0
+    self.sport_on = False
+
+    self._refresh_sport()
+
   # ==========================================================================
   # Reset
   # ==========================================================================
@@ -469,6 +517,39 @@ class FordCurveController:
     self.htd.reset()
 
   # ==========================================================================
+  # Sport (S-gear) profile
+  # ==========================================================================
+
+  def set_sport(self, active):
+    """S-gear state. Called every frame by CarController."""
+    active = bool(active)
+
+    if active == self.sport_active:
+      return
+
+    self.sport_active = active
+
+    self._refresh_sport()
+
+  def _refresh_sport(self):
+    """Effective values = base tuning, overlaid by the Sport profile.
+
+    With `dp_ford_sport_enable` unset (default) these are identical to the
+    base values, so the controller behaves exactly as before.
+    """
+    on = bool(self.sport_enable and self.sport_active)
+
+    self.sport_on = on
+
+    self.max_lateral_accel = (
+      self.sport_max_lateral_accel if on else MAX_LATERAL_ACCEL
+    )
+    self.gain_entry = self.sport_entry_gain if on else ENTRY_GAIN
+    self.gain_mid = self.sport_mid_gain if on else MID_GAIN
+    self.gain_exit = self.sport_exit_gain if on else EXIT_GAIN
+    self.rate_scale = self.sport_rate_scale if on else 1.0
+
+  # ==========================================================================
   # Lateral acceleration limit
   # ==========================================================================
 
@@ -498,7 +579,7 @@ class FordCurveController:
       return curvature
 
     max_curvature = (
-      MAX_LATERAL_ACCEL
+      float(getattr(self, "max_lateral_accel", MAX_LATERAL_ACCEL))
       / max(speed * speed, 1.0)
     )
 
@@ -593,13 +674,16 @@ class FordCurveController:
 
     v = max(float(speed), 0.1)
 
+    # S-gear (Sport) scales the whole rate table; 1.0 when not in Sport.
+    rate_scale = float(getattr(self, "rate_scale", 1.0))
+
     windup_rate = float(
       np.interp(
         v,
         [5.0, 25.0],
         [0.00050, 0.00011],
       )
-    )
+    ) * rate_scale
 
     unwind_rate = float(
       np.interp(
@@ -607,7 +691,7 @@ class FordCurveController:
         [5.0, 25.0],
         [0.00055, 0.00020],
       )
-    )
+    ) * rate_scale
 
     delta = target - previous
 
@@ -698,11 +782,11 @@ class FordCurveController:
 
     if self.curve_phase == "ENTRY":
 
-      gain = ENTRY_GAIN
+      gain = float(getattr(self, "gain_entry", ENTRY_GAIN))
 
     elif self.curve_phase == "HOLD":
 
-      gain = MID_GAIN
+      gain = float(getattr(self, "gain_mid", MID_GAIN))
 
     elif self.curve_phase == "EXIT":
 
@@ -715,11 +799,11 @@ class FordCurveController:
     else:
 
       if speed < 15.0:
-        gain = ENTRY_GAIN
+        gain = float(getattr(self, "gain_entry", ENTRY_GAIN))
       elif speed < 28.0:
-        gain = MID_GAIN
+        gain = float(getattr(self, "gain_mid", MID_GAIN))
       else:
-        gain = EXIT_GAIN
+        gain = float(getattr(self, "gain_exit", EXIT_GAIN))
 
     return curvature * gain
 
@@ -1000,6 +1084,7 @@ class FordCurveController:
       lat_active=None,
       cruise_enabled=False,
       current_curvature=None,
+      sport_gear=False,
   ):
     """
     Main Ford curvature controller with path_angle (c1) computation.
@@ -1016,6 +1101,8 @@ class FordCurveController:
       lat_active
       cruise_enabled
       current_curvature
+      sport_gear        -- True when the car reports GearShifter.sport.
+                           Only has an effect when `dp_ford_sport_enable` is set.
 
     Returns:
       final curvature (float)
@@ -1032,6 +1119,9 @@ class FordCurveController:
       return 0.0
 
     self.active = True
+
+    # S-gear (Sport) profile state; no-op unless dp_ford_sport_enable is set.
+    self.set_sport(sport_gear)
 
     speed = max(
       float(v_ego),
