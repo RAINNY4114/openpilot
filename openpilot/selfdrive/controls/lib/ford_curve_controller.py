@@ -51,6 +51,12 @@ CURVATURE_ERROR = 0.002
 # Above this speed, current-curvature blending is enabled.
 CURRENT_CURVATURE_MIN_SPEED = 9.0
 
+# [CHX_LAT 20261021] 曲率速率表的 20 Hz dt 补偿。
+# 速率表是 100 Hz 每帧值；控制器在 STEER_STEP=5 下 20 Hz 调用，
+# 直接照用等于把真实变化率压到 1/5（25 m/s: 0.0022/s），
+# 入弯要 1.26 s 才建满曲率 -> 车头晚转 -> 入口偏出车道。
+_RATE_DT_COMP_DEFAULT = 5.0
+
 
 # ============================================================================
 # Curve shaping
@@ -403,6 +409,11 @@ class FordCurveController:
     # 做成参数便于实车 A/B：写 0.002 回到原状，写 0.06 对齐 ford 分支。
     self.curvature_error = self._read_curv_error()
 
+    # [CHX_LAT 20261021] 曲率速率 dt 补偿（见 _RATE_DT_COMP_DEFAULT）
+    self.curv_rate_dt_comp = _read_float(
+      "dp_ford_rate_dt_comp", _RATE_DT_COMP_DEFAULT, 1.0, 10.0)
+    self._rate_t = 0.0
+
     self.last_curvature = 0.0
 
     self.last_requested_curvature = 0.0
@@ -676,6 +687,16 @@ class FordCurveController:
 
     # S-gear (Sport) scales the whole rate table; 1.0 when not in Sport.
     rate_scale = float(getattr(self, "rate_scale", 1.0))
+
+    # [CHX_LAT 20261021] 20 Hz 节拍的 dt 补偿（与 _soft_roc_limit 的 x5 同源）。
+    # 25 m/s: 0.00011/帧 x 20 Hz = 0.0022/s -> 入弯 1.26 s 才建满，走 31 m。
+    # 乘 5 回到 0.011/s（约 0.25 s 建满），入口偏移 0.7 m -> 0.2 m 量级。
+    _now_r = time.monotonic()
+    if _now_r - getattr(self, "_rate_t", 0.0) > 5.0:
+      self._rate_t = _now_r
+      self.curv_rate_dt_comp = _read_float(
+        "dp_ford_rate_dt_comp", _RATE_DT_COMP_DEFAULT, 1.0, 10.0)
+    rate_scale *= float(getattr(self, "curv_rate_dt_comp", _RATE_DT_COMP_DEFAULT))
 
     windup_rate = float(
       np.interp(

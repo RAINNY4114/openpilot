@@ -100,6 +100,12 @@ DEFAULTS = {
     "kp": 0.0008,           # 位置环比例增益（曲率 / 米）
     "ki": 0.0002,           # 位置环积分增益
     "max_curv": 0.00035,    # 输出硬限幅 (1/m)
+    # 2026-10-21: 弯道内位置环授权增强。直道 boost=1（完全不动，避免高速
+    # 左右摇晃），弯道按 |κ|/curve_boost_k 比例线性放大 kp/ki/max_curv。
+    # 2.0 = 满弯时授权翻倍（30 m/s 下 max_curv 0.00035 -> 0.00070，
+    # 仍远小于 FordCurveController 的曲率偏差钳位，不会和下游限幅打架）。
+    "curve_boost": 2.0,
+    "curve_boost_k": 0.002,  # 达到满 boost 所需曲率 (1/m)，0.002 = 半径 500 m
     "bias_slew_mps": 0.10,  # 偏置目标最大变化率 (m/s)：消除阶跃扰动
     "v_ref_ms": 15.0,       # 增益调度参考车速
     "gain_min": 0.20,       # (v_ref/v)^2 缩放下限
@@ -130,6 +136,7 @@ class CurveLaneBias:
     self.last_trim = 0.0
     self.last_reason = "off"
     self.last_k = 0.0
+    self.last_boost = 1.0
     self.last_bend_deg = 0.0
     self._last_log_t = 0.0
 
@@ -313,9 +320,15 @@ class CurveLaneBias:
       error = lane_center_y + self.bias_filtered
       # 增益调度：位置环带宽 ∝ 车速，固定增益在高速相位裕度不足
       _g = self._gain_scale(v_ego)
-      kp = self._f("kp", 0.0010) * _g
-      ki = self._f("ki", 0.0004) * _g
-      max_curv = self._f("max_curv", 0.00040)
+      # 2026-10-21: 弯道授权增强。直道 k_abs≈0 -> boost=1，行为与旧版一致；
+      # 弯道里把 kp/ki/max_curv 一起放大，专门对付"弯中持续偏外"。
+      _cb = max(1.0, self._f("curve_boost", 2.0))
+      _ck = max(1e-4, self._f("curve_boost_k", 0.002))
+      boost = 1.0 + (_cb - 1.0) * min(1.0, k_abs / _ck)
+      self.last_boost = boost
+      kp = self._f("kp", 0.0010) * _g * boost
+      ki = self._f("ki", 0.0004) * _g * boost
+      max_curv = self._f("max_curv", 0.00040) * boost
 
       p_term = kp * error
       self.integral += ki * error * dt
@@ -363,5 +376,6 @@ class CurveLaneBias:
       "k": round(self.last_k, 5),
       "error_m": round(self.last_error, 3),
       "trim_curv": round(self.last_trim, 6),
+      "curve_boost": round(self.last_boost, 2),
       "reason": self.last_reason,
     }
