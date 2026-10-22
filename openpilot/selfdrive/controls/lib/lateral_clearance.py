@@ -352,7 +352,11 @@ class LateralClearance:
             self.bias_filtered += a * (bias_raw - self.bias_filtered)
 
             # ---- PI 位置闭环 ----
-            error = lane_center_y + self.bias_filtered
+            # [CHX_SIGN 20261022] 符号修正：lane_center_y>0 = 车偏左，
+            # +curvature = 左转，因此车偏左必须给负 trim。原式是正反馈
+            # （实测 corr(e, trim) = +0.48），会把车往弯外推。
+            # 本模块 bias>0 = 向右挪，故 error = -bias - lane_center_y。
+            error = -self.bias_filtered - lane_center_y
             # 增益调度：位置环带宽 ∝ 车速，固定增益在高速相位裕度不足。
             _g = self._gain_scale(v_ego)
             kp = self._f(None, "kp", 0.0010) * _g

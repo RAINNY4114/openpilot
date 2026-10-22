@@ -102,9 +102,9 @@ DEFAULTS = {
     "max_curv": 0.00035,    # 输出硬限幅 (1/m)
     # 2026-10-21: 弯道内位置环授权增强。直道 boost=1（完全不动，避免高速
     # 左右摇晃），弯道按 |κ|/curve_boost_k 比例线性放大 kp/ki/max_curv。
-    # 2.0 = 满弯时授权翻倍（30 m/s 下 max_curv 0.00035 -> 0.00070，
-    # 仍远小于 FordCurveController 的曲率偏差钳位，不会和下游限幅打架）。
-    "curve_boost": 2.0,
+    # 2026-10-22: 默认回调到 1.0 —— 符号修正后无需额外增益；之前的 2.0
+    # 是在把错误符号（正反馈）的影响放大 2 倍。
+    "curve_boost": 1.0,
     "curve_boost_k": 0.002,  # 达到满 boost 所需曲率 (1/m)，0.002 = 半径 500 m
     "bias_slew_mps": 0.10,  # 偏置目标最大变化率 (m/s)：消除阶跃扰动
     "v_ref_ms": 15.0,       # 增益调度参考车速
@@ -317,12 +317,20 @@ class CurveLaneBias:
       self.bias_filtered += a * (bias_target - self.bias_filtered)
 
       # ---- PI 位置闭环 ----
-      error = lane_center_y + self.bias_filtered
+      # [CHX_SIGN 20261022] 符号修正。实测（route 00000010--...--3）：
+      #   y_right > y_left      => +y = 右
+      #   lane_center_y > 0     => 车偏左
+      #   车偏左时模型给负曲率  => +curvature = 左转
+      # 因此车偏左必须给负 trim。原式 error = lane_center_y + bias 是正反馈，
+      # 会把车持续往弯外推：实测 corr(e, trim) = +0.44，偏右时 trim 达 -0.00099
+      # （满幅往右推），正是"入弯偏出 + 弯内摆动"的直接来源。
+      # bias>0 = 往弯内挪（左弯往左），故 error = bias - lane_center_y。
+      error = self.bias_filtered - lane_center_y
       # 增益调度：位置环带宽 ∝ 车速，固定增益在高速相位裕度不足
       _g = self._gain_scale(v_ego)
       # 2026-10-21: 弯道授权增强。直道 k_abs≈0 -> boost=1，行为与旧版一致；
-      # 弯道里把 kp/ki/max_curv 一起放大，专门对付"弯中持续偏外"。
-      _cb = max(1.0, self._f("curve_boost", 2.0))
+      # 2026-10-22: 符号修正后回调默认到 1.0 —— 之前 2.0 是把错误符号的影响放大 2 倍。
+      _cb = max(1.0, self._f("curve_boost", 1.0))
       _ck = max(1e-4, self._f("curve_boost_k", 0.002))
       boost = 1.0 + (_cb - 1.0) * min(1.0, k_abs / _ck)
       self.last_boost = boost
