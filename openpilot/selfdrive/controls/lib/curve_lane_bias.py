@@ -317,15 +317,19 @@ class CurveLaneBias:
       self.bias_filtered += a * (bias_target - self.bias_filtered)
 
       # ---- PI 位置闭环 ----
-      # [CHX_SIGN 20261022] 符号修正。实测（route 00000010--...--3）：
-      #   y_right > y_left      => +y = 右
-      #   lane_center_y > 0     => 车偏左
-      #   车偏左时模型给负曲率  => +curvature = 左转
-      # 因此车偏左必须给负 trim。原式 error = lane_center_y + bias 是正反馈，
-      # 会把车持续往弯外推：实测 corr(e, trim) = +0.44，偏右时 trim 达 -0.00099
-      # （满幅往右推），正是"入弯偏出 + 弯内摆动"的直接来源。
-      # bias>0 = 往弯内挪（左弯往左），故 error = bias - lane_center_y。
-      error = self.bias_filtered - lane_center_y
+      # [CHX_SIGN 20261023] 回退 20261022 的符号翻转。定案依据：
+      #   latcontrol_angle.py:24
+      #     angle = degrees(VM.get_steer_from_curvature(-desired_curvature, ...))
+      #   VM.get_steer_from_curvature / calc_curvature 都正比于转角
+      #   => desired_curvature > 0 对应转角为负 = 右转
+      #   旁证 ford/carcontroller.py:217「carcontroller 下发的是 -curvature」，
+      #        controlsd 的 currentCurvature = -VM.calc_curvature(...)
+      # 所以 +trim = 右转，车偏左(e>0) 必须给 +trim：原式 e + bias 本来就对，
+      # corr(e,trim)=+0.44 是闭环正常的正相关，不是正反馈。
+      # 翻转后直道出现持续右偏（正反馈把既有偏置放大），已实车复现。
+      # error_sign 留作运行期 A/B 开关：+1 = 原实现（默认），-1 = 翻转版。
+      _sgn = self._f("error_sign", 1.0)
+      error = _sgn * (lane_center_y + self.bias_filtered)
       # 增益调度：位置环带宽 ∝ 车速，固定增益在高速相位裕度不足
       _g = self._gain_scale(v_ego)
       # 2026-10-21: 弯道授权增强。直道 k_abs≈0 -> boost=1，行为与旧版一致；
