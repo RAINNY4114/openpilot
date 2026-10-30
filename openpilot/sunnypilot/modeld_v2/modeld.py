@@ -42,6 +42,7 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.selfdrive.controls.lib.obstacle_avoid import ObstacleAvoidPlanner  # [OBSTACLE_AVOID_WIRING]
 # [AUTO_OVERTAKE_WIRING] / [AUTO_AVOIDANCE_WIRING] 接线层（自包含，见 ao_aa_bridge.py）
 from openpilot.selfdrive.controls.lib.ao_aa_bridge import AoAaBridge
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
@@ -583,6 +584,8 @@ def main(demo=False):
   # [AUTO_OVERTAKE_WIRING] / [AUTO_AVOIDANCE_WIRING] 接线层实例。
   # 构造本身不读硬件、不抛异常；配置每次 update 内部按 2 s 热加载。
   AOA = AoAaBridge()
+  # [OBSTACLE_AVOID_WIRING] L1 车道内障碍物绕行 (移植自 cpv9-corolla)
+  OA = ObstacleAvoidPlanner()
   is_rhd = bool(getattr(CP, "isRhd", False))
 
   while True:
@@ -703,6 +706,18 @@ def main(demo=False):
       if not sm['carControl'].latActive:
         prev_action.desiredCurvature = sm['controlsState'].curvature
       blendful_active = desire == log.Desire.none and DH.lane_change_state == log.LaneChangeState.off
+      # [OBSTACLE_AVOID_WIRING] 在算 action 之前偏移 plan 的 y, 使 desiredCurvature 自动包含避让偏移。
+      # 默认关闭 (ObstacleAvoidEnabled=0) / 默认 observe_only (ObstacleAvoidActive=0), 关闭时零行为改变。
+      try:
+        _oa_off = OA.update(sm, model_output['plan'][0], self.constants.T_IDXS, v_ego, sm['carControl'].latActive)
+        if _oa_off is not None:
+          _pl = model_output['plan']
+          _pl[0, :, 1] += _oa_off.astype(_pl.dtype)
+          _pp = model_output.get('planplus')
+          if _pp is not None and _pp.shape[1] == _oa_off.shape[0]:
+            _pp[0, :, 1] += _oa_off.astype(_pp.dtype)
+      except Exception:
+        cloudlog.exception('obstacle_avoid wiring failed')
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                            partial(blendful.update, model_output, v_ego, blendful_active, enabled=blendful_enabled))
       prev_action = action

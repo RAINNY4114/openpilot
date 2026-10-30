@@ -203,4 +203,15 @@ if os.path.exists("../../third_party/copyparty/copyparty-sfx.py"):
   copyparty_args += ["-q"]
   procs += [NativeProcess("copyparty-sfx", "openpilot/third_party/copyparty", ["./copyparty-sfx.py", *copyparty_args], and_(only_offroad, use_copyparty))]
 
+# [MR76_WIRING] MR76 毫米波雷达解析守护进程
+# 默认不跑: 只有 /data/ford_params/Mr76Enabled 存在且非 0 才注册。
+# 未接 MR76 的用户完全不受影响(进程列表与原生一致)。
+try:
+  if os.path.exists("/data/ford_params/Mr76Enabled"):
+    with open("/data/ford_params/Mr76Enabled") as _mr76f:
+      if _mr76f.read().strip() not in ("", "0"):
+        procs += [PythonProcess("mr76d", "openpilot.selfdrive.controls.mr76d", only_onroad)]
+except Exception:
+  pass
+
 managed_processes = {p.name: p for p in procs}
