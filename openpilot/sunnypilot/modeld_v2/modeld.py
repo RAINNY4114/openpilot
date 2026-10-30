@@ -11,6 +11,9 @@ from functools import partial
 import gc
 import os
 os.environ['GMMU'] = '0'
+# [port-egpu-usb] 功率上限的唯一来源是 launch_env.sh（读 /data/ford_params/am_power_limit，默认 120）。
+# 这里只在完全没有环境变量时兜底，数值必须与 launch_env.sh 的默认值保持一致。
+os.environ.setdefault('AM_POWER_LIMIT', '120')
 from tinygrad.device import Device
 import numpy as np
 import threading
@@ -19,7 +22,11 @@ from setproctitle import setproctitle
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import COMMA_HARDWARE
-from openpilot.selfdrive.modeld.helpers import chestnut_present, wait_for_chestnut
+from openpilot.selfdrive.modeld.helpers import chestnut_compiled, chestnut_present, modeld_pkl_path
+# [EGPU_DIAG 20261027] P1-2/P2-1：[eGPU] 结构化日志 + error_state 分类 + 按 boot 计次的重试预算
+from openpilot.selfdrive.modeld.egpu_log import (
+  consume_retry, classify_error, egpu, reset_retry, retry_budget, usb_snapshot, RETRY_MAX,
+)
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.services import SERVICE_LIST
@@ -29,12 +36,14 @@ from msgq.visionipc import VisionIpcClient, VisionBuf
 from opendbc.car.car_helpers import get_demo_car_params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
-from openpilot.common.hardware.usb import cable_connected
+from openpilot.common.hardware.usb import cable_connected, chestnut_usb_node_ready
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+# [AUTO_OVERTAKE_WIRING] / [AUTO_AVOIDANCE_WIRING] 接线层（自包含，见 ao_aa_bridge.py）
+from openpilot.selfdrive.controls.lib.ao_aa_bridge import AoAaBridge
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
 
@@ -53,7 +62,24 @@ from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
-BIG_MODEL_TIMEOUT = 60
+
+# [CHX_USB_ENUM 20261027] 大模型加载分两段：先等 chestnut 到「USB3 + 链路已训练」，
+# 再让 tinygrad 打开设备编译。两段加起来才是总窗口。
+#
+# 为什么必须 150s：本机 chestnut 大模型 pkl 约 762 MB，正常编译 20~40s；冷启动时
+# 设备可能先以 12 Mbps 枚举，要发 0xF3 上电后才重枚举到 USB3（实测窗口 3~20s）。
+# 旧值 60s 会在这条链路上「刚重枚举完、还在编译」时被 join 掐断 -> 静默回退小模型，
+# 且守卫线程仍存活 -> 不走 except -> 连 "chestnut load failed" 都不打印。
+BIG_MODEL_TIMEOUT = 600  # [port-egpu-usb] 上游值：762MB pkl 冷启动 + 重枚举余量
+# 等设备出现（含节点权限放开）的上限
+CHESTNUT_USB_GUARD_TIMEOUT = 60.0
+# 发过 0xF3 之后等重枚举到 USB3 的上限
+CHESTNUT_USB_POWER_TIMEOUT = 40.0
+
+# [CHX_TIMEOUT_INVARIANT] 不变量：守卫必须比 join 先结束。
+# 否则守卫还在 sleep，join 已经超时返回 None —— 大模型被静默放弃且没有任何错误日志。
+assert max(CHESTNUT_USB_GUARD_TIMEOUT, CHESTNUT_USB_POWER_TIMEOUT) < BIG_MODEL_TIMEOUT, \
+  "chestnut USB guard must finish before BIG_MODEL_TIMEOUT"
 
 
 def _pkl_exists(path):
@@ -73,6 +99,156 @@ def _find_driving_pkl(bundle):
   if _pkl_exists(pkl_path):
     return pkl_path
   return None
+
+
+# [CHESTNUT_PKL_FMT 20261027] modeld_v2 只认 SPTGPLN1 容器（sunnypilot/modeld_v2/helpers.read_parts）。
+# MODELS_DIR 里那三个 762 MiB 的 big_* 是**普通 pickle**（头 \x80\x04\x95），是给旧
+# selfdrive/modeld 的 load_oob/load_pickle 用的 —— 那是 10-26 换分支之前的加载器。
+# modeld_v2 直接读会抛
+#   ValueError: not a plain tinygrad model, recompile it with compile_modeld.py
+# 所以回落前必须先验格式，否则只会白烧一次重试预算 + 一次 onroad cycle。
+PKL_MAGIC = b'SPTGPLN1'
+
+
+def _pkl_format(path):
+  """返回 'v2' / 'legacy' / 'pickle' / 'missing' / 'unknown'。
+
+  'v2'     = SPTGPLN1 容器，modeld_v2 能读
+  'legacy' = openpilot 的 load_oob 容器：<int64 长度><pickle opcodes><若干 <int64 长度><buffer>
+             （旧 selfdrive/modeld 的 load_oob 读的就是它，本机 big_driving_tinygrad.pkl 属于这类）
+  'pickle' = 裸 pickle，同样不是 modeld_v2 能读的
+  """
+  try:
+    with open(path, 'rb') as f:
+      head = f.read(16)
+  except OSError:
+    return 'missing'
+  if head[:8] == PKL_MAGIC:
+    return 'v2'
+  if head[:1] == b'\x80':
+    return 'pickle'
+  # load_oob：前 8 字节是小端 int64 的 opcodes 长度，紧随其后才是 pickle 起始符 0x80
+  if len(head) >= 9 and head[8:9] == b'\x80':
+    return 'legacy'
+  return 'unknown'
+
+
+def _resolve_chestnut_pkl(bundle):
+  """返回 (pkl_path, source)。source ∈ {'override','bundle','fallback',None}。
+
+  [CHESTNUT_PKL_FALLBACK 20261027] bundle 体系认 Paths.model_root()（/data/media/0/models），
+  而本机的 762 MiB big_driving_tinygrad.pkl 只在 MODELS_DIR（.../selfdrive/modeld/models/）。
+  加上 chestnut 模型目录 driving_models_chestnut_v28.json 拉不到（设备访问不了
+  raw.githubusercontent.com），ModelManager_ActiveBundleChestnut 恒为 None
+  ⇒ _find_driving_pkl 恒返回 None ⇒ 门禁恒 False ⇒ load_big() 线程根本不创建。
+  这里在 bundle 给不出路径时回落到 chestnut_compiled() 认的那三个文件。
+  注意：回落只解决「路径」，不解决「格式」—— 格式由调用方用 _pkl_format() 单独判。
+  """
+  if (override := os.environ.get('COMBINED_MODEL_PKL')) and _pkl_exists(override):
+    return override, 'override'
+  pkl = _find_driving_pkl(bundle)
+  if pkl is not None:
+    return pkl, 'bundle'
+  if chestnut_compiled():
+    p = str(modeld_pkl_path(chestnut=True))
+    if _pkl_exists(p):
+      return p, 'fallback'
+  return None, None
+
+
+def _resolve_chestnut_gate():
+  """算 CHESTNUT 门禁，并把每道判据各自的结果落盘。
+
+  旧写法是一行短路表达式：
+    CHESTNUT = _find_driving_pkl(get_active_bundle(chestnut=True)) is not None and (present or cable)
+  一旦 bundle 为 None，后两项**根本不求值**，日志里什么都看不到 —— 本机就是这个状态
+  （2026-10-27 实测 get_active_bundle(chestnut=True) 恒为 None）。
+  这里显式求值并记录，返回值与旧表达式等价，只是多了 pkl 回落与格式校验。
+  """
+  bundle = get_active_bundle(chestnut=True)
+  pkl, pkl_src = _resolve_chestnut_pkl(bundle)
+  present = chestnut_present()
+  cable = cable_connected()
+  compiled = chestnut_compiled()
+  fmt = _pkl_format(pkl) if pkl else 'missing'
+
+  # [CHESTNUT_GATE_20261027] 判据从 (present or cable) 收紧成 present：
+  #   cable_connected() 读 /sys/class/power_supply/usb/typec_cc_orientation，那是 USB-C
+  #   充电口的 CC 方向，插个充电器也是 True。2026-10-27 route 6 实测它 True 而
+  #   deviceState.chestnutPresent 642/642 全 False —— 用它只会把「插了充电线」当成
+  #   「硬件就绪」，然后在 chestnut_usb_node_ready() 里白等 45~60 s（这段时间没有 modelV2）。
+  #   冷启动时设备即使先以 12 Mbps 枚举，chestnut_present() 也是 True，
+  #   所以 present 已覆盖「慢速枚举 → 0xF3 上电 → 重枚举 USB3」那条链路。
+  # [port-egpu-usb] fmt 校验已从门禁里移除。
+  # 原写法把「格式不对就别浪费重试预算」和「PCIe 上电」写成了同一个条件：
+  # fmt 不是 SPTGPLN1 时 gate=False -> load_big() 线程根本不创建 ->
+  # chestnut_usb_node_ready() 永远不执行 -> 0xF3 永远不发 -> 底座停在 12Mbps ->
+  # 格式永远修不好。完整死锁。
+  # 实测 /data/egpu_diag.jsonl：CHX_USB_ENUM 0 次 / pre-power 0 次 / load_start 0 次，
+  # 而 gate_pkl_bad_fmt 5 次 —— 诊断清楚知道格式不对，然后把自己关掉了。
+  # 格式问题由 convert_upstream_pkl.py 单独解决，仍记录在 egpu('gate', pkl_fmt=...)
+  # 与 gate_pkl_bad_fmt 事件里，只是不再充当硬件门禁。
+  gate = pkl is not None and present
+  egpu('gate', chestnut=gate, pkl=pkl, pkl_src=pkl_src, pkl_fmt=fmt, present=present,
+       cable=cable, compiled=compiled,
+       bundle_generation=getattr(bundle, 'generation', None),
+       bundle_models=len(bundle.models) if bundle is not None else 0)
+
+  if pkl is not None and fmt != 'v2':
+    # 路径找到了但格式不对：老 selfdrive/modeld 的 load_oob 能读，modeld_v2 的
+    # read_parts 读不了。修法是用 sunnypilot/modeld_v2/convert_upstream_pkl.py 转换。
+    egpu('gate_pkl_bad_fmt', pkl=pkl, pkl_fmt=fmt, pkl_src=pkl_src)
+  elif pkl is not None and not present:
+    # pkl 已就绪、只差硬件：这条把「软件阻塞」和「硬件阻塞」彻底分开
+    egpu('gate_wait_hw', pkl=pkl, pkl_src=pkl_src, cable=cable, usb=usb_snapshot())
+  return gate
+
+
+def _request_cycle_later(params, delay: float) -> None:
+  """延迟 delay 秒再请求一次 onroad cycle。
+
+  用 Timer 而不是 sleep：modeld 此刻要继续用小模型出帧，绝不能阻塞主线程。
+  """
+  def _fire():
+    try:
+      params.put_bool("OnroadCycleRequested", True)
+      egpu('cycle_requested', delay=round(delay, 1))
+    except Exception:
+      pass
+
+  if delay <= 0:
+    _fire()
+    return
+  t = threading.Timer(delay, _fire)
+  t.daemon = True
+  t.start()
+  egpu('cycle_scheduled', delay=round(delay, 1))
+
+
+def _handle_big_model_failure(params) -> None:
+  """大模型加载失败后的重试决策（P0-2：按 boot 计次 + 退避）。"""
+  st, allowed, backoff = retry_budget()
+  last_ts = float(st.get('last_ts', 0.0))
+  since = (time.time() - last_ts) if last_ts > 0 else 1e9
+
+  if not allowed:
+    egpu('retry_exhausted', attempts=int(st.get('count', 0)), max=RETRY_MAX,
+         since_last=round(since, 1), usb=usb_snapshot())
+    cloudlog.error(f"[eGPU] chestnut retry budget exhausted ({st.get('count')}/{RETRY_MAX}) this boot")
+    params.put_bool("ChestnutRetry", False)
+    params.put_bool("ChestnutActive", False)
+    return
+
+  attempt = int(st.get('count', 0)) + 1
+  # 第 1 次立刻请求；第 2/3 次至少要等 backoff（距上次失败不足就延后）
+  delay = 0.0 if attempt == 1 else max(0.0, backoff - since)
+  st = consume_retry(st)
+  egpu('retry_request', attempt=attempt, max=RETRY_MAX, backoff=backoff,
+       since_last=round(since, 1), delay=round(delay, 1))
+  cloudlog.error(f"[eGPU] big model load failed, retry {attempt}/{RETRY_MAX} in {delay:.0f}s")
+  params.put_bool("ChestnutRetry", True)
+  params.put_bool("ChestnutActive", False)
+  _request_cycle_later(params, delay)
 
 
 class FrameMeta:
@@ -107,6 +283,10 @@ class ModelState(ModelStateBase):
     self.chestnut = chestnut
 
     pkl_path = _find_driving_pkl(model_bundle)
+    if pkl_path is None and chestnut:
+      # [CHESTNUT_PKL_FALLBACK 20261027] 与门禁同一套回落（见 _resolve_chestnut_pkl）：
+      # bundle 体系认 model_root，而本机 big pkl 在 MODELS_DIR。
+      pkl_path, _src = _resolve_chestnut_pkl(model_bundle)
     assert pkl_path is not None, f"No driving pkl found for {'chestnut' if chestnut else 'small model'} — all models must be compiled with compile_modeld.py"
     self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
 
@@ -184,8 +364,18 @@ class ModelState(ModelStateBase):
       self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
 
     raw_outputs = self.adapter.run()
-    if self.chestnut and (err := Device[self.DEV].error_state.host.view(fmt='q')[0]):
-      raise RuntimeError(f"chestnut failed with {err}")
+    if self.chestnut:
+      # [EGPU_DIAG 20261027] 0=正常；正数是 USB 传输层状态码（+1=LIBUSB_TRANSFER_ERROR），
+      # 负数是 libusb 调用层错误。egpucp 的旧分类器只认 -1，把 +1 当成数值失败永久拒绝。
+      try:
+        err = int(Device[self.DEV].error_state.host.view(fmt='q')[0])
+      except Exception as e:
+        err = -1000
+        egpu('error_state_unavailable', err=repr(e))
+      if err != 0 and err != -1000:
+        cls = classify_error(err)
+        egpu('error_state', raw=err, cls=cls, usb=usb_snapshot())
+        raise RuntimeError(f"chestnut failed with {err} ({cls})")
 
     if after_enqueue is not None:
       after_enqueue()
@@ -264,7 +454,7 @@ def main(demo=False):
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
 
-  CHESTNUT = _find_driving_pkl(get_active_bundle(chestnut=True)) is not None and (chestnut_present() or cable_connected())
+  CHESTNUT = _resolve_chestnut_gate()
   if CHESTNUT:
     from tinygrad.runtime.ops_amd import AMDDevice
     AMDDevice.wait_timeout_ms = 3000
@@ -306,24 +496,38 @@ def main(demo=False):
     big_model = None
     def load_big():
       nonlocal big_model
+      t_load = time.monotonic()
+      egpu('load_start', timeout=BIG_MODEL_TIMEOUT, guard=CHESTNUT_USB_GUARD_TIMEOUT,
+           power=CHESTNUT_USB_POWER_TIMEOUT, usb=usb_snapshot())
       try:
-        wait_for_chestnut()
+        # [CHX_USB_ENUM 20261027] 权限 + 上电时序 + 枚举位置三道一起判，
+        # 只有确认「节点可写 + 在 USB3 侧 + 链路已训练」才交给 tinygrad。
+        # 失败时明确抛错，不要静默继续 —— 静默继续只会得到一次 EACCES/EBUSY。
+        if not chestnut_usb_node_ready(timeout=CHESTNUT_USB_GUARD_TIMEOUT,
+                                       power_timeout=CHESTNUT_USB_POWER_TIMEOUT):
+          raise RuntimeError("chestnut USB node not ready: 设备未枚举/未上电/不在 USB3 侧，"
+                             "详见 [CHX_USB_ENUM] 日志")
         m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
         m.warmup()
         big_model = m
-      except Exception:
+        egpu('load_ok', elapsed=round(time.monotonic() - t_load, 1))
+      except Exception as e:
+        egpu('load_fail', err=repr(e), elapsed=round(time.monotonic() - t_load, 1),
+             usb=usb_snapshot())
         cloudlog.exception("chestnut load failed")
     loader = threading.Thread(target=load_big, daemon=True)
     loader.start()
     loader.join(BIG_MODEL_TIMEOUT)
     model = big_model
-    if model is None and not params.get_bool("ChestnutRetry"):
-      # a crank can cut the chestnut power during the load, retry once with an onroad cycle
-      cloudlog.error("big model load failed, cycling onroad to retry")
-      params.put_bool("ChestnutRetry", True)
-      params.put_bool("OnroadCycleRequested", True)
+    egpu('join_done', loaded=model is not None, loader_alive=loader.is_alive(),
+         elapsed=round(time.monotonic() - st, 1))
+    if model is not None:
+      # 成功即清零本 boot 的失败计数，下次失败还能重试
+      reset_retry()
+      params.put_bool("ChestnutRetry", False)
+      params.put_bool("ChestnutActive", True)
     else:
-      params.put_bool("ChestnutActive", model is not None)
+      _handle_big_model_failure(params)
 
   small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
   if model is None:
@@ -338,7 +542,10 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay"])
+                  "carControl", "controlsState", "lateralDelay", "amapNavi",
+                  # [AUTO_OVERTAKE_WIRING] AO 唯一触发源（radard 融合的 leadOne）
+                  # [AUTO_AVOIDANCE_WIRING] AA 障碍物点云源（card.py 发布的前向雷达）
+                  "radarState", "radarTracks"])
 
   publish_state = PublishState()
   chestnut_state = ChestnutGpuState(pm, model.chestnut) if CHESTNUT else None
@@ -373,6 +580,10 @@ def main(demo=False):
   RELC = RoadEdgeLaneChangeController()
   blendful = Blendful()
   blendful_enabled = False
+  # [AUTO_OVERTAKE_WIRING] / [AUTO_AVOIDANCE_WIRING] 接线层实例。
+  # 构造本身不读硬件、不抛异常；配置每次 update 内部按 2 s 热加载。
+  AOA = AoAaBridge()
+  is_rhd = bool(getattr(CP, "isRhd", False))
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -472,6 +683,7 @@ def main(demo=False):
       if not model.chestnut:
         raise
       cloudlog.exception("big model failed, fall back to small")
+      egpu('fallback_small', usb=usb_snapshot())
       params.put_bool("ChestnutActive", False)
       assert small_model is not None
       model = small_model
@@ -504,7 +716,24 @@ def main(demo=False):
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
       left_edge, right_edge = RELC.update_and_fill(modelv2_send.modelV2, mdv2sp_send.modelDataV2SP, v_ego)
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
+      # ------------------------------------------------------------------
+      # [AUTO_OVERTAKE_WIRING] / [AUTO_AVOIDANCE_WIRING]
+      #
+      # 接线层只产出两样东西：
+      #   1. `direction`      —— 想变去的车道（AA 优先，AA 未介入时回落 AO）
+      #   2. `AvoidBrakeReq`  —— 写盘的心跳标量，由 controlsd 的 AABrakeApply 消费
+      #
+      # ★ 绝不触碰横向控制链：`actuators.curvature` / `desiredCurvature` /
+      #   path_angle 全部与本模块无关。用户 10-27 明确「保留现有车道居中」。
+      # ★ 任何内部异常都被 ao_aa_bridge 吞掉并回落到 direction=none，
+      #   等价于纯上游行为，绝不会因为 AO/AA 把 modeld 带崩。
+      # ------------------------------------------------------------------
+      _ao_aa = AOA.update(sm=sm, dh=DH, v_ego=v_ego, modelv2=modelv2_send.modelV2,
+                          lat_active=sm['carControl'].latActive,
+                          left_edge=left_edge, right_edge=right_edge, is_rhd=is_rhd)
+      DH.update(sm['amapNavi'], sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
+                auto_lane_change_direction=_ao_aa.direction,
+                auto_confirm_delay_sec=_ao_aa.confirm_delay_sec)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid

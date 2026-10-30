@@ -6,8 +6,11 @@ import gc
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
-os.environ.setdefault('AM_POWER_LIMIT', '100')
-os.environ.setdefault('AM_PERF_LEVEL', 'high')
+os.environ.setdefault('AM_POWER_LIMIT', '120')
+# [port-egpu-usb] 禁止钉最高频：AM_PERF_LEVEL=high -> set_clocks(-1)，与 120W 上限叠加
+# 是最抖的组合。stock model 回退路径（system/manager/process_config.py:127）也会走到这里，
+# 必须保持 amdev 默认 auto 管频，否则大模型一加载失败就变成钉频+撞功率墙。
+os.environ.pop('AM_PERF_LEVEL', None)
 from tinygrad.device import Buffer, Device
 from tinygrad.dtype import DType, dtypes
 from tinygrad.engine.realize import lower_and_compile
@@ -308,7 +311,7 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay"])
+                  "carControl", "controlsState", "lateralDelay", "amapNavi"])
 
   publish_state = PublishState()
   params = Params()
@@ -460,7 +463,7 @@ def main(demo=False):
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
       left_edge, right_edge = RELC.update_and_fill(modelv2_send.modelV2, mdv2sp_send.modelDataV2SP, v_ego)
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
+      DH.update(sm['amapNavi'], sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid

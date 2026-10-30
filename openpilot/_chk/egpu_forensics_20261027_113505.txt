@@ -1,0 +1,362 @@
+eGPU 取证报告  生成时间 2026-10-27 11:35:05
+主机 comma-4b8fe88e
+
+========================================================================
+阶段 A —— 瞬态观察（45 s）
+========================================================================
+★ 现在请：拔掉显卡 → 等 3 秒 → 重新插上（只做一次）
+
+[  0.00s] 起始 USB : 1-1 2c7c:0125 480M EG25-G
+[  0.00s] 起始 link_state='Rx.Detect'  flash.py=3
+[  0.00s] 起始告警: （无）
+
+观察结束：共 0 个事件
+结束 USB : 1-1 2c7c:0125 480M EG25-G
+结束 link_state='Rx.Detect'  flash.py=3
+结束告警: （无）
+
+【观察阶段事件数 = 0】
+
+========================================================================
+B1. 身份 / 环境
+========================================================================
+uptime        : 108.72 602.39
+boot_id       : e0cc81d3-4800-410d-abf2-4463a2d3e6e0
+date (UTC)    : 2026-10-27 11:35:50
+root          : True
+
+git branch    : staging-chestnut
+git HEAD      : 2f5a2d1 feat(chestnut): eGPU 大模型功率上限 100W -> 120W
+CHESTNUT_FW   : True
+  [usb.py] CHESTNUT_FW_VERSION = "8516b768"
+  [usb.py] CHESTNUT_USB_PRODUCT = f"custom {CHESTNUT_FW_VERSION}-CLEAN"
+
+========================================================================
+B2. lsusb
+========================================================================
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 002: ID 2c7c:0125 Quectel Wireless Solutions Co., Ltd. EC25 LTE modem
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 004 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+
+--- lsusb -t ---
+/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 480M
+    |__ Port 001: Dev 002, If 0, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 1, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 2, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 3, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 4, Class=Vendor Specific Class, Driver=qmi_wwan, 480M
+/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 5000M
+/:  Bus 003.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 480M
+/:  Bus 004.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 5000M
+/sys/bus/usb/devices/usb3/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb3/tx_lanes: No such file or directory
+/sys/bus/usb/devices/usb1/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb1/tx_lanes: No such file or directory
+/sys/bus/usb/devices/1-1/rx_lanes: No such file or directory
+/sys/bus/usb/devices/1-1/tx_lanes: No such file or directory
+/sys/bus/usb/devices/usb4/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb4/tx_lanes: No such file or directory
+/sys/bus/usb/devices/usb2/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb2/tx_lanes: No such file or directory
+
+
+========================================================================
+B3. /sys/bus/usb/devices 全量
+========================================================================
+1-1        {'speed': '480', 'id': '2c7c:0125', 'product': 'EG25-G', 'version': '2.00', 'busnum': '1', 'devnum': '2', 'bDeviceClass': 'ef'}
+usb1       {'speed': '480', 'id': '1d6b:0002', 'product': 'xHCI Host Controller', 'version': '2.00', 'busnum': '1', 'devnum': '1', 'bDeviceClass': '09'}
+usb2       {'speed': '5000', 'id': '1d6b:0003', 'product': 'xHCI Host Controller', 'version': '3.00', 'busnum': '2', 'devnum': '1', 'bDeviceClass': '09'}
+usb3       {'speed': '480', 'id': '1d6b:0002', 'product': 'xHCI Host Controller', 'version': '2.00', 'busnum': '3', 'devnum': '1', 'bDeviceClass': '09'}
+usb4       {'speed': '5000', 'id': '1d6b:0003', 'product': 'xHCI Host Controller', 'version': '3.00', 'busnum': '4', 'devnum': '1', 'bDeviceClass': '09'}
+
+========================================================================
+B4. dwc3 / ssusb 控制器
+========================================================================
+debugfs/mode           = 'host'
+debugfs/link_state     = 'Rx.Detect'
+debugfs/state          = None
+debugfs/maximum_speed  = None
+debugfs/is_otg         = None
+ssusb/mode             = 'host'
+ssusb/state            = None
+ssusb/power            = None
+
+（★ 必须 root 才读得到 debugfs，普通用户读到空串）
+
+========================================================================
+B5. dmesg 指纹
+========================================================================
+总行数 1761
+  bus3 重注册                 = 1
+  bus4 重注册                 = 1
+  Cannot enable            = 60
+  unable to enumerate      = 14
+  attempt power cycle      = 14
+  new full-speed           = 14
+  QMP PHY TYPEC CTRL       = 1
+  usb-storage              = 3
+  DWC3                     = 6
+
+--- 最后 60 行含 usb/xhci/dwc3/QMP 的行 ---
+[   66.910211] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   67.810815] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   67.811390] usb usb3-port1: attempt power cycle
+[   69.040237] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   69.940239] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   69.940492] usb usb3-port1: unable to enumerate USB device
+[   70.060142] usb 3-1: new full-speed USB device number 46 using xhci-hcd
+[   70.205841] usb 3-1: device descriptor read/all, error -71
+[   73.921792] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   74.822374] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   74.822660] usb usb3-port1: attempt power cycle
+[   76.042956] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   76.943426] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   76.943659] usb usb3-port1: unable to enumerate USB device
+[   77.063386] usb 3-1: new full-speed USB device number 52 using xhci-hcd
+[   77.203825] usb 3-1: device descriptor read/all, error -71
+[   80.925102] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   81.825480] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   81.825968] usb usb3-port1: attempt power cycle
+[   83.055857] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   83.956421] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   83.957052] usb usb3-port1: unable to enumerate USB device
+[   84.076080] usb 3-1: new full-speed USB device number 58 using xhci-hcd
+[   84.216394] usb 3-1: device descriptor read/all, error -71
+[   87.937151] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   88.847445] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   88.847721] usb usb3-port1: attempt power cycle
+[   90.067807] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   90.967887] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   90.968119] usb usb3-port1: unable to enumerate USB device
+[   91.087858] usb 3-1: new full-speed USB device number 64 using xhci-hcd
+[   91.228253] usb 3-1: device descriptor read/all, error -71
+[   94.938484] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   95.838704] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   95.838936] usb usb3-port1: attempt power cycle
+[   97.058797] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   97.958908] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[   97.959164] usb usb3-port1: unable to enumerate USB device
+[   98.078893] usb 3-1: new full-speed USB device number 70 using xhci-hcd
+[   98.229233] usb 3-1: device descriptor read/all, error -71
+[  101.950204] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  102.859568] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  102.859799] usb usb3-port1: attempt power cycle
+[  104.089586] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  104.989644] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  104.989884] usb usb3-port1: unable to enumerate USB device
+[  105.110522] usb 3-1: new full-speed USB device number 76 using xhci-hcd
+[  105.229778] usb 3-1: Device not responding to setup address.
+[  105.441721] usb 3-1: Device not responding to setup address.
+[  105.649615] usb 3-1: device not accepting address 76, error -71
+[  108.950015] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  109.849983] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  109.850237] usb usb3-port1: attempt power cycle
+[  111.070108] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  111.970095] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  111.970328] usb usb3-port1: unable to enumerate USB device
+[  112.089991] usb 3-1: new full-speed USB device number 82 using xhci-hcd
+[  112.231127] usb 3-1: not running at top speed; connect to a high speed hub
+[  112.240782] usb 3-1: can't set config #1, error -71
+[  112.241295] usb 3-1: USB disconnect, device number 82
+
+--- Type-C Sink connected 首次出现时刻 ---
+
+========================================================================
+B6. Params（告警 + chestnut 相关）
+========================================================================
+Offroad_Chestnut* 参数（0 个）:
+  （无 —— 说明当前没有告警，橙色不应出现）
+
+  ChestnutLoading                  <不存在>
+  ChestnutActive                   <不存在>
+  ChestnutRetry                    <不存在>
+  ModelRunnerTypeCache             text=b'1'
+  UpdaterTargetBranch              <不存在>
+
+========================================================================
+B7. 进程
+========================================================================
+--- flash.py ---
+5228       01:35 sudo /usr/local/venv/bin/python3 /data/openpilot/openpilot/system/hardware/chestnut/flash.py 8516b768
+   5232       01:35 sudo /usr/local/venv/bin/python3 /data/openpilot/openpilot/system/hardware/chestnut/flash.py 8516b768
+   5233       01:35 /usr/local/venv/bin/python3 /data/openpilot/openpilot/system/hardware/chestnut/flash.py 8516b768
+--- modeld ---
+4502       01:39 openpilot.sunnypilot.modeld_v2.warmup
+--- hardwared ---
+4483       01:39 openpilot.system.hardware.hardwared
+--- ui ---
+4476       01:40 openpilot.selfdrive.ui.ui
+
+========================================================================
+B8. swaglog 关键行（最近 3 个文件）
+========================================================================
+--- swaglog.0000000354 (34272 B) ---
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.48747, "msg$s": "raylib: TEXTURE: [ID 64] Texture loaded successfully (70x70 | R8G8B8A8 | 1 mipmaps)", "id": "94b5a1eb14df4341ab004742bf465ab2"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.4881241, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/icons/speed_limit.png] File loaded successfully", "id": "f04db853b209421daff2d2ebd2e4bdcc"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.4885514, "msg$s": "raylib: IMAGE: Data loaded successfully (78x68 | R8G8B8A8 | 1 mipmaps)", "id": "f1b0044644f34253815532a485d3e392"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.4893386, "msg$s": "raylib: TEXTURE: [ID 65] Texture loaded successfully (70x61 | R8G8B8A8 | 1 mipmaps)", "id": "08723f65b6ae4703bef0ef520a461e1c"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.4936135, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/../../sunnypilot/selfdrive/assets/offroad/icon_visuals.png] File loaded successfully", "id": "9cca179d470d4899b943c87eb0a4266b"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.4981003, "msg$s": "raylib: IMAGE: Data loaded successfully (512x512 | R8G8B8A8 | 1 mipmaps)", "id": "b8be24ef930340af8dbba0d48f64e1ab"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5043023, "msg$s": "raylib: TEXTURE: [ID 66] Texture loaded successfully (70x70 | R8G8B8A8 | 1 mipmaps)", "id": "8d3f4693ca274d08bc46ba7e068d8737"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5079877, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/../../sunnypilot/selfdrive/assets/offroad/icon_display.png] File loaded successfully", "id": "8474491cba1d4bc7b50137ded4b3cbad"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.509609, "msg$s": "raylib: IMAGE: Data loaded successfully (400x280 | R8G8B8A8 | 1 mipmaps)", "id": "c1ade30a9fbc4b51a37c033c3814f316"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5126748, "msg$s": "raylib: TEXTURE: [ID 67] Texture loaded successfully (70x49 | R8G8B8A8 | 1 mipmaps)", "id": "b0d27c9a5b494ab5ab03b8cacc3e5c67"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5153763, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/../../sunnypilot/selfdrive/assets/offroad/icon_map.png] File loaded successfully", "id": "3cbbb8268d8246e28d31a3b6b0427ecb"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.517733, "msg$s": "raylib: IMAGE: Data loaded successfully (278x295 | R8G8B8A8 | 1 mipmaps)", "id": "c502b7b5717e49a392b62a6655e8d52b"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.520315, "msg$s": "raylib: TEXTURE: [ID 68] Texture loaded successfully (65x70 | R8G8B8A8 | 1 mipmaps)", "id": "858de32dee3c4152883f476b477d9bbf"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5228233, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/../../sunnypilot/selfdrive/assets/offroad/icon_trips.png] File loaded successfully", "id": "35ba89f5526a4ac3a294a5bc15647511"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5236628, "msg$s": "raylib: IMAGE: Data loaded successfully (256x256 | R8G8B8A8 | 1 mipmaps)", "id": "0b16c50f556340e59e52752166c498f1"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5257251, "msg$s": "raylib: TEXTURE: [ID 69] Texture loaded successfully (70x70 | R8G8B8A8 | 1 mipmaps)", "id": "015edffe7a624609904282fdc800ab29"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.528234, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/../../sunnypilot/selfdrive/assets/offroad/icon_vehicle.png] File loaded successfully", "id": "574210eed81f4ff58b28422f511e6c86"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5304005, "msg$s": "raylib: IMAGE: Data loaded successfully (512x512 | R8G8B8A8 | 1 mipmaps)", "id": "6ab4f139e10d4f45b8da90e2da07eb27"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.536434, "msg$s": "raylib: TEXTURE: [ID 70] Texture loaded successfully (70x70 | R8G8B8A8 | 1 mipmaps)", "id": "7dc2241452e9433e8266ecab9be98ffb"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5392885, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/../../sunnypilot/selfdrive/assets/offroad/icon_firehose.png] File loaded successfully", "id": "dccaa8c8e30f4e2f895e2b04a593be0c"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5481098, "msg$s": "raylib: IMAGE: Data loaded successfully (900x900 | R8G8B8A8 | 1 mipmaps)", "id": "4bd829a4ead640bfa51b260a635cd547"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5667553, "msg$s": "raylib: TEXTURE: [ID 71] Texture loaded successfully (70x70 | R8G8B8A8 | 1 mipmaps)", "id": "2ce6c0488d6341638672297fb24e94a9"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.571309, "msg$s": "raylib: FILEIO: [/data/openpilot/openpilot/selfdrive/assets/icons/shell.png] File loaded successfully", "id": "9264ea5bebcf469a82844d561752b1f4"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.5901005, "msg$s": "raylib: IMAGE: Data loaded successfully (1016x816 | R8G8B8A8 | 1 mipmaps)", "id": "4d56df517c354063b4cb82ac4d2cae8f"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "__init__.py", "lineno": 94, "pathname": "/usr/local/venv/lib/python3.12/site-packages/pyray/__init__.py", "module": "__init__", "funcName": "wrapped_func", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100799.6096902, "msg$s": "raylib: TEXTURE: [ID 72] Texture loaded successfully (70x56 | R8G8B8A8 | 1 mipmaps)", "id": "dd2937493f1147e4bcff35c94e1b8ea7"}
+--- swaglog.0000000355 (252334 B) ---
+{"ctx": {"dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "prime_state.py", "lineno": 153, "pathname": "/data/openpilot/openpilot/selfdrive/ui/lib/prime_state.py", "module": "prime_state", "funcName": "_worker_thread", "host": "comma-4b8fe88e", "process": 4476, "thread": 547197219200, "threadName": "Thread-17 (_worker_thread)", "created": 1785251109.1839416, "msg$s": "Failed to fetch pairing provider: System time is not valid, cannot generate token", "id": "df32bb81e89849fe822361ec1c2d6dda"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "exc_info": "Traceback (most recent call last):\n  File \"/data/openpilot/openpilot/system/athena/athenad.py\", line 1166, in main\n    ws = create_connection(ws_uri,\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 664, in create_connection\n    websock.connect(url, **options)\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 263, in connect\n    self.sock, addrs = connect(\n                       ^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 152, in connect\n    sock = _ssl_socket(sock, options.sslopt, hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 345, in _ssl_socket\n    sock = _wrap_sni_socket(sock, sslopt, hostname, check_hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 315, in _wrap_sni_socket\n    return context.wrap_socket(\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 455, in wrap_socket\n    return self.sslsocket_class._create(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 1042, in _create\n    self.do_handshake()\n  File \"/usr/lib/python3.12/ssl.py\", line 1320, in do_handshake\n    self._sslobj.do_handshake()\nssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate is not yet valid (_ssl.c:1000)", "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "athenad.py", "lineno": 1186, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1785251111.5224998, "msg$s": "athenad.main.exception", "id": "00f180cffb52468ab70dd8429ad5be2d"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "athenad.py", "lineno": 1165, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1785251111.5333626, "msg": {"event$s": "athenad.main.connecting_ws", "ws_uri$s": "wss://athena.konik.ai//ws/v2/c71663a273761bda", "retries$i": 3}, "id": "8fdadb372689476db497669e159293f4"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "exc_info": "Traceback (most recent call last):\n  File \"/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py\", line 294, in main\n    ws = create_connection(\n         ^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 664, in create_connection\n    websock.connect(url, **options)\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 263, in connect\n    self.sock, addrs = connect(\n                       ^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 152, in connect\n    sock = _ssl_socket(sock, options.sslopt, hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 345, in _ssl_socket\n    sock = _wrap_sni_socket(sock, sslopt, hostname, check_hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 315, in _wrap_sni_socket\n    return context.wrap_socket(\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 455, in wrap_socket\n    return self.sslsocket_class._create(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 1042, in _create\n    self.do_handshake()\n  File \"/usr/lib/python3.12/ssl.py\", line 1320, in do_handshake\n    self._sslobj.do_handshake()\nssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate is not yet valid (_ssl.c:1000)", "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 321, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1785251112.087136, "msg$s": "sunnylinkd.main.OSError.EPERM (1)", "id": "c6e1c8001b1f4801889496a2248c2679"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 293, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1785251112.100576, "msg": {"event$s": "sunnylinkd.main.connecting_ws", "ws_uri$s": "wss://athena.sunnylink.ai", "retries$i": 3}, "id": "74d8c05ba79d45618cd4b3b16c73675a"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4501, "thread": 548001937184, "threadName": "MainThread", "created": 1785251113.3097668, "msg$s": "SSL error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v25.json (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate is not yet valid (_ssl.c:1000)')))", "id": "c1712a820863409a8100aa1a3211fb57"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4501, "thread": 548001937184, "threadName": "MainThread", "created": 1785251113.3103704, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "c1db38ddd2324cd39fddf56ff419d075"}
+{"ctx": {"dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "prime_state.py", "lineno": 152, "pathname": "/data/openpilot/openpilot/selfdrive/ui/lib/prime_state.py", "module": "prime_state", "funcName": "_worker_thread", "host": "comma-4b8fe88e", "process": 4476, "thread": 547197219200, "threadName": "Thread-17 (_worker_thread)", "created": 1785251114.1864603, "msg$s": "Failed to fetch prime status: System time is not valid, cannot generate token", "id": "4810d03c40b042a4bf4b8d286cc44576"}
+{"ctx": {"dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "prime_state.py", "lineno": 153, "pathname": "/data/openpilot/openpilot/selfdrive/ui/lib/prime_state.py", "module": "prime_state", "funcName": "_worker_thread", "host": "comma-4b8fe88e", "process": 4476, "thread": 547197219200, "threadName": "Thread-17 (_worker_thread)", "created": 1785251114.1880245, "msg$s": "Failed to fetch pairing provider: System time is not valid, cannot generate token", "id": "93da4128e0e34758a1b9c45acfee0d55"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "exc_info": "Traceback (most recent call last):\n  File \"/data/openpilot/openpilot/system/athena/athenad.py\", line 1166, in main\n    ws = create_connection(ws_uri,\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 664, in create_connection\n    websock.connect(url, **options)\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 263, in connect\n    self.sock, addrs = connect(\n                       ^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 152, in connect\n    sock = _ssl_socket(sock, options.sslopt, hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 345, in _ssl_socket\n    sock = _wrap_sni_socket(sock, sslopt, hostname, check_hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 315, in _wrap_sni_socket\n    return context.wrap_socket(\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 455, in wrap_socket\n    return self.sslsocket_class._create(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 1042, in _create\n    self.do_handshake()\n  File \"/usr/lib/python3.12/ssl.py\", line 1320, in do_handshake\n    self._sslobj.do_handshake()\nssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate is not yet valid (_ssl.c:1000)", "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "athenad.py", "lineno": 1186, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1785251116.0755782, "msg$s": "athenad.main.exception", "id": "2331328a9acb4a30bad58ea917341bbf"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "athenad.py", "lineno": 1165, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1785251116.086545, "msg": {"event$s": "athenad.main.connecting_ws", "ws_uri$s": "wss://athena.konik.ai//ws/v2/c71663a273761bda", "retries$i": 4}, "id": "521bb2f8dd0446f1875df54a81d51c9d"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "exc_info": "Traceback (most recent call last):\n  File \"/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py\", line 294, in main\n    ws = create_connection(\n         ^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 664, in create_connection\n    websock.connect(url, **options)\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 263, in connect\n    self.sock, addrs = connect(\n                       ^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 152, in connect\n    sock = _ssl_socket(sock, options.sslopt, hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 345, in _ssl_socket\n    sock = _wrap_sni_socket(sock, sslopt, hostname, check_hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 315, in _wrap_sni_socket\n    return context.wrap_socket(\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 455, in wrap_socket\n    return self.sslsocket_class._create(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 1042, in _create\n    self.do_handshake()\n  File \"/usr/lib/python3.12/ssl.py\", line 1320, in do_handshake\n    self._sslobj.do_handshake()\nssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate is not yet valid (_ssl.c:1000)", "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 321, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1785251116.7961416, "msg$s": "sunnylinkd.main.OSError.EPERM (1)", "id": "0cd268311e3a4627af0481706fd0acad"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 293, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1785251118.8103833, "msg": {"event$s": "sunnylinkd.main.connecting_ws", "ws_uri$s": "wss://athena.sunnylink.ai", "retries$i": 4}, "id": "3eab79e1cfbe4f3ba6be405507e1a5b4"}
+{"ctx": {"dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "prime_state.py", "lineno": 152, "pathname": "/data/openpilot/openpilot/selfdrive/ui/lib/prime_state.py", "module": "prime_state", "funcName": "_worker_thread", "host": "comma-4b8fe88e", "process": 4476, "thread": 547197219200, "threadName": "Thread-17 (_worker_thread)", "created": 1785251119.192833, "msg$s": "Failed to fetch prime status: System time is not valid, cannot generate token", "id": "97adc7e0a5e74f1fa6e8d2c4847134d1"}
+{"ctx": {"dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "prime_state.py", "lineno": 153, "pathname": "/data/openpilot/openpilot/selfdrive/ui/lib/prime_state.py", "module": "prime_state", "funcName": "_worker_thread", "host": "comma-4b8fe88e", "process": 4476, "thread": 547197219200, "threadName": "Thread-17 (_worker_thread)", "created": 1785251119.1943119, "msg$s": "Failed to fetch pairing provider: System time is not valid, cannot generate token", "id": "677ece53a7594e84a9c47ed3c097ab56"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "exc_info": "Traceback (most recent call last):\n  File \"/data/openpilot/openpilot/system/athena/athenad.py\", line 1166, in main\n    ws = create_connection(ws_uri,\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 664, in create_connection\n    websock.connect(url, **options)\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_core.py\", line 263, in connect\n    self.sock, addrs = connect(\n                       ^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 152, in connect\n    sock = _ssl_socket(sock, options.sslopt, hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 345, in _ssl_socket\n    sock = _wrap_sni_socket(sock, sslopt, hostname, check_hostname)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/venv/lib/python3.12/site-packages/websocket/_http.py\", line 315, in _wrap_sni_socket\n    return context.wrap_socket(\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 455, in wrap_socket\n    return self.sslsocket_class._create(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/ssl.py\", line 1042, in _create\n    self.do_handshake()\n  File \"/usr/lib/python3.12/ssl.py\", line 1320, in do_handshake\n    self._sslobj.do_handshake()\nssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate is not yet valid (_ssl.c:1000)", "level": "ERROR", "levelnum": 40, "name": "swaglog", "filename": "athenad.py", "lineno": 1186, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1785251119.56155, "msg$s": "athenad.main.exception", "id": "35744ca193e44f0c85c0825172e53df1"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "process.py", "lineno": 35, "pathname": "/data/openpilot/openpilot/system/manager/process.py", "module": "process", "funcName": "launcher", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1793100882.5831296, "msg$s": "sunnylinkd.main.WebSocketBadStatusException", "id": "f646713e3aab444eb2024b2a30462982"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4501, "thread": 548001937184, "threadName": "MainThread", "created": 1793100883.322479, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Read timed out. (read timeout=10)", "id": "c0b7068163a3487c9f5f964e61114053"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4501, "thread": 548001937184, "threadName": "MainThread", "created": 1793100883.3231223, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "b7fbeee629fb45b1a108867563034884"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "application.py", "lineno": 701, "pathname": "/data/openpilot/openpilot/system/ui/lib/application.py", "module": "application", "funcName": "render", "host": "comma-4b8fe88e", "process": 4476, "thread": 548001937184, "threadName": "MainThread", "created": 1793100886.88499, "msg$s": "FPS dropped below 20: 7", "id": "47837d856fb44b9093f7bae677b09703"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "athenad.py", "lineno": 1165, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1793100888.3269808, "msg": {"event$s": "athenad.main.connecting_ws", "ws_uri$s": "wss://athena.konik.ai//ws/v2/c71663a273761bda", "retries$i": 5}, "id": "eaee4482578c48bdb4a745432d028b28"}
+{"ctx": {"daemon": "athenad", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "athenad.py", "lineno": 1170, "pathname": "/data/openpilot/openpilot/system/athena/athenad.py", "module": "athenad", "funcName": "main", "host": "comma-4b8fe88e", "process": 4791, "thread": 547683170080, "threadName": "MainThread", "created": 1793100892.3120904, "msg": {"event$s": "athenad.main.connected_ws", "ws_uri$s": "wss://athena.konik.ai//ws/v2/c71663a273761bda", "retries$i": 5, "duration$f": 35.775891132000005}, "id": "4da32e1ea2dd4e12a627c85089d4faa4"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 293, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1793100898.5901642, "msg": {"event$s": "sunnylinkd.main.connecting_ws", "ws_uri$s": "wss://athena.sunnylink.ai", "retries$i": 5}, "id": "e043c37e300c4d19ae096b34b9bdf472"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 301, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1793100903.3106678, "msg": {"event$s": "sunnylinkd.main.connected_ws", "ws_uri$s": "wss://athena.sunnylink.ai", "retries$i": 5, "duration$f": 46.273431076}, "id": "93ba0c8dcffb48299d827bfa18a056f1"}
+{"ctx": {"daemon": "sunnylinkd", "dongle_id": "b67bfa911ac39ec2", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "sunnylinkd.py", "lineno": 308, "pathname": "/data/openpilot/openpilot/sunnypilot/sunnylink/athena/sunnylinkd.py", "module": "sunnylinkd", "funcName": "main", "host": "comma-4b8fe88e", "process": 4874, "thread": 548417464096, "threadName": "MainThread", "created": 1793100903.311154, "msg$s": "sunnylinkd.handle_long_poll started", "id": "9394aa5f5036417097483d76f8ddcb3b"}
+--- swaglog.0000000356 (670 B) ---
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "application.py", "lineno": 701, "pathname": "/data/openpilot/openpilot/system/ui/lib/application.py", "module": "application", "funcName": "render", "host": "comma-4b8fe88e", "process": 4476, "thread": 548001937184, "threadName": "MainThread", "created": 1793100925.6859884, "msg$s": "FPS dropped below 20: 4", "id": "73a74ad37d27466792e1dc7d6c15e021"}
+
+========================================================================
+B9. /data/egpu_usb_perm.log（尾部）
+========================================================================
+--- /data/egpu_usb_perm.log (7411 B) ---
+2026-10-27T11:02:16Z [USB2] /dev/bus/usb/003/011 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:02:17Z unbind 3-1:1.0 from usb-storage  uptime=493.02s
+                                                                                                                                                                                                                                                                                                                                                                      2026-07-28T15:04:53Z [start] pid=4057 uid=0 uptime=11.66s
+2026-07-28T15:04:53Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=11.75s
+2026-07-28T15:04:53Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:53Z unbind 3-1:1.0 from usb-storage  uptime=11.95s
+2026-07-28T15:04:52Z [start] pid=3841 uid=0 uptime=10.31s
+2026-07-28T15:04:52Z chmod 666 /dev/bus/usb/003/006  (was: 600 root:root)  uptime=10.41s
+2026-07-28T15:04:52Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:52Z unbind 3-1:1.0 from usb-storage  uptime=10.79s
+2026-07-28T15:04:58Z [start] pid=4188 uid=0 uptime=16.16s
+2026-10-27T11:09:04Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=48.53s
+2026-10-27T11:09:04Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:09:04Z unbind 3-1:1.0 from usb-storage  uptime=48.80s
+2026-07-28T15:04:53Z [start] pid=3989 uid=0 uptime=11.67s
+2026-10-27T11:15:06Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=64.08s
+2026-10-27T11:15:06Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:15:06Z unbind 3-1:1.0 from usb-storage  uptime=64.35s
+                                                          2026-07-28T15:04:53Z [start] pid=4031 uid=0 uptime=11.77s
+2026-10-27T11:22:21Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=70.56s
+2026-10-27T11:22:21Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:22:21Z unbind 3-1:1.0 from usb-storage  uptime=70.83s
+2026-07-28T15:04:52Z [start] pid=3976 uid=0 uptime=11.05s
+2026-07-28T15:04:53Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=11.12s
+2026-07-28T15:04:53Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:53Z unbind 3-1:1.0 from usb-storage  uptime=11.36s
+2026-07-28T15:04:52Z [start] pid=3924 uid=0 uptime=10.74s
+2026-07-28T15:04:52Z chmod 666 /dev/bus/usb/003/006  (was: 600 root:root)  uptime=10.81s
+2026-07-28T15:04:52Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:52Z unbind 3-1:1.0 from usb-storage  uptime=11.03s
+--- /data/egpu_diag.jsonl (5113 B) ---
+[eGPU] {"boot": "c7617eba", "bundle_generation": null, "bundle_models": 0, "cable": false, "chestnut": false, "compiled": true, "ev": "gate", "pkl": null, "present": false, "ts": 1793072737.815}
+[eGPU] {"attempt": 1, "backoff": 10.0, "boot": "c7617eba", "delay": 0.0, "ev": "retry_request", "max": 3, "since_last": 1000000000.0, "ts": 1793072755.087}
+[eGPU] {"attempt": 2, "backoff": 30.0, "boot": "c7617eba", "delay": 30.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072755.092}
+[eGPU] {"attempt": 3, "backoff": 60.0, "boot": "c7617eba", "delay": 60.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072755.094}
+[eGPU] {"attempts": 3, "boot": "c7617eba", "ev": "retry_exhausted", "max": 3, "since_last": 0.0, "ts": 1793072755.095, "usb": {"error": "ImportError(\"cannot import name 'chestnut_present' from 'openpilot.common.hardware.usb' (/data/openpilot/openpilot/common/hardware/usb.py)\")"}}
+[eGPU] {"attempt": 1, "backoff": 10.0, "boot": "c7617eba", "delay": 0.0, "ev": "retry_request", "max": 3, "since_last": 1000000000.0, "ts": 1793072798.457}
+[eGPU] {"attempt": 2, "backoff": 30.0, "boot": "c7617eba", "delay": 30.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072798.461}
+[eGPU] {"attempt": 3, "backoff": 60.0, "boot": "c7617eba", "delay": 60.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072798.463}
+[eGPU] {"attempts": 3, "boot": "c7617eba", "ev": "retry_exhausted", "max": 3, "since_last": 0.0, "ts": 1793072798.481, "usb": {"cable": false, "devices": [{"busnum": 1, "devnum": 2, "linkErrorCount": 0, "manufacturer": "Quectel", "product": "EG25-G", "productId": 293, "speedMbps": 480, "usb3Lane": "unknown", "vendorId": 11388}, {"busnum": 1, "devnum": 1, "linkErrorCount": 0, "manufacturer": "Linux 4.9.103 xhci-hcd", "product": "xHCI Host Controller", "productId": 2, "speedMbps": 480, "usb3Lane": "unknown", "vendorId": 7531}, {"busnum": 2, "devnum": 1, "linkErrorCount": 0, "manufacturer": "Linux 4.9.103 xhci-hcd", "product": "xHCI Host Controller", "productId": 3, "speedMbps": 5000, "usb3Lane": "unknown", "vendorId": 7531}], "nodes": [], "present": false}}
+[eGPU] {"boot": "f3c834e7", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": null, "present": false, "ts": 1785251120.742}
+[eGPU] {"boot": "2ffbb9f5", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": null, "present": false, "ts": 1785251108.69}
+[eGPU] {"boot": "72eea4d9", "bundle_generation": null, "bundle_models": 0, "cable": false, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "unknown", "pkl_src": "fallback", "present": false, "ts": 1793082236.835}
+[eGPU] {"boot": "72eea4d9", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "unknown", "pkl_src": "fallback", "ts": 1793082236.837}
+[eGPU] {"boot": "72eea4d9", "bundle_generation": null, "bundle_models": 0, "cable": false, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1793082278.591}
+[eGPU] {"boot": "72eea4d9", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1793082278.592}
+[eGPU] {"boot": "f05f5b9c", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1785251112.806}
+[eGPU] {"boot": "f05f5b9c", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1785251112.807}
+[eGPU] {"boot": "32f984fb", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1785251110.076}
+[eGPU] {"boot": "32f984fb", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1785251110.077}
+[eGPU] {"boot": "f8cbea77", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1785251109.649}
+[eGPU] {"boot": "f8cbea77", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1785251109.65}
+--- /data/egpu_retry.json <不存在>
+
+========================================================================
+B10. /data/chestnut_config（ROM 恢复依赖）
+========================================================================
+total 12
+drwxr-xr-x  2 root  root  4096 Jul 28 15:05 .
+drwxr-xr-x 33 comma comma 4096 Jul 28 15:04 ..
+-rw-------  1 root  root   256 Jul 28 15:05 comma-4b8fe88e.bin
+
+========================================================================
+B11. 大模型 pkl 清单（chestnut_compiled 判据）
+========================================================================
+MODELS_DIR = /data/openpilot/openpilot/selfdrive/modeld/models
+total 876428
+drwxr-xr-x 2 comma comma      4096 Oct 26 11:23 .
+drwxr-xr-x 4 comma comma      4096 Oct 27 03:45 ..
+-rw-r--r-- 1 comma comma 799941965 Oct 26 11:23 big_driving_tinygrad.pkl
+-rw-r--r-- 1 comma comma    858796 Oct 26 11:23 big_driving_warp_1344x760_tinygrad.pkl
+-rw-r--r-- 1 comma comma    858531 Oct 26 11:23 big_driving_warp_1928x1208_tinygrad.pkl
+-rw-r--r-- 1 comma comma  20781963 Oct 26 11:21 dmonitoring_model_tinygrad.pkl
+-rw-r--r-- 1 comma comma   1401865 Oct 26 11:21 dm_warp_1344x760_tinygrad.pkl
+-rw-r--r-- 1 comma comma   1401817 Oct 26 11:21 dm_warp_1928x1208_tinygrad.pkl
+-rw-r--r-- 1 comma comma  70491206 Oct 26 11:21 driving_tinygrad.pkl
+-rw-r--r-- 1 comma comma    844693 Oct 26 11:21 driving_warp_1344x760_tinygrad.pkl
+-rw-r--r-- 1 comma comma    844502 Oct 26 11:21 driving_warp_1928x1208_tinygrad.pkl
+-rw-r--r-- 1 comma comma         0 Oct 26 11:07 __init__.py
+-rw-r--r-- 1 comma comma       121 Oct 26 11:07 README.md
+
+  ✅ big_driving_tinygrad.pkl                      799941965 B  head=41 84 0c 00 00 00 00 00 80 04
+  ✅ big_driving_warp_1344x760_tinygrad.pkl           858796 B  head=80 04 95 2e 02 00 00 00 00 00
+  ✅ big_driving_warp_1928x1208_tinygrad.pkl          858531 B  head=80 04 95 2e 02 00 00 00 00 00
+
+========================================================================
+B12. Type-C / 供电
+========================================================================
+usb/typec_cc_orientation   = 2
+usb/typec_power_role       = dual power role
+usb/typec_mode             = Powered cable w/ sink
+usb/voltage_now            = 0
+usb/pd_active              = 0
+usb/real_type              = Unknown
+usb/present                = 0
+dc/online               = 0
+
+========================================================================
+B13. /dev/bus/usb 节点权限
+========================================================================
+/dev/bus/usb/003/:
+drwxr-xr-x 2 root root       60 Oct 27 11:35 .
+drwxr-xr-x 6 root root      120 Jan  1  1970 ..
+crw-rw-r-- 1 root root 189, 256 Jul 28 15:04 001
+
+/dev/bus/usb/004/:
+drwxr-xr-x 2 root root       60 Jan  1  1970 .
+drwxr-xr-x 6 root root      120 Jan  1  1970 ..
+crw-rw-r-- 1 root root 189, 384 Jul 28 15:04 001

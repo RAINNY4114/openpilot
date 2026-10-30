@@ -19,14 +19,25 @@ class LaneTurnController:
     self.DH = desire_helper
     self.turn_direction = TurnDirection.none
     self.params = Params()
-    self.lane_turn_value = float(self.params.get("LaneTurnValue", return_default=True)) * CV.MPH_TO_MS
+    self.lane_turn_value = self._clamp_lane_turn_value(self.params.get("LaneTurnValue", return_default=True))
     self.param_read_counter = 0
     self.enabled = self.params.get_bool("LaneTurnDesire")
 
+  @staticmethod
+  def _clamp_lane_turn_value(value_mph) -> float:
+    """`LaneTurnValue` 单位是 mph；转向意图的速度阈值不得超过 `LANE_CHANGE_SPEED_MIN`。
+
+    `__init__` 与 `read_params()` 必须走同一条路径，否则两条路径会漂移。
+    目前 `DesireHelper.update()` 里 `update_params()` 排在 `update_lane_turn()` 之前，
+    且 `param_read_counter` 初值为 0 ⇒ 首次调用就会 `read_params()`，
+    所以未截断的初值实际从未参与判断。但那只是调用顺序的巧合，
+    一旦顺序变动就会在任意车速下误判转向意图 —— 这里把巧合变成不变量。
+    """
+    return min(float(LANE_CHANGE_SPEED_MIN), float(value_mph) * CV.MPH_TO_MS)
+
   def read_params(self):
     self.enabled = self.params.get_bool("LaneTurnDesire")
-    value = float(self.params.get("LaneTurnValue", return_default=True)) * CV.MPH_TO_MS
-    self.lane_turn_value = min(float(LANE_CHANGE_SPEED_MIN), value)
+    self.lane_turn_value = self._clamp_lane_turn_value(self.params.get("LaneTurnValue", return_default=True))
 
   def update_params(self) -> None:
     if self.param_read_counter % 50 == 0:

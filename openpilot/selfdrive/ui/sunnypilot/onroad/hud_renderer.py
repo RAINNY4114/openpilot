@@ -82,6 +82,12 @@ class HudRendererSP(HudRenderer):
     y = rect.y + 45
 
     set_speed_rect = rl.Rectangle(x, y, set_speed_width, UI_CONFIG.set_speed_height)
+    # [CURVE_SIGN_ANCHOR 20261027] 必须和基类一样把 rect 存下来。
+    # 基类 _draw_curve_widget() 用 self._set_speed_rect 当定位锚点（标志贴在
+    # MAX 框右边），它第一行就是 `if ... or self._set_speed_rect is None: return`。
+    # 这里重写了基类的 _draw_set_speed 却漏了这一行 ⇒ 锚点恒为 None ⇒
+    # 弯道角度照算、diag 照写，但**永远画不出来**（2026-10-27 定位到的根因）。
+    self._set_speed_rect = set_speed_rect
     rl.draw_rectangle_rounded(set_speed_rect, 0.35, 10, COLORS.BLACK_TRANSLUCENT)
     rl.draw_rectangle_rounded_lines_ex(set_speed_rect, 0.35, 10, 6, COLORS.BORDER_TRANSLUCENT)
 

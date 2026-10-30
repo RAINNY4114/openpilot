@@ -3,7 +3,6 @@ import fcntl
 import os
 import queue
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -18,9 +17,8 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_HW
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
 from openpilot.common.hardware import HARDWARE, COMMA_HARDWARE
-from openpilot.common.basedir import BASEDIR
 from openpilot.common.git import get_short_branch
-from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, CHESTNUT_USB_PRODUCT, get_usb_state, get_usb_topology, is_chestnut_usb_id, set_usb_state
+from openpilot.common.hardware.usb import get_usb_state, get_usb_topology, set_usb_state
 from openpilot.common.linux import LinuxSystemStats
 from openpilot.system.loggerd.config import get_available_percent
 from openpilot.common.swaglog import cloudlog
@@ -62,30 +60,23 @@ class Chestnut:
     return self.mismatch and self.attempts >= self.MAX_ATTEMPTS and self.thread is not None and not self.thread.is_alive() and not self.flashed
 
   def flash(self) -> None:
-    ret = subprocess.run(["sudo", sys.executable, os.path.join(BASEDIR, "openpilot/system/hardware/chestnut/flash.py"), CHESTNUT_FW_VERSION],
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
-    cloudlog.event("chestnut flash done", returncode=ret.returncode, output=ret.stdout[-1000:], error=ret.returncode != 0)
-    self.flashed = ret.returncode == 0
+    # [flash-lock] 双保险：第三方底座绝不自动刷官方固件。即使 update() 短路被
+    # 意外回退，这里也无条件拒绝，杜绝任何自动刷写路径。
+    cloudlog.warning("chestnut flash SKIPPED: third-party dock protection (flash disabled)")
+    self.flashed = False
+    return
 
   def update(self, offroad: bool, usb_state: list[dict]) -> None:
-    self.mismatch = any(is_chestnut_usb_id(d["vendorId"], d["productId"], include_bootloader=True) and
-                        d["product"] != CHESTNUT_USB_PRODUCT for d in usb_state)
-    if not self.mismatch:
-      self.flashed = False
-      return
-
-    if not offroad or self.flashed or self.attempts >= self.MAX_ATTEMPTS:
-      return
-    if self.thread is not None and self.thread.is_alive():
-      return
-    if self.attempts > 0 and time.monotonic() - self.last_attempt < self.RETRY_INTERVAL:
-      return
-
-    self.attempts += 1
-    self.last_attempt = time.monotonic()
-    cloudlog.warning(f"chestnut firmware out of date, flashing (attempt {self.attempts})")
-    self.thread = threading.Thread(target=self.flash, daemon=True)
-    self.thread.start()
+    # [port-egpu-usb] 底座是第三方 ASM2464：product 串永远不会等于 comma 的
+    # 官方版本号（实测 custom ed4e39b7-CLEAN）。原来这里会在 offroad 时把官方固件
+    # 写进第三方底座（2026-10-26 14:26 实际发生：returncode=0、镜像校验通过），
+    # 刷完底座就不再枚举。而且判据带 include_bootloader=True，ROM 模式
+    # (174c:2464) 也会被判成 mismatch 再刷一次，恢复时会被反复打断。
+    # 官方固件只适用于官方底座：这里一律不自动刷，需要时手动跑
+    #   sudo python3 openpilot/system/hardware/chestnut/flash.py <target-hash>
+    self.mismatch = False
+    self.flashed = False
+    return
 
 
 ThermalBand = namedtuple("ThermalBand", ['min_temp', 'max_temp'])
@@ -380,7 +371,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     # - TIZI, or
     # - TICI and channel_type is "tici"
     build_metadata = get_build_metadata()
-    is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
+    is_unsupported_combo = False  # [port-egpu-usb] 去 tici 限制
     startup_conditions["not_tici"] = not is_unsupported_combo
     onroad_conditions["not_tici"] = not is_unsupported_combo
     set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)

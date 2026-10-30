@@ -19,6 +19,14 @@ def main():
   config_realtime_process(0, Priority.CTRL_HIGH)
 
   gui_app.init_window("UI")
+
+  # [ROADNAME_CJK 20261027] 排障自检：存在 /data/roadname_font_selfcheck 时，
+  # 在真实 GL 上下文里试建一次完整 CJK 字体并写 swaglog。不用上路就能确认
+  # 「这台设备的 raylib 能不能加载 8.4 MB 的 NotoSansSC」。
+  # 标志文件不存在时零开销，平时不要建。
+  from openpilot.selfdrive.ui.sunnypilot.onroad import cjk_font
+  cjk_font.maybe_selfcheck()
+
   if BIG_UI:
     MainLayout()
   else:

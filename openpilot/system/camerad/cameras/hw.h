@@ -27,6 +27,10 @@ struct CameraConfig {
   bool vignetting_correction;
   SpectraOutputType output_type;
   bool staggered_sof;  // SOF is staggered (half-period offset) from other cameras
+  // [ife-resize] IFE 输出尺寸。0 表示跟随传感器全分辨率（默认行为）。
+  // 非 0 时由 IFE 的定标器做硬件降采样，用来压低 MIPI/USB 带宽。
+  uint32_t out_width;
+  uint32_t out_height;
 };
 
 // NOTE: to be able to disable road and wide road, we still have to configure the sensor over i2c
@@ -42,6 +46,8 @@ const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
   .vignetting_correction = false,
   .output_type = ISP_IFE_PROCESSED,
   .staggered_sof = false,
+  .out_width = 0,
+  .out_height = 0,
 };
 
 const CameraConfig NARROW_ROAD_CAMERA_CONFIG = {
@@ -55,6 +61,8 @@ const CameraConfig NARROW_ROAD_CAMERA_CONFIG = {
   .vignetting_correction = true,
   .output_type = ISP_IFE_PROCESSED,
   .staggered_sof = false,
+  .out_width = 1344,
+  .out_height = 760,
 };
 
 const CameraConfig CABIN_CAMERA_CONFIG = {
@@ -68,6 +76,8 @@ const CameraConfig CABIN_CAMERA_CONFIG = {
   .vignetting_correction = false,
   .output_type = ISP_BPS_PROCESSED,
   .staggered_sof = true,
+  .out_width = 0,
+  .out_height = 0,
 };
 
 const CameraConfig ALL_CAMERA_CONFIGS[] = {WIDE_ROAD_CAMERA_CONFIG, NARROW_ROAD_CAMERA_CONFIG, CABIN_CAMERA_CONFIG};

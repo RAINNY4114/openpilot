@@ -90,11 +90,14 @@ DEFAULT_TEXT_COLOR = rl.Color(255, 255, 255, int(255 * 0.9))
 
 # Qt draws fonts accounting for ascent/descent differently, so compensate to match old styles
 # The real scales for the fonts below range from 1.212 to 1.266
-FONT_SCALE = 1.242 if BIG_UI else 1.16
+FONT_SCALE = 1.6 if BIG_UI else 1.5
 
 ASSETS_DIR = files("openpilot.selfdrive").joinpath("assets")
 FONT_DIR = ASSETS_DIR.joinpath("fonts")
-EXTRA_FONT_CHARS = "–‑✓×°§•X⚙✕◀▶✔⌫⇧␣○●↳çêüñ–‑✓×°§•€£¥"
+# [FONT_MIDDOT 20261027] 末尾补 '·'（U+00B7 MIDDLE DOT）：
+# developer_ui/elements.py:275 的力矩单位是 "N·dm"，而这个字符原来不在表里
+# ⇒ 没被 load_font_ex 加载 ⇒ raylib 画成 '?'，HUD 底部显示成 "N?dm"。
+EXTRA_FONT_CHARS = "–‑✓×°§•X⚙✕◀▶✔⌫⇧␣○●↳çêüñ–‑✓×°§•€£¥·"
 NOTO_FONTS = {
   "ja": "NotoSansCJKjp-Regular.otf",
   "ko": "NotoSansCJKkr-Regular.otf",

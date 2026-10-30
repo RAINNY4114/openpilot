@@ -268,7 +268,16 @@ def main():
   SIMULATION = bool(int(os.getenv("SIMULATION", "0")))
 
   pm = messaging.PubMaster(['deviceMotion'])
-  sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'], poll='cameraOdometry')
+  # [LOCD_FREQ_GATE] cameraOdometry 由 modeld 每模型帧发布一次（sunnypilot/modeld_v2/modeld.py）。
+  # chestnut 大模型在 eGPU(USB3) 上推理 ~71.5 ms/帧 => modeld ~13 Hz => cameraOdometry 13.2 Hz，
+  # 低于 SubMaster 的 20 Hz ±20% 频率门（min 16 Hz）=> 恒判 invalid => sm.all_valid() False
+  # => inputs_valid False => deviceMotion.inputsOK False => selfdrived 发
+  # locationdTemporaryError（NO_ENTRY），ACC 永久无法接合（route 3b 全程 533 s inputsOK=0）。
+  # 放开这道粗频率门；all_alive()、逐观测时序检查（_validate_timestamp /
+  # MAX_FILTER_REWIND_TIME）、sanity check 与 observation_input_invalid 熔断全部保留。
+  # 回滚：_patch_locd_freq.py --revert，或还原 /data/locationd_backup/<ts>/。
+  sm = messaging.SubMaster(['carState', 'extrinsicsCalibration', 'cameraOdometry'], poll='cameraOdometry',
+                           ignore_valid=['cameraOdometry'])
   # separate sensor sockets for efficiency
   sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']]
   sensor_alive, sensor_valid, sensor_recv_time = defaultdict(bool), defaultdict(bool), defaultdict(float)

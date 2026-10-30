@@ -19,6 +19,8 @@ from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, S
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+# [AA_BRAKE_FALLBACK] 紧急转向避让的纵向兜底（消费 AvoidBrakeReq 心跳）
+from openpilot.selfdrive.controls.lib.aa_brake_apply import AABrakeApply
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -42,6 +44,11 @@ class Controls(ControlsExt):
     ControlsExt.__init__(self, self.CP, self.params)
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP, self.CP_SP)
+
+    # [AA_BRAKE_FALLBACK] AA 的纵向兜底消费器。
+    # 默认配置（/data/aa_brake_apply.json）是 enabled=false / observe_only=true
+    # -> update() 恒返回 0.0，纵向行为与原生逐字节一致。
+    self.AAB = AABrakeApply()
 
     self.sm = messaging.SubMaster(['lateralDelay', 'vehicleParameters', 'lateralTorqueParameters', 'modelV2', 'selfdriveState',
                                    'extrinsicsCalibration', 'deviceMotion', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
@@ -136,6 +143,29 @@ class Controls(ControlsExt):
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
+
+    # ------------------------------------------------------------------
+    # [AA_BRAKE_FALLBACK] 紧急转向避让的纵向兜底叠加。
+    #
+    # 消费 modeld 侧 AoAaBridge 写的 /data/ford_params/AvoidBrakeReq
+    # （格式 "<值>:<monotonic秒>"，内嵌时间戳即心跳）。
+    #
+    # 三道安全边界，缺一不可：
+    #   1. AABrakeApply 自身：enabled=false / observe_only=true -> 恒 0；
+    #      纵向未激活 -> 0；车速 < v_min_kmh -> 0；心跳超过 req_stale_sec
+    #      （默认 0.5 s）-> 0（写入侧已死则自动释放）。
+    #   2. 只往下压，绝不上抬：`_aa_delta <= 0.0`，且叠加后不低于车辆
+    #      PID 加速度下限 `pid_accel_limits[0]`。
+    #   3. 输出值仍走下面那道 NaN/Inf 检查。
+    #
+    # ★ 默认配置下这一整段是死代码（恒 0.0），纵向行为与原生完全一致。
+    # ------------------------------------------------------------------
+    try:
+      _aa_delta = float(self.AAB.update(v_ego=CS.vEgo, long_active=CC.longActive))
+      if _aa_delta < 0.0:
+        actuators.accel = max(float(actuators.accel) + _aa_delta, float(pid_accel_limits[0]))
+    except Exception:
+      cloudlog.exception("aa brake apply failed")
 
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage

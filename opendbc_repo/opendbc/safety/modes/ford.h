@@ -87,6 +87,43 @@ static bool ford_get_quality_flag_valid(const CANPacket_t *msg) {
 
 #define FORD_CANFD_INACTIVE_CURVATURE_RATE 1024U
 
+// ---------------------------------------------------------------------------------------------
+// [CHX PATH_ANGLE 20261027] c1 (LatCtlPath_An_Actl) 放行 —— 弯道 angle 模式
+//
+// 上游把 path_angle 钉死在 inactive sentinel 上（见 tx_hook 里的 violation 判断），因为
+// openpilot 从来没用过这个信号。本补丁把它放开，作为一个**额外**的转向执行通道：
+// 弯道时由 Python 侧计算 path_angle = -kappa * v * gain 下发，让 PSCM 把角度当作内部
+// 位置目标处理，而不是只吃曲率前馈。
+//
+// 线束换算（LateralMotionControl 与 LateralMotionControl2 相同）：
+//   LatCtlPath_An_Actl : 11 bit，0.0005 rad/bit，offset -0.5  ->  raw = phys * 2000 + 1000
+//   物理范围 -0.5 .. 0.5235 rad，inactive（0.0 rad）= 1000
+//
+// 幅值上限 ±0.45 rad（约 26°）。Python 侧 path_angle 来自上游已限幅的 apply_curvature
+// （|kappa| <= 0.02 m^-1），乘以 v 与增益后 |path_angle| <= 0.02 * 25 * 1.3 = 0.65 rad，
+// 故 0.45 是真实可能触发的硬上限，不是摆设；超限由 path_angle_cmd_checks 的 ROC 先拦住。
+#define FORD_PATH_ANGLE_MIN -0.45f
+#define FORD_PATH_ANGLE_MAX 0.45f
+
+// 变化率上限，与 Python 侧 _soft_roc_limit 对齐：
+//   speeds {9,10,15,25} m/s -> {0.055, 0.055, 0.0425, 0.009} rad / 20 Hz 拍
+// lookup 固定 3 点且曲线在 9~10 m/s 平坦，故 {10,15,25} 可精确复现（<10 夹到首点）。
+// 乘 1.02 使固件窗口永远比 Python 实际发送的宽 2%，绝不反向拦截；再加上 +1 CAN 单位
+// 与 1 m/s 的速度下限让步，留足余量。
+static const AngleSteeringLimits FORD_PATH_ANGLE_LIMITS = {
+  .max_angle = 1000,              // path_angle_cmd_checks 不用它，仅为结构体完整
+  .angle_deg_to_can = 2000,       // 1 / 0.0005 rad per CAN unit
+  .angle_rate_up_lookup = {
+    {10., 15., 25.},
+    {0.0561f, 0.04335f, 0.00918f}
+  },
+  .angle_rate_down_lookup = {
+    {10., 15., 25.},
+    {0.0561f, 0.04335f, 0.00918f}
+  },
+  .frequency = 20U,               // LateralMotionControl / LateralMotionControl2 @ 20 Hz
+};
+
 static const CurvatureSteeringLimits FORD_STEERING_LIMITS = {
   .max_curvature = 1000,              // 0.02 rad/m * curvature_to_can
   .curvature_to_can = 50000,          // CAN units per rad/m
@@ -95,6 +132,38 @@ static const CurvatureSteeringLimits FORD_STEERING_LIMITS = {
   .curvature_error_min_speed = 10.0,  // m/s
   .max_steer_power = 0,               // disabled, Ford has no steed power signal
 };
+
+static int desired_path_angle_last = 0;
+
+// path_angle 的 ROC + inactive 检查。刻意与 steer_angle_cmd_checks 分开：
+// 后者共用 desired_angle_last，且会拿 angle_meas 做校验，而 Ford 从不填充 angle_meas
+// （它只通过 curvature_state.meas 发布实测曲率），其 inactive 分支会跟一个恒零的测量比较。
+static bool path_angle_cmd_checks(int desired_path_angle, bool steer_control_enabled, const AngleSteeringLimits limits) {
+  bool violation = false;
+
+  if (steer_control_enabled) {
+    // 速度下调 1 m/s，使变化率窗口略宽于 openpilot 自身的软 ROC，
+    // 防止两条角度指令之间插进来一个更新的车速
+    const float speed = ((float)vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.;
+    const int delta_path_angle_roc = (safety_interpolate(limits.angle_rate_up_lookup, speed) * limits.angle_deg_to_can) + 1.;
+
+    const int highest_desired_path_angle = desired_path_angle_last + delta_path_angle_roc;
+    const int lowest_desired_path_angle = desired_path_angle_last - delta_path_angle_roc;
+
+    violation |= safety_max_limit_check(desired_path_angle, highest_desired_path_angle, lowest_desired_path_angle);
+  }
+
+  // PSCM 未被要求转向时，path_angle 必须停在 inactive sentinel（0.0 rad），
+  // 这样陈旧值绝不可能被一帧重新接合就恢复
+  if (!steer_control_enabled) {
+    violation |= (desired_path_angle != 0);
+    desired_path_angle_last = 0;
+  } else {
+    desired_path_angle_last = desired_path_angle;
+  }
+
+  return violation;
+}
 
 static void ford_rx_hook(const CANPacket_t *msg) {
   // Update in motion state from standstill signal
@@ -234,12 +303,17 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     unsigned int raw_path_angle = (msg->data[3] << 3) | (msg->data[4] >> 5);
     unsigned int raw_path_offset = (msg->data[5] << 2) | (msg->data[6] >> 6);
 
-    // These signals are not yet tested with the current safety limits
-    bool violation = (raw_curvature_rate != FORD_INACTIVE_CURVATURE_RATE) || (raw_path_angle != FORD_INACTIVE_PATH_ANGLE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
+    // [CHX PATH_ANGLE] path_angle 已放行，不再要求等于 inactive sentinel；
+    // curvature_rate 与 path_offset 仍按上游保持钉死（未做安全性验证）。
+    bool violation = (raw_curvature_rate != FORD_INACTIVE_CURVATURE_RATE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
 
     // Check angle error and steer_control_enabled
     int desired_curvature = raw_curvature - FORD_INACTIVE_CURVATURE;  // /FORD_STEERING_LIMITS.curvature_to_can to get real curvature
     violation |= steer_curvature_cmd_checks(desired_curvature, 0, steer_control_enabled, FORD_STEERING_LIMITS);
+
+    // [CHX PATH_ANGLE] c1 的 ROC 与 inactive 校验
+    int desired_path_angle = (int)raw_path_angle - (int)FORD_INACTIVE_PATH_ANGLE;
+    violation |= path_angle_cmd_checks(desired_path_angle, steer_control_enabled, FORD_PATH_ANGLE_LIMITS);
 
     if (violation) {
       tx = false;
@@ -255,12 +329,16 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     unsigned int raw_path_angle = ((msg->data[3] & 0x1FU) << 6) | (msg->data[4] >> 2);
     unsigned int raw_path_offset = ((msg->data[4] & 0x3U) << 8) | msg->data[5];
 
-    // These signals are not yet tested with the current safety limits
-    bool violation = (raw_curvature_rate != FORD_CANFD_INACTIVE_CURVATURE_RATE) || (raw_path_angle != FORD_INACTIVE_PATH_ANGLE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
+    // [CHX PATH_ANGLE] 同 LateralMotionControl，path_angle 放行
+    bool violation = (raw_curvature_rate != FORD_CANFD_INACTIVE_CURVATURE_RATE) || (raw_path_offset != FORD_INACTIVE_PATH_OFFSET);
 
     // Check angle error and steer_control_enabled
     int desired_curvature = raw_curvature - FORD_INACTIVE_CURVATURE;  // /FORD_STEERING_LIMITS.curvature_to_can to get real curvature
     violation |= steer_curvature_cmd_checks(desired_curvature, 0, steer_control_enabled, FORD_STEERING_LIMITS);
+
+    // [CHX PATH_ANGLE] c1 的 ROC 与 inactive 校验
+    int desired_path_angle = (int)raw_path_angle - (int)FORD_INACTIVE_PATH_ANGLE;
+    violation |= path_angle_cmd_checks(desired_path_angle, steer_control_enabled, FORD_PATH_ANGLE_LIMITS);
 
     if (violation) {
       tx = false;

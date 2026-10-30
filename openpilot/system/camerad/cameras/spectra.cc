@@ -280,8 +280,11 @@ void SpectraCamera::camera_open(VisionIpcServer *v) {
 
   if (!enabled) return;
 
-  buf.out_img_width = sensor->frame_width / sensor->out_scale;
-  buf.out_img_height = (sensor->hdr_offset > 0 ? (sensor->frame_height - sensor->hdr_offset) / 2 : sensor->frame_height) / sensor->out_scale;
+  // [ife-resize] 允许按相机显式指定 IFE 输出尺寸（0 = 跟随传感器全分辨率）。
+  // IFE 定标寄存器是 16.16 定标比，非整数比也支持，所以不必受 out_scale 整除限制。
+  buf.out_img_width = cc.out_width > 0 ? cc.out_width : sensor->frame_width / sensor->out_scale;
+  buf.out_img_height = cc.out_height > 0 ? cc.out_height
+    : (sensor->hdr_offset > 0 ? (sensor->frame_height - sensor->hdr_offset) / 2 : sensor->frame_height) / sensor->out_scale;
 
   // size is driven by all the HW that handles frames,
   // the video encoder has certain alignment requirements in this case
