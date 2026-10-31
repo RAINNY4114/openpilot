@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+r"""
 mr76d —— MR76 毫米波雷达 CAN 解析守护进程
 ==========================================
 
@@ -30,7 +30,7 @@ import json
 import os
 import time
 
-import cereal.messaging as messaging
+import openpilot.cereal.messaging as messaging
 from openpilot.common.realtime import Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.u_radar import Mr76Tracker

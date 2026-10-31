@@ -486,6 +486,19 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
 struct AmapNavi @0xb7c9e2a41d6f5831 {
   leftBlind @0 :Int32;
   rightBlind @1 :Int32;
+
+  # [NAVI_BRIDGE] 外部导航（高德/百度，经 Android App 转发）2026-10-30 追加。
+  # 只追加 ordinal，旧的 C++/Python 订阅者按原 schema 解析不受影响。
+  navValid @2 :Bool;
+  routeRemainDis @3 :Float32;      # m，全程剩余距离
+  routeRemainTime @4 :Float32;     # s，全程剩余时间
+  segRemainDis @5 :Float32;        # m，本段剩余距离
+  navIcon @6 :Int32;               # 高德 ICON / NEXT_NEXT_TURN_ICON 动作码
+  nextRoadName @7 :Text;           # 下一段道路名
+  trafficLightNum @8 :Int32;       # 前方红绿灯数量（高德 TRAFFIC_LIGHT_NUM）
+  trafficLightCountdown @9 :Int32; # s，红绿灯倒计时，-1 表示无
+  navSpeedLimit @10 :Float32;      # m/s，LIMITED_SPEED
+  laneChangeReq @11 :Int32;        # 0 无 / 1 左 / 2 右（App 下发 cmd）
 }
 
 struct CustomReserved10 @0xcb9fd56c7057593a {

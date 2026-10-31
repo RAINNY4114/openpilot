@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import threading
 import socket
@@ -169,6 +170,19 @@ class SharedData:
 
     self.showDebugLog = 0
 
+    # ===== [NAVI_BRIDGE] 外部导航状态（高德/百度经 App 转发）=====
+    self.nav_valid = False
+    self.nav_route_remain_dis = 0.0
+    self.nav_route_remain_time = 0.0
+    self.nav_seg_remain_dis = 0.0
+    self.nav_icon = 0
+    self.nav_next_road = ""
+    self.nav_tl_num = 0
+    self.nav_tl_countdown = -1
+    self.nav_speed_limit = 0.0
+    self.nav_lane_change_req = 0
+    self.nav_last_seen = 0.0
+
 def f1(x):
   return round(float(x), 1)
 def f2(x):
@@ -251,6 +265,19 @@ class AmapNaviServ:
                               (2 if self.shared_data.left_blind else 0) + (1 if self.shared_data.lidar_lblind else 0))
     msg.amapNavi.rightBlind = ((8 if self.shared_data.right_lane > 0 else 0) + (4 if self.shared_data.lidar_car_rblind else 0) +
                                (2 if self.shared_data.right_blind else 0) + (1 if self.shared_data.lidar_rblind else 0))
+    # [NAVI_BRIDGE] 外部导航字段（超时 3s 自动失效，避免拿旧导航做决策）
+    nav_fresh = (time.time() - self.shared_data.nav_last_seen) < 3.0
+    msg.amapNavi.navValid = bool(self.shared_data.nav_valid and nav_fresh)
+    if nav_fresh:
+      msg.amapNavi.routeRemainDis = float(self.shared_data.nav_route_remain_dis)
+      msg.amapNavi.routeRemainTime = float(self.shared_data.nav_route_remain_time)
+      msg.amapNavi.segRemainDis = float(self.shared_data.nav_seg_remain_dis)
+      msg.amapNavi.navIcon = int(self.shared_data.nav_icon)
+      msg.amapNavi.nextRoadName = str(self.shared_data.nav_next_road or "")
+      msg.amapNavi.trafficLightNum = int(self.shared_data.nav_tl_num)
+      msg.amapNavi.trafficLightCountdown = int(self.shared_data.nav_tl_countdown)
+      msg.amapNavi.navSpeedLimit = float(self.shared_data.nav_speed_limit)
+      msg.amapNavi.laneChangeReq = int(self.shared_data.nav_lane_change_req)
     self.pm.send('amapNavi', msg)
 
   def left_blindspot(self):
@@ -316,6 +343,8 @@ class AmapNaviServ:
   # =======================================================================================
   def start_navi_comm(self):
     threading.Thread(target=self._lane_recv_thread, daemon=True).start()
+    # [NAVI_BRIDGE] 独立导航通道 4214：只收导航/红绿灯，不和 4211 的雷达/摄像头混流
+    threading.Thread(target=self._navi_bridge_thread, daemon=True).start()
     """启动导航UDP通信线程"""
     #threading.Thread(target=self._udp_recv_thread, daemon=True).start()
     #threading.Thread(target=self._navi_recv_thread, daemon=True).start()
@@ -555,6 +584,34 @@ class AmapNaviServ:
           print(f"UDP recv error: {e}")
           time.sleep(1)
 
+  def _navi_bridge_thread(self):
+    """[NAVI_BRIDGE] 监听 4214，收 Android 侧转发的高德/百度导航包。"""
+    NAVI_BRIDGE_PORT = 4214
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+      try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', NAVI_BRIDGE_PORT))
+      except OSError as e:
+        print(f"[NAVI_BRIDGE] bind {NAVI_BRIDGE_PORT} failed: {e}")
+        return
+      print(f"[NAVI_BRIDGE] listening on {NAVI_BRIDGE_PORT}")
+      sock.settimeout(10)
+      while True:
+        try:
+          data, addr = sock.recvfrom(8192)
+          try:
+            obj = json.loads(data.decode('utf-8', errors='replace'))
+          except Exception:
+            continue
+          if isinstance(obj, dict):
+            self._update_command(obj, addr[0])
+            self._update_navi(obj, addr[0])
+        except socket.timeout:
+          continue
+        except Exception as e:
+          print(f"[NAVI_BRIDGE] recv error: {e}")
+          time.sleep(1)
+
   def _navi_recv_thread(self):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
       sock.settimeout(10)
@@ -618,6 +675,7 @@ class AmapNaviServ:
       json_obj = json.loads(data.decode())
       self._update_blinker(json_obj, ip, old_info, now)
       self._update_command(json_obj, ip)
+      self._update_navi(json_obj, ip)
       self._update_sensors(json_obj, ip, old_info, now)
       if (self.shared_data.showDebugLog & 32) > 0: print(f"receive: {json_obj}")
     except Exception as e:
@@ -656,6 +714,93 @@ class AmapNaviServ:
       if "cmd" in json_obj:
         self.shared_data.remote_cmd = json_obj.get("cmd")
         self.shared_data.remote_arg = json_obj.get("arg")
+
+    # [NAVI_BRIDGE] App 下发的 cmd 原来只写不读（remote_cmd 全仓无消费者），
+    # 这里至少落到文件记录 + 车道变换请求，让"下发"有可观测的落点。
+    # 注意：默认只记录不执行；/data/nav_cmd_actuate 存在时才会置 laneChangeReq。
+    cmd = str(json_obj.get("cmd", "") or "").upper()
+    if not cmd:
+      return
+    arg = str(json_obj.get("arg", "") or "").lower()
+    req = 0
+    if cmd in ("LANECHANGE", "OVERTAKE"):
+      if arg in ("left", "l", "1", "stockleft"):
+        req = 1
+      elif arg in ("right", "r", "2", "stockright"):
+        req = 2
+    # Params 的 key 是编译期固定的（params_keys.h 编进 params_pyx），
+    # 新增 key 需要重编，因此这里用普通文件，零依赖：
+    #   /data/nav_cmd_last.txt   最近一条命令（诊断用）
+    #   /data/nav_cmd_actuate    存在 = 允许把 cmd 变成车道变换请求
+    try:
+      with open("/data/nav_cmd_last.txt", "w") as _f:
+        _f.write(f"{cmd}:{arg}:{int(time.time() * 1000)}")
+      actuate = os.path.exists("/data/nav_cmd_actuate")
+    except Exception:
+      actuate = False
+    with lock:
+      self.shared_data.nav_lane_change_req = req if actuate else 0
+
+  def _update_navi(self, json_obj, ip):
+    """[NAVI_BRIDGE] 解析外部导航包。
+
+    兼容两种写法：
+      A) {"resp":"navi", "naviValid":true, "routeRemainDis":..., ...}
+      B) 直接把高德广播的原始 key 透传：{"TRAFFIC_LIGHT_NUM":2, "ROUTE_REMAIN_DIS":1200, ...}
+    未知字段一律忽略，缺字段保留上一帧，避免闪断。
+    """
+    keys = set(json_obj.keys())
+    is_navi = (str(json_obj.get("resp", "")).lower() in ("navi", "nav"))
+    if not is_navi and not (keys & {"naviValid", "routeRemainDis", "ROUTE_REMAIN_DIS",
+                                    "trafficLightNum", "TRAFFIC_LIGHT_NUM",
+                                    "trafficLightCountdown", "redLightCountDownSeconds"}):
+      return
+
+    def pick(*names, default=None):
+      for n in names:
+        if n in json_obj and json_obj[n] is not None:
+          return json_obj[n]
+      return default
+
+    def num(v, default=0.0):
+      try:
+        return float(v)
+      except (TypeError, ValueError):
+        return default
+
+    with lock:
+      sd = self.shared_data
+      sd.nav_last_seen = time.time()
+      v = pick("naviValid", "valid")
+      if v is not None:
+        sd.nav_valid = bool(v)
+      else:
+        sd.nav_valid = True
+
+      rrd = pick("routeRemainDis", "ROUTE_REMAIN_DIS", "ROUTE_REMAIN_DIS_AUTO")
+      if rrd is not None:
+        sd.nav_route_remain_dis = num(rrd)
+      rrt = pick("routeRemainTime", "ROUTE_REMAIN_TIME", "ROUTE_REMAIN_TIME_AUTO")
+      if rrt is not None:
+        sd.nav_route_remain_time = num(rrt)
+      srd = pick("segRemainDis", "SEG_REMAIN_DIS", "SEG_REMAIN_DIS_AUTO", "NEXT_SEG_REMAIN_DIS")
+      if srd is not None:
+        sd.nav_seg_remain_dis = num(srd)
+      ic = pick("navIcon", "icon", "ICON", "NEXT_NEXT_TURN_ICON")
+      if ic is not None:
+        sd.nav_icon = int(num(ic))
+      rn = pick("nextRoadName", "NEXT_ROAD_NAME")
+      if rn is not None:
+        sd.nav_next_road = str(rn)
+      tln = pick("trafficLightNum", "TRAFFIC_LIGHT_NUM")
+      if tln is not None:
+        sd.nav_tl_num = int(num(tln))
+      tlc = pick("trafficLightCountdown", "redLightCountDownSeconds", "TRAFFIC_LIGHT_COUNT_DOWN")
+      if tlc is not None:
+        sd.nav_tl_countdown = int(num(tlc, -1))
+      sl = pick("speedLimit", "LIMITED_SPEED")
+      if sl is not None:
+        sd.nav_speed_limit = num(sl)
 
   # ----------------------
   # 更新雷达/摄像头盲区与距离数据
