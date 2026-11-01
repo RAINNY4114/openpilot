@@ -54,6 +54,10 @@ _services: dict[str, tuple] = {
   "gpsLocation": (True, 1., 1),
   "navInstruction": (True, 1., 10),
   "navRoute": (True, 0.),
+  # [NAV_LONG][NAV_LAT_FALLBACK] 导航速度/曲率剖面，1 Hz。
+  # 消费方（plannerd / controlsd）必须把它放进 SubMaster 的 ignore_alive 里：
+  # navd 只在 NavigationEnabled=1 时运行，否则会让 all_checks() 恒假。
+  "navProfile": (True, 1., 10),
   "ubloxGnss": (True, 10.),
   "qcomGnss": (True, 2.),
   "clocks": (True, 0.1, 1),

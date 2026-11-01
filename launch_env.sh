@@ -59,3 +59,28 @@ if [ -x /data/openpilot/system/egpu_usb_perm.sh ]; then
   setsid bash /data/openpilot/system/egpu_usb_perm.sh >/dev/null 2>&1 &
 fi
 
+
+# [NAV_MAPBOX_20261031] navd 的 Mapbox access token（public, pk.*）。
+#
+# 为什么从文件读而不是写在这里：launch_env.sh 是 git 跟踪的文件，凭证写进来会被
+# commit。也不能用 Params —— 新增的 param key 会被 libparams_c.so 的 clearAll 清掉
+# （curve_bend.py 里对同一问题有详细说明）。所以用普通文件。
+#
+# 生效逻辑（navd.py）：
+#   MAPBOX_TOKEN 非空 -> mapbox_host = https://api.mapbox.com
+#   为空             -> mapbox_host = API_HOST + "/v1/nav"（本机 API_HOST=api.konik.ai，
+#                      该端点实测 404，所以为空时 navd 算不出路）
+#
+# 设置方式（token 不要带引号或换行）：
+#   printf "%s" "pk.xxxxx" > /data/ford_params/mapbox_token
+#   sudo systemctl restart comma
+MAPBOX_TOKEN_FILE="/data/ford_params/mapbox_token"
+if [ -z "${MAPBOX_TOKEN:-}" ] && [ -r "$MAPBOX_TOKEN_FILE" ]; then
+  MAPBOX_TOKEN="$(tr -d "[:space:]" < "$MAPBOX_TOKEN_FILE" 2>/dev/null)"
+fi
+if [ -n "${MAPBOX_TOKEN:-}" ]; then
+  export MAPBOX_TOKEN
+else
+  unset MAPBOX_TOKEN
+fi
+unset MAPBOX_TOKEN_FILE
