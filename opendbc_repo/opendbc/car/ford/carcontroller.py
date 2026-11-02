@@ -7,6 +7,23 @@ from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 
+# [BP_ANGLE_UPGRADE 20261102] 模型预测混合所需的可选依赖。
+#
+# carcontroller 是安全关键路径上的进程，不能因为一个**可选**特性导入失败就起不来，
+# 所以这里整体 try 包住：失败时 _BP_MODEL_AVAILABLE=False，_shape_kappa 会自动退化为
+# "纯规划曲率"，与升级前逐字节一致。
+#
+# 注意：BluePilot 用的是 liveDelay 服务，本机 sunnypilot 版本里叫 lateralDelay
+# （cereal/services.py 已确认），字段名同为 lateralDelay。
+try:
+  from openpilot.cereal import messaging as _cereal_messaging
+  from openpilot.selfdrive.modeld.constants import ModelConstants
+  _BP_MODEL_AVAILABLE = True
+except Exception:
+  _cereal_messaging = None
+  ModelConstants = None
+  _BP_MODEL_AVAILABLE = False
+
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 
@@ -66,6 +83,48 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
 #   0 = 关（缺省）  恒 α=0，与打补丁前逐字节一致
 #   1 = 影子        α 照常演进并写日志，但 CAN 上 c1 恒 0、c2 恒 κ（不发）
 #   2 = 实发        按 α 混合下发
+#
+# =================================================================================================
+# [BP_ANGLE_UPGRADE 20261102] 从 BluePilot bp-7.0 移植的增强
+# 参考 https://github.com/BluePilotDev/bluepilot/tree/bp-7.0
+#      opendbc_repo/opendbc/sunnypilot/car/ford/lateral_angle_ext.py (636 行)
+#      opendbc_repo/opendbc/sunnypilot/car/ford/human_turn.py
+#
+# ---- 为什么不能整份照搬 ----
+# BluePilot 的 angle 模式是"纯 angle"策略：c2 恒 0、c1 独立承担全部横向控制，并且配套改了
+# panda 的 ford.h（新增 shadow_curvature 偏差检查、FORD_PATH_ANGLE_LIMITS 的 x1.02 放宽）。
+# 本机 panda 固件是预编译的，改不了安全层，所以整份移植会直接把车开进 panda 的 veto。
+#
+# 本机保留 α 混合架构（c1/c2 都在现有 ford.h 窗口内），只移植**不触碰安全边界**的算法层：
+#
+#   1. 模型预测曲率混合   κ' = κ_pred·b + κ_plan·(1-b)，b 默认 0.50
+#                         （BluePilot 在 F-150 车队数据上验证的默认值）
+#   2. 可变前瞻时间 VLT    t = t_base + t_extra·speed_factor·kappa_factor
+#                         高速收缩额外前瞻；入弯（模型前瞻曲率 > 规划）保持满前瞻以提前预打，
+#                         出弯/弯心按曲率幅值收缩，避免把"开始回正"的信号提前导入
+#   3. 出弯偏置            接近 DBC 限幅或规划曲率正在下降时，b → 0.25b
+#                         解决出弯时模型仍看到弯道导致回正偏慢，以及前瞻跨过弯心造成的突跳
+#   4. 偏差限幅后移        混合后再夹到实测曲率 ± CURVATURE_ERROR（原先只在混合前夹一次）
+#   5. 变道增益            变道时按方向缩放 κ'（angle 需要放大，curvature 需要收缩）
+#   6. 人工转向接管        持续按压 + |转角|>45° 超过 1.5s → 强制 mode 0，PSCM 干净释放；
+#                         松开后 c1 从 0 按软 ROC 斜坡回填（无 jump seed）
+#                         解决 PSCM 在接管后 2~3 s 的重新接合死区（Mach-E 实测）
+#   7. 饱和退绕限速        接近 DBC 限幅时限制 |c1| 的下降速率（默认 0.40 rad/s）
+#                         避免 PSCM 被钉住时 desired 掉得比 actual 快，释放瞬间突跳
+#
+# ---- 明确未移植（需要改 panda / UI，留作后续）----
+#   * LaneCenterTrim 车道居中微调（203 行独立模块，需车道线置信度，另需 UI 开关）
+#   * 接管后 stall blip 脉冲（依赖偏差限幅死锁检测，300ms 横向空窗，风险偏高）
+#   * FordPrefLateralControl 策略切换（需 UI 参数页与 BP 的 CarParamsSP 通道）
+#   * shadow_curvature / ford.h 偏差检查（panda 固件不可改）
+#
+# ---- 新增参数（/data/ford_params/，全部热加载，缺失即用默认值）----
+#   dp_ford_angle_blend     0.00~1.00   默认 0.50   模型预测混合比（0=纯规划，1=纯模型）
+#   dp_ford_angle_vlt       0.00~0.20   默认 0.10   最大额外前瞻（s）
+#   dp_ford_angle_lc        0.85~1.50   默认 1.15   变道增益
+#   dp_ford_angle_damp      0.50~1.25   默认 1.00   高速阻尼（1.0=不启用）
+#   dp_ford_angle_humanturn 0 / 1       默认 1      人工转向接管强制 mode 0
+#   dp_ford_angle_unwind    0.10~1.00   默认 0.40   饱和退绕速率（rad/s）
 # =================================================================================================
 
 _PARAM_DIR = "/data/ford_params"
@@ -75,6 +134,64 @@ _SHADOW_LOG = "/data/media/0/path_angle_shadow.log"
 # auto_overtake.py / soundd.py 都有上限，只有它漏了。这里补一个 2 MB 上限 + 超限清空，
 # 纯文件 I/O，不碰任何控制逻辑（α 混合、c1/c2 计算完全不受影响）。
 _SHADOW_LOG_MAX_BYTES = 2_000_000
+
+# ---- [BP_ANGLE_UPGRADE 20261102] 模型预测混合 / VLT 常量（数值取自 BluePilot bp-7.0）----
+_DT_MDL = 0.05                      # 模型循环周期，与 common/realtime.py 一致
+_VLT_T_EXTRA_MAX = 0.10             # 额外前瞻上限（s）
+_VLT_V_LOW_MS = 25.0 * 0.44704      # 25 mph —— 此速度及以下给满额外前瞻
+_VLT_V_HIGH_MS = 55.0 * 0.44704     # 55 mph —— 此速度及以上不再给额外前瞻
+_VLT_KAPPA_FULL = 0.005             # 1/m —— 此曲率以下给满额外前瞻（半径 200m+）
+_VLT_KAPPA_TAPER = 0.020            # 1/m —— 此曲率以上完全不给（半径 50m）
+_EXIT_BLEND_SCALE = 0.25            # 出弯/饱和时 b 的缩放系数（0.50 → 0.125）
+_EXIT_FALLING_DK = 0.010            # 判定"规划曲率正在下降"的每拍阈值（1/m）
+
+# ---- 人工转向接管阈值（同 BluePilot human_turn.py）----
+_HUMAN_TURN_ANGLE_DEG = 45.0
+_HUMAN_TURN_HOLD_S = 1.5
+# 首次接触时方向盘已经超过阈值（横向控制把它拧在弯里），说明是"弯中补一手"而不是主动接管，
+# 需要更长的持续按压才判定，否则轻触 1.5s 就会把弯中的转向掐掉。
+_HUMAN_TURN_HOLD_PRETURNED_S = 3.0
+
+
+class HumanTurnDetector:
+  """持续按压 + 大转角 → 判定驾驶员主动接管。
+
+  判定门槛是"连续 HUMAN_TURN_HOLD_S 同时满足 pressed 与 |angle|>45°"，用于区分主动转向
+  与弯中的短暂修正。``just_released`` 在解除的第一拍为 True，供上层重新起坡使用。
+  """
+
+  def __init__(self):
+    self.hold_timer_s = 0.0
+    self.active = False
+    self._active_last = False
+    self._pressed_last = False
+    self._press_started_preturned = False
+
+  def update(self, enabled: bool, steering_pressed: bool, steering_angle_deg: float) -> bool:
+    self._active_last = self.active
+    if steering_pressed and not self._pressed_last:
+      self._press_started_preturned = abs(steering_angle_deg) > _HUMAN_TURN_ANGLE_DEG
+    self._pressed_last = steering_pressed
+    if not enabled:
+      self.hold_timer_s = 0.0
+    elif steering_pressed and abs(steering_angle_deg) > _HUMAN_TURN_ANGLE_DEG:
+      self.hold_timer_s += DT_CTRL * CarControllerParams.STEER_STEP
+    else:
+      self.hold_timer_s = 0.0
+    hold_req = _HUMAN_TURN_HOLD_PRETURNED_S if self._press_started_preturned else _HUMAN_TURN_HOLD_S
+    self.active = self.hold_timer_s >= hold_req
+    return self.active
+
+  @property
+  def just_released(self) -> bool:
+    return self._active_last and not self.active
+
+  def reset(self) -> None:
+    self.hold_timer_s = 0.0
+    self.active = False
+    self._active_last = False
+    self._pressed_last = False
+    self._press_started_preturned = False
 
 
 def _read_param(name, default, cast=float):
@@ -114,12 +231,65 @@ class FordPathAngleGate:
     self._n = 0
     self._log_n = 0
 
+    # ---- [BP_ANGLE_UPGRADE 20261102] 模型预测混合相关 ----
+    self.blend = 0.50            # dp_ford_angle_blend
+    self.vlt_extra_max = _VLT_T_EXTRA_MAX   # dp_ford_angle_vlt
+    self.lc_factor = 1.15        # dp_ford_angle_lc
+    self.damp = 1.00             # dp_ford_angle_damp
+    self.humanturn_enable = True  # dp_ford_angle_humanturn
+    self.unwind_rate = 0.40      # dp_ford_angle_unwind（rad/s）
+
+    # 由 CarController 每拍注入的上下文（模型缺失时为 None，功能自动退化）
+    self.model = None
+    self.lateral_delay = 0.12
+    self.lane_change = False
+    self.lc_direction = 0
+
+    # 运行状态 / 遥测
+    self._k_plan_last = 0.0
+    self.vlt = 0.0
+    self.kappa_pred = 0.0
+    self.kappa_blend = 0.0
+    self.blend_eff = 0.0
+    self.dbc_sat = False
+    self.dev_limited = False
+    self.angle_rate_limited = False
+    self.human_turn = HumanTurnDetector()
+    self.human_turn_active = False
+
   def reload(self):
     self.mode = int(_read_param("dp_ford_angle_mode", 0, int))
     self.gain = float(np.clip(_read_param("dp_ford_angle_gain", 1.20, float), 0.5, 2.0))
     self.enter = float(np.clip(_read_param("dp_ford_angle_enter", 0.80, float), 0.30, 3.0))
     lo = float(np.clip(_read_param("dp_ford_angle_exit", 0.50, float), 0.10, 2.90))
     self.exit = min(lo, self.enter - 0.05)
+    # [BP_ANGLE_UPGRADE] 新增项一律"缺失即保持旧行为"，除 blend 外默认值都不改变现有手感。
+    self.blend = float(np.clip(_read_param("dp_ford_angle_blend", 0.50, float), 0.0, 1.0))
+    self.vlt_extra_max = float(np.clip(_read_param("dp_ford_angle_vlt", _VLT_T_EXTRA_MAX, float), 0.0, 0.20))
+    self.lc_factor = float(np.clip(_read_param("dp_ford_angle_lc", 1.15, float), 0.85, 1.50))
+    self.damp = float(np.clip(_read_param("dp_ford_angle_damp", 1.00, float), 0.50, 1.25))
+    self.humanturn_enable = bool(int(_read_param("dp_ford_angle_humanturn", 1, int)))
+    self.unwind_rate = float(np.clip(_read_param("dp_ford_angle_unwind", 0.40, float), 0.10, 1.00))
+
+  def set_context(self, model, lateral_delay):
+    """每拍由 CarController 注入模型与延迟估计。任一缺失都不影响主流程。"""
+    self.model = model
+    if lateral_delay is not None:
+      try:
+        self.lateral_delay = float(lateral_delay)
+      except (TypeError, ValueError):
+        pass
+    if model is not None:
+      try:
+        lcs = int(model.meta.laneChangeState)
+        self.lane_change = lcs in (1, 2, 3)
+        self.lc_direction = int(model.meta.laneChangeDirection) if self.lane_change else 0
+      except Exception:
+        self.lane_change = False
+        self.lc_direction = 0
+    else:
+      self.lane_change = False
+      self.lc_direction = 0
 
   # ---- 限幅窗口 ----
   def _pa_step(self, v):
@@ -163,14 +333,91 @@ class FordPathAngleGate:
     """朝 target 移动，单步不超过 step。"""
     return float(np.clip(target, cur - step, cur + step))
 
-  def update(self, lat_active: bool, kappa: float, v_ego: float):
+  def _shape_kappa(self, kappa_plan: float, v: float, current_curvature):
+    """κ_plan → κ'：模型预测混合 + 出弯偏置 + 变道增益 + 高速阻尼 + 偏差限幅。
+
+    mode<=0 或模型不可用时**原样返回** kappa_plan，保证关断时逐字节一致。
+    """
+    self.kappa_blend = kappa_plan
+    self.blend_eff = 0.0
+    self.dev_limited = False
+    self.dbc_sat = abs(self.c1) >= self._PA_MAX * 0.90
+
+    if self.mode <= 0:
+      self.vlt = 0.0
+      self.kappa_pred = 0.0
+      self._k_plan_last = kappa_plan
+      return kappa_plan
+
+    k = kappa_plan
+    b = float(np.clip(self.blend, 0.0, 1.0))
+
+    if _BP_MODEL_AVAILABLE and self.model is not None and len(self.model.orientationRate.z) >= 17:
+      curvs = np.array(self.model.orientationRate.z) / max(0.01, v)
+      # liveDelay 在本机叫 lateralDelay；BluePilot 把它夹到 [0.1,0.15] 再叠加模型周期，
+      # 因为该估计偶尔会标到 400ms+，那会把前瞻推到 5m 之外，模型直接看到弯心。
+      t_base = float(np.clip(self.lateral_delay, 0.1, 0.15)) + _DT_MDL
+      k_at_base = abs(float(np.interp(t_base, ModelConstants.T_IDXS, curvs)))
+      # 入弯：模型在 t_base 处看到的曲率比规划当前的大 → 保持满额外前瞻，提前预打
+      entering = k_at_base > abs(kappa_plan)
+      if entering:
+        kfac = 1.0
+      else:
+        kfac = float(np.interp(abs(kappa_plan), [_VLT_KAPPA_FULL, _VLT_KAPPA_TAPER], [1.0, 0.0]))
+      sfac = float(np.interp(v, [_VLT_V_LOW_MS, _VLT_V_HIGH_MS], [1.0, 0.0]))
+      self.vlt = t_base + self.vlt_extra_max * sfac * kfac
+      pred = float(np.interp(self.vlt, ModelConstants.T_IDXS, curvs))
+      self.kappa_pred = pred
+      # 出弯偏置：接近 DBC 限幅、或规划曲率正在下降时，把模型权重压到 1/4，
+      # 让规划的自然回正主导，避免"模型仍看到弯道"造成的慢回正和前瞻跨弯心的突跳。
+      falling = abs(kappa_plan) < abs(self._k_plan_last) - _EXIT_FALLING_DK
+      if (not entering) and (self.dbc_sat or falling):
+        b = b * _EXIT_BLEND_SCALE
+      if b > 1e-6:
+        k = pred * b + kappa_plan * (1.0 - b)
+      self.blend_eff = b
+    else:
+      self.vlt = 0.0
+      self.kappa_pred = 0.0
+
+    # 变道增益：只在"变道方向与当前曲率方向相反"时缩放（与 BluePilot 同判据）
+    if self.lane_change and ((self.lc_direction == 1 and k < 0) or (self.lc_direction == 2 and k > 0)):
+      k *= self.lc_factor
+
+    # 高速阻尼（默认 1.0，等于不启用；仅当用户显式设置时才生效）
+    if abs(self.damp - 1.0) > 1e-6:
+      k *= float(np.interp(v, [13.5, 26.82], [1.0, self.damp]))
+
+    # 偏差限幅后移：混合后的 κ' 可能已经离开实测曲率窗口，这里重新夹一次。
+    if current_curvature is not None and v > 9:
+      kc = float(np.clip(k, current_curvature - CarControllerParams.CURVATURE_ERROR,
+                         current_curvature + CarControllerParams.CURVATURE_ERROR))
+      self.dev_limited = bool(abs(kc - k) > 1e-9)
+      k = kc
+
+    self._k_plan_last = kappa_plan
+    self.kappa_blend = k
+    return k
+
+  def update(self, lat_active: bool, kappa: float, v_ego: float,
+             steering_pressed: bool = False, steering_angle_deg: float = 0.0,
+             current_curvature=None):
     """返回 (c1, c2)，均为 openpilot 内部符号；调用方对两者取负后下发。"""
     self._n += 1
     if (self._n % 40) == 0:                # 20 Hz 下 2 s 一次热加载（关断要快）
       self.reload()
 
     kappa = float(kappa)
+    kappa_passthrough = kappa             # mode<=1 时原样透传用，保证"影子"不改变输出
     v = max(float(v_ego), 1.0)
+
+    # [BP_ANGLE_UPGRADE] 人工转向接管检测：每拍都跑，未激活时计时器清零
+    if self.humanturn_enable:
+      self.human_turn_active = self.human_turn.update(
+        bool(lat_active), bool(steering_pressed), float(steering_angle_deg))
+    else:
+      self.human_turn.reset()
+      self.human_turn_active = False
 
     # 未激活：固件要求 c1 与 c2 都严格为 0，必须立刻归零，不能按斜坡收。
     if not lat_active:
@@ -179,7 +426,29 @@ class FordPathAngleGate:
       self.c1 = 0.0
       self.c2 = kappa
       self._k_last = kappa
+      self._k_plan_last = kappa
+      self.human_turn.reset()
+      self.human_turn_active = False
+      self.angle_rate_limited = False
+      self.dev_limited = False
       return 0.0, kappa
+
+    # [BP_ANGLE_UPGRADE] 接管中：强制全零，并让调用方把 mode 降到 0。
+    # 这样 PSCM 收到的是"合法的未激活帧"——ford.h 的每条检查都有 !steer_control_enabled 分支，
+    # 所以零帧天然合规，不涉及 reset-bypass 闩锁。松开后 c1 从 0 按软 ROC 回填，无 jump seed。
+    if self.human_turn_active:
+      self.in_curve = False
+      self.alpha = 0.0
+      self.c1 = 0.0
+      self.c2 = 0.0
+      self._k_last = kappa
+      self._k_plan_last = kappa
+      self.angle_rate_limited = False
+      self.dev_limited = False
+      return 0.0, 0.0
+
+    # [BP_ANGLE_UPGRADE] 模型预测混合 / 出弯偏置 / 变道增益 / 偏差限幅
+    kappa = self._shape_kappa(kappa, v, current_curvature)
 
     lat_accel = abs(kappa) * v * v
 
@@ -197,13 +466,15 @@ class FordPathAngleGate:
       a_target = 1.0 if self.in_curve else 0.0
 
     # ---- 影子：α 照常演进并写日志，但输出一个字节都不改 ----
+    # [BP_ANGLE_UPGRADE] 注意这里必须用 kappa_passthrough 而不是 kappa：kappa 已被
+    # _shape_kappa 混合过，直接下发会破坏"影子模式输出与上游逐字节一致"的契约。
     if self.mode == 1:
       self._step_alpha(a_target, kappa, v)
-      self._maybe_log(v, kappa, lat_accel)
+      self._maybe_log(v, kappa_passthrough, lat_accel)
       self.c1 = 0.0
-      self.c2 = kappa
-      self._k_last = kappa
-      return 0.0, kappa
+      self.c2 = kappa_passthrough
+      self._k_last = kappa_passthrough
+      return 0.0, kappa_passthrough
 
     # ---- α 已完全收回：原样透传，与上游逐字节一致（直路基线零影响）----
     if a_target == 0.0 and self.alpha <= 1e-9:
@@ -217,9 +488,21 @@ class FordPathAngleGate:
     c1_t = float(np.clip(a * (-kappa * v * self.gain), -self._PA_MAX, self._PA_MAX))
     c2_t = (1.0 - a) * kappa
 
+    # [BP_ANGLE_UPGRADE] 饱和退绕限速：接近 DBC 限幅时，限制 |c1| 的**下降**速率。
+    # 模型和规划在急弯顶点会以 ~0.36 rad/s 掉 path_angle，而此刻 PSCM 被物理钉住，
+    # 跟不上这个下降速度，desired 与 actual 之间会拉开最大 47° 的缺口，
+    # 一旦 PSCM 释放就会突跳修正。这里把下降速率压到 PSCM 跟得上的水平
+    # （默认 0.40 rad/s ÷ 20 Hz = 0.02 rad/拍），代价是饱和期间车被多留在弯里一点。
+    if self.dbc_sat and abs(self.c1) > abs(c1_t):
+      max_drop = self.unwind_rate / self._FREQ
+      if abs(self.c1) - abs(c1_t) > max_drop:
+        mag = abs(self.c1) - max_drop
+        c1_t = mag if self.c1 >= 0 else -mag
+
     # 兜底：无论上面算得如何，逐拍增量绝不越窗（α>0 才会走到这里）
     self.c1 = self._move(self.c1, c1_t, self._pa_step(v))
     self.c2 = self._move(self.c2, c2_t, self._curv_step(v))
+    self.angle_rate_limited = bool(abs(self.c1 - c1_t) > 1e-9)
     self._k_last = kappa
 
     self._maybe_log(v, kappa, lat_accel)
@@ -240,10 +523,16 @@ class FordPathAngleGate:
       except OSError:
         pass
       with open(_SHADOW_LOG, "a") as f:
-        # v, kappa, alpha, c1_can, c2_can, in_curve, mode
-        f.write("%.3f,%.6f,%.4f,%.5f,%.6f,%d,%d\n"
+        # [BP_ANGLE_UPGRADE] 追加 kappa_blend / blend_eff / vlt / 标志位，
+        # 便于调 blend 与 VLT 时直接对账（旧字段顺序保持不变，前 7 列含义不变）。
+        # v, kappa_plan, alpha, c1_can, c2_can, in_curve, mode,
+        # kappa_blend, blend_eff, vlt, dev_limited, angle_rate_limited, human_turn
+        f.write("%.3f,%.6f,%.4f,%.5f,%.6f,%d,%d,%.6f,%.4f,%.4f,%d,%d,%d\n"
                 % (v, kappa, self.alpha, -self.c1, -self.c2,
-                   int(self.in_curve), self.mode))
+                   int(self.in_curve), self.mode,
+                   self.kappa_blend, self.blend_eff, self.vlt,
+                   int(self.dev_limited), int(self.angle_rate_limited),
+                   int(self.human_turn_active)))
     except Exception:
       pass
 
@@ -268,6 +557,32 @@ class CarController(CarControllerBase):
     # [CHX PATH_ANGLE]
     self.path_angle_gate = FordPathAngleGate()
     self.path_angle_gate.reload()
+
+    # [BP_ANGLE_UPGRADE 20261102] 模型预测混合需要 modelV2 与 lateralDelay。
+    #
+    # 本机没有 liveDelay 服务（那是 BluePilot 新增的），sunnypilot 里对应的是 lateralDelay
+    # （cereal/services.py 已确认，字段同为 .lateralDelay）。SubMaster 建失败时置 None，
+    # 后续每拍跳过注入，_shape_kappa 自动退化为纯规划曲率。
+    self.sm = None
+    if _BP_MODEL_AVAILABLE:
+      try:
+        self.sm = _cereal_messaging.SubMaster(['modelV2', 'lateralDelay'])
+      except Exception:
+        self.sm = None
+
+  def _inject_model_context(self):
+    """把 modelV2 / lateralDelay 喂给 angle 闸门。任何异常都不允许冒泡到控制路径。"""
+    if self.sm is None:
+      return
+    try:
+      self.sm.update(0)
+      model = self.sm['modelV2'] if self.sm.alive['modelV2'] else None
+      delay = None
+      if self.sm.alive['lateralDelay']:
+        delay = float(self.sm['lateralDelay'].lateralDelay)
+      self.path_angle_gate.set_context(model, delay)
+    except Exception:
+      self.path_angle_gate.set_context(None, None)
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -294,6 +609,10 @@ class CarController(CarControllerBase):
     ### lateral control ###
     # send steer msg at 20Hz
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
+      # [BP_ANGLE_UPGRADE] 注入模型上下文。放在 20 Hz 分支里而不是每拍：
+      # 闸门本身就只在 20 Hz 跑，100 Hz 更新 SubMaster 只是白烧 CPU。
+      self._inject_model_context()
+
       # Bronco and some other cars consistently overshoot curv requests
       # Apply some deadzone + smoothing convergence to avoid oscillations
       if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14):
@@ -313,8 +632,16 @@ class CarController(CarControllerBase):
       self.apply_curvature_last = apply_curvature
 
       # [CHX PATH_ANGLE] α 混合：mode=0 时返回 (0.0, apply_curvature_last)，与上游逐字节一致。
+      # [BP_ANGLE_UPGRADE] 额外传入实测曲率（偏差限幅后移用）与驾驶员转向状态（接管检测用）。
       path_angle_cmd, curvature_cmd = self.path_angle_gate.update(
-        bool(CC.latActive), self.apply_curvature_last, CS.out.vEgoRaw)
+        bool(CC.latActive), self.apply_curvature_last, CS.out.vEgoRaw,
+        steering_pressed=bool(CS.out.steeringPressed),
+        steering_angle_deg=float(CS.out.steeringAngleDeg),
+        current_curvature=float(current_curvature))
+
+      # [BP_ANGLE_UPGRADE] 人工转向接管期间把 mode 降到 0（横向未激活），让 PSCM 干净释放。
+      # gate 在同一拍已把 c1/c2 全零，所以这是一帧合法的"未激活"报文。
+      lat_active_cmd = bool(CC.latActive) and not self.path_angle_gate.human_turn_active
 
       if self.CP.flags & FordFlags.CANFD:
         # TODO: extended mode
@@ -323,11 +650,11 @@ class CarController(CarControllerBase):
         # steer actuation, the other three signals are necessary. Ford controls vehicles differently than most other makes.
         # A detailed explanation on ford control can be found here:
         # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
-        mode = 1 if CC.latActive else 0
+        mode = 1 if lat_active_cmd else 0
         counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
         can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., -path_angle_cmd, -curvature_cmd, 0., counter))
       else:
-        can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., -path_angle_cmd, -curvature_cmd, 0.))
+        can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, lat_active_cmd, 0., -path_angle_cmd, -curvature_cmd, 0.))
 
     # send lka msg at 33Hz
     if (self.frame % CarControllerParams.LKA_STEP) == 0:
