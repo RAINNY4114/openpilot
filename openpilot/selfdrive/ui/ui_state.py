@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import time
 import threading
 from collections.abc import Callable
@@ -223,6 +224,16 @@ class UIState(UIStateSP):
       self._started_prev = self.started
 
   def _update_chestnut_state(self) -> None:
+    # [CHESTNUT_MANUAL_OFF_20261101] /data/chestnut_off 存在时 modeld 的 gate 恒为 False，
+    # 大模型永远不会加载。此时 UI 仍会按 chestnutPresent=True + modelV2.big=False
+    # 判成 FAILED（橙色图标），看起来像 eGPU 坏了，实际是主动禁用。
+    # 这里直接按「未连接」处理，语义一致，且不影响任何驾驶功能。
+    # 删除该文件即可恢复原有判定逻辑。
+    if os.path.exists("/data/chestnut_off"):
+      self.chestnut_present = False
+      self.chestnut_state = ChestnutState.DISCONNECTED
+      return
+
     detected = self.sm["deviceState"].chestnutPresent
     if not self.started:
       self.chestnut_present = detected
@@ -230,6 +241,12 @@ class UIState(UIStateSP):
                              ChestnutState.READY if detected and self.chestnut_compiled else
                              ChestnutState.UNCOMPILED if detected else ChestnutState.DISCONNECTED)
       return
+
+    # [CHESTNUT_HOTPLUG_20261101] 原来 chestnut_present 只在 offroad 更新（started 即点火），
+    # 导致行车中补插 eGPU 后图标永远不变，看起来像「没反应」。
+    # 这里每帧同步；严格用 deviceState.chestnutPresent，避免插着充电线
+    # （cable_connected 只看 CC 方向）被误判成 eGPU 在场。
+    self.chestnut_present = detected
 
     model_seen = self.sm.recv_frame["modelV2"] > self.started_frame
     if not self.chestnut_present:

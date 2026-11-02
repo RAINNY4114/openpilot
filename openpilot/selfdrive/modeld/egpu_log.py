@@ -20,7 +20,7 @@ DIAG_MAX_BYTES = 256 * 1024
 RETRY_PATH = os.environ.get('EGPU_RETRY_PATH', '/data/egpu_retry.json')
 
 # 每 boot 最多请求几次 onroad cycle 来重试大模型（egpucp 用 3，照抄）
-RETRY_MAX = 3
+RETRY_MAX = 1  # [SP0920XL_ALIGN_20261101] 对齐 sp0920xl：最多 cycle 一次，别反复重启 modeld
 # 第 1/2/3 次重试的最小间隔（秒）。由 threading.Timer 兑现，不阻塞帧循环。
 RETRY_BACKOFF = (10.0, 30.0, 60.0)
 
@@ -189,3 +189,70 @@ def consume_retry(st: dict) -> dict:
 def reset_retry() -> None:
   """大模型加载成功时调用：本 boot 的失败计数清零，下次失败还能重试。"""
   _save_retry({'boot': boot_id(), 'count': 0, 'last_ts': 0.0})
+
+
+def pcie_ltssm() -> int | None:
+  """只读 ASM2464 的 PCIe LTSSM（0x78 = L0，链路已训练）。读不到返回 None。
+
+  两条读取通道，先 libusb 后 ioctl：
+    1. common/hardware/usb.py 的 chestnut_ltssm()（libusb controlRead 0xC0/0xE4）
+    2. flash.py 的 open_device() + USBDEVFS_CONTROL（直接 ioctl）
+  第 2 条是给 libusb 打不开设备（被 tinygrad 占用 / 权限不足）时兜底的。
+
+  纯读：不发 0x40/0xF3 上电请求，也不改链路状态，所以可以在 tinygrad 初始化的
+  时间窗口里安全调用。参考 onemiless/dev-sp-egpu 的 read_pcie_ltssm()。
+  """
+  try:
+    from openpilot.common.hardware.usb import chestnut_ltssm, chestnut_nodes
+    for node in chestnut_nodes():
+      value = chestnut_ltssm(node["vendor_id"], node["product_id"])
+      if value >= 0:
+        return value
+  except Exception:
+    pass
+
+  fd = None
+  try:
+    import ctypes
+    import fcntl
+    from openpilot.system.hardware.chestnut.flash import Ctrl, USBDEVFS_CONTROL, find_chestnut, open_device
+    path, _, _ = find_chestnut()
+    if path is None:
+      return None
+    fd = open_device(path)
+    buf = (ctypes.c_ubyte * 1)()
+    fcntl.ioctl(fd, USBDEVFS_CONTROL,
+                Ctrl(0xC0, 0xE4, 0xB450, 0, 1, 1000, ctypes.cast(buf, ctypes.c_void_p)))
+    return int(buf[0])
+  except Exception:
+    return None
+  finally:
+    if fd is not None:
+      try:
+        os.close(fd)
+      except Exception:
+        pass
+
+
+# 一次加载尝试里允许出现的 USB3 链路错误数。超过它说明链路余量不足，
+# 再重试也只是把 modeld 反复重启，不如直接回退小模型。
+LINK_ERR_UNSTABLE = 10
+
+
+def link_err() -> int | None:
+  """chestnut 所在 USB 端口的链路错误计数（xHCI PORTLI 低 16 位）。读不到返回 None。"""
+  try:
+    from openpilot.common.hardware.usb import get_usb_state
+    for dev in get_usb_state():
+      if int(dev.get("vendorId", 0)) in (0x3801, 0xADD1):
+        return int(dev.get("linkErrorCount", 0))
+  except Exception:
+    pass
+  return None
+
+
+def link_err_delta(before: int | None, after: int | None) -> int:
+  """两次采样的增量，按 16 位回绕处理。任一为 None 时返回 0。"""
+  if before is None or after is None:
+    return 0
+  return (after - before) & 0xFFFF

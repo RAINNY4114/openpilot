@@ -79,6 +79,43 @@ class Chestnut:
     return
 
 
+# [CHX_OFFROAD_PREP_20261101] 熄火期间把 chestnut 提前拉到 USB3 的共享状态。
+# 主循环每帧写 _CHX_IGNITION['on']，预热线程据此判断是否该干活。
+_CHX_IGNITION = {'on': False}
+
+
+def _chestnut_offroad_prep(end_event) -> None:
+  """熄火时若 chestnut 不在 USB3，提前调 chestnut_usb_node_ready 修好。
+
+  设备本来就在 USB3 时，chestnut_usb_node_ready() 会在第一次轮询就返回 True
+  （实测 0.09s），不产生任何副作用。只有真的停在 12Mbps 才会触发 0xF3 上电
+  和 USB reset。
+  """
+  last_try = 0.0
+  while not end_event.is_set():
+    end_event.wait(10.0)
+    if end_event.is_set():
+      break
+    try:
+      if _CHX_IGNITION['on']:
+        continue
+      if time.monotonic() - last_try < 60.0:
+        continue
+      from openpilot.common.hardware.usb import (chestnut_nodes, chestnut_usb_node_ready,
+                                                 USB3_MIN_SPEED)
+      nodes = chestnut_nodes()
+      if not nodes or all(n['speed'] >= USB3_MIN_SPEED for n in nodes):
+        continue
+      speeds = [n['speed'] for n in nodes]
+      last_try = time.monotonic()
+      cloudlog.warning(f'[CHX_PREP] 熄火预热：chestnut 停在 {speeds}Mbps，尝试拉回 USB3')
+      ok = chestnut_usb_node_ready(timeout=12.0, power_timeout=18.0)
+      result = '成功' if ok else '失败'
+      cloudlog.warning(f'[CHX_PREP] 熄火预热结果: {result}')
+    except Exception as e:
+      cloudlog.warning(f'[CHX_PREP] 预热异常: {type(e).__name__}: {e}')
+
+
 ThermalBand = namedtuple("ThermalBand", ['min_temp', 'max_temp'])
 HardwareState = namedtuple("HardwareState", ['network_type', 'network_info', 'network_strength', 'network_stats',
                                              'network_metered', 'modem_temps', 'usb_state'])
@@ -260,6 +297,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
       # Set ignition based on any panda connected
       onroad_conditions["ignition"] = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
+      _CHX_IGNITION['on'] = onroad_conditions['ignition']  # [CHX_OFFROAD_PREP_20261101]
 
       pandaState = pandaStates[0]
 
@@ -529,7 +567,8 @@ def main():
 
   if COMMA_HARDWARE:
     threads.append(threading.Thread(target=touch_thread, args=(end_event,)))
-    threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event,)))
+    threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event, _CHX_IGNITION)))  # [CHX_USB_EXCLUSIVE_20261101]
+    threads.append(threading.Thread(target=_chestnut_offroad_prep, args=(end_event,), daemon=True))  # [CHX_OFFROAD_PREP_20261101]
 
   for t in threads:
     t.start()

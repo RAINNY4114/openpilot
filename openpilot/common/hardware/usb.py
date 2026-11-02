@@ -226,10 +226,18 @@ def chestnut_ltssm(vendor_id: int, product_id: int) -> int:
     return -1
 
 
-def chestnut_pre_power(vendor_id: int, product_id: int) -> bool:
+def chestnut_pre_power(vendor_id: int, product_id: int, force: bool = False) -> bool:
   """给 ASM2464 的 PCIe 上电（vendor 请求 0xF3）。返回 0xF3 是否已成功发出。
 
   返回 True 不代表链路已 up，调用方还要等重枚举。
+
+  force: 即使 LTSSM 已训练也强制发 0xF3。
+    [CHX_FORCE_POWER_20261101] USB 侧还停在 USB2(12Mbps) 时，LTSSM 可能已经是 0x78
+    （PCIe 链路训练成功），但 SuperSpeed 通道并未建立 —— 此时跳过 0xF3 就永远等不到
+    重枚举到 USB3，40s 后超时、大模型失败、modeld 被 OnroadCycleRequested 反复重启，
+    行车中表现为 ready -> 掉出 active -> 再加载 的循环。
+    2026-11-01 实测：speed=12Mbps 且 LTSSM=0x78，日志打「链路已训练，无需上电」后
+    必然 load_fail。只在调用方确认 speed < USB3_MIN_SPEED 时才传 force=True。
   """
   try:
     import usb1
@@ -249,9 +257,14 @@ def chestnut_pre_power(vendor_id: int, product_id: int) -> bool:
           cloudlog.warning(f"[CHX_USB_ENUM] pre-power: 上电前 LTSSM=0x{ltssm:02X}")
         except Exception as e:
           cloudlog.warning(f"[CHX_USB_ENUM] pre-power: 读 LTSSM 失败 ({e})，仍然尝试上电")
-        if ltssm == LTSSM_TRAINED:
+        if ltssm == LTSSM_TRAINED and not force:
           cloudlog.warning("[CHX_USB_ENUM] pre-power: 链路已训练，无需上电")
           return True
+        if ltssm == LTSSM_TRAINED:
+          # [CHX_FORCE_POWER_20261101] PCIe 训练好但 USB 还在 USB2 侧：
+          # 不发 0xF3 就永远切不到 USB3，只能等 40s 超时。
+          cloudlog.warning("[CHX_USB_ENUM] pre-power: LTSSM=0x78 但 USB 仍在 USB2 侧，"
+                           "强制发 0xF3 触发重枚举")
         handle.controlWrite(0x40, 0xF3, 1, 0, b"", timeout=5000)
         cloudlog.warning("[CHX_USB_ENUM] pre-power: 已发 0xF3(PCIe 上电)，等待重枚举到 USB3")
         return True
@@ -262,6 +275,36 @@ def chestnut_pre_power(vendor_id: int, product_id: int) -> bool:
           pass
   except Exception as e:
     cloudlog.warning(f"[CHX_USB_ENUM] pre-power 失败: {e}")
+    return False
+
+
+def _chestnut_usb_reset(vendor_id: int, product_id: int) -> bool:
+  """[CHESTNUT_USB_RESET_20261101] 强制 USB 重新枚举（USBDEVFS_RESET）。
+
+  0xF3 只给 PCIe 上电，不保证 USB 侧 PHY 重新协商。实测 50% 的冷启动会停在
+  12 Mbps 且 0xF3 后 40s 毫无变化；此时需要一次真正的 USB reset 让设备重走
+  枚举流程。成功返回 True，不代表已经到 USB3，调用方仍需继续轮询。
+  """
+  try:
+    import usb1
+  except Exception:
+    return False
+  try:
+    with usb1.USBContext() as ctx:
+      handle = ctx.openByVendorIDAndProductID(vendor_id, product_id, skip_on_error=True)
+      if handle is None:
+        return False
+      try:
+        handle.resetDevice()
+        cloudlog.warning('[CHX_USB_ENUM] 0xF3 未生效，已执行 USB reset 强制重新枚举')
+        return True
+      finally:
+        try:
+          handle.close()
+        except Exception:
+          pass
+  except Exception as e:
+    cloudlog.warning(f'[CHX_USB_ENUM] USB reset 失败: {e}')
     return False
 
 
@@ -278,6 +321,7 @@ def chestnut_usb_node_ready(timeout: float = 60.0, power_timeout: float = 40.0,
   t0 = time.monotonic()
   seen_any = False
   powered = False
+  reset_done = False
 
   while True:
     for node in chestnut_nodes():
@@ -302,12 +346,23 @@ def chestnut_usb_node_ready(timeout: float = 60.0, power_timeout: float = 40.0,
         if pre_power_enabled():
           _lt = f"LTSSM=0x{ltssm & 0xFF:02X}" if ltssm >= 0 else "LTSSM 未读(USB2 侧)"
           cloudlog.warning(f"[CHX_USB_ENUM] chestnut speed={speed}Mbps {_lt} -> 主动给 PCIe 上电")
-          chestnut_pre_power(node["vendor_id"], node["product_id"])
+          # [CHX_FORCE_POWER_20261101] USB2 侧必须 force，否则 0xF3 被跳过
+          chestnut_pre_power(node["vendor_id"], node["product_id"],
+                             force=speed < min_speed)
         else:
           cloudlog.warning(f"[CHX_USB_ENUM] chestnut speed={speed}Mbps 需要上电，"
                            f"但 dp_chestnut_pre_power=0 已禁用")
 
     elapsed = time.monotonic() - t0
+
+    # [CHESTNUT_USB_RESET_20261101] 0xF3 后 15s 仍未到 USB3：补一次 USB reset。
+    # 只做一次，避免把设备反复打散；之后继续在 power_timeout 内等重新枚举。
+    if powered and not reset_done and elapsed > 15.0:
+      reset_done = True
+      for _n in chestnut_nodes():
+        if _chestnut_usb_reset(_n['vendor_id'], _n['product_id']):
+          break
+
     limit = power_timeout if powered else timeout
     if elapsed > limit:
       if not seen_any:

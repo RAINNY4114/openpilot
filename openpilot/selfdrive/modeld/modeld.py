@@ -53,7 +53,7 @@ SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
-BIG_MODEL_TIMEOUT = 60
+BIG_MODEL_TIMEOUT = 20  # [CHESTNUT_GATE_ALIGN 20261102] 原 60s：无 eGPU 时白等太久，20s 足够枚举
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -239,7 +239,11 @@ class ModelState(ModelStateBase):
 def main(demo=False):
   cloudlog.warning("modeld init")
 
-  CHESTNUT = chestnut_compiled() and (chestnut_present() or cable_connected())
+  # [CHESTNUT_GATE_ALIGN 20261102] 与 modeld_v2 对齐：判据只用 chestnut_present()。
+  # cable_connected() 读 USB-C 的 CC 方向，插充电线也是 True -> eGPU 没插时
+  # 误判 CHESTNUT=True，白等 wait_for_chestnut(60s)，这 60s 没有 modelV2，
+  # 且 ChestnutLoading=True 让 bigModelLoading(NO_ENTRY) 挡住 engage。
+  CHESTNUT = chestnut_compiled() and chestnut_present()
   if CHESTNUT:
     from tinygrad.runtime.ops_amd import AMDDevice
     AMDDevice.wait_timeout_ms = 3000

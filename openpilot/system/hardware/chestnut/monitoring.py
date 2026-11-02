@@ -23,13 +23,26 @@ def read_chestnut_state(handle, gpu_state=None):
   return msg
 
 
-def chestnut_state_thread(end_event):
+def chestnut_state_thread(end_event, exclusive_flag=None):
+  # [CHX_USB_EXCLUSIVE_20261101] exclusive_flag 为 dict 且 'on' 为 True 时
+  # （点火/行车）主动 close 并暂停，把 eGPU 独占让给 modeld。否则
+  # modeld 侧 tinygrad 会拿到 libusb_set_configuration: Resource busy。
   pm = messaging.PubMaster(['chestnutState'])
   sm = messaging.SubMaster(['chestnutGpuState'])
   with usb1.USBContext() as context:
     handle = None
     try:
       while not end_event.is_set():
+        # [CHX_USB_EXCLUSIVE_20261101] 行车时让出设备
+        if exclusive_flag is not None and exclusive_flag.get('on'):
+          if handle is not None:
+            try:
+              handle.close()
+            except Exception:
+              pass
+            handle = None
+          end_event.wait(1.0)
+          continue
         if handle is None:
           devices = [d for d in get_usb_state() if is_chestnut_usb_id(d['vendorId'], d['productId']) and
                      d['product'] == CHESTNUT_USB_PRODUCT]

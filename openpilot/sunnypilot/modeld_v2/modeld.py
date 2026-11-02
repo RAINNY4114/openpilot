@@ -23,9 +23,11 @@ from setproctitle import setproctitle
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.selfdrive.modeld.helpers import chestnut_compiled, chestnut_present, modeld_pkl_path
+from openpilot.selfdrive.modeld.usbgpu_link import wait_usbgpu_link  # [EGPU_LINK_LOADING 20261027]
 # [EGPU_DIAG 20261027] P1-2/P2-1：[eGPU] 结构化日志 + error_state 分类 + 按 boot 计次的重试预算
 from openpilot.selfdrive.modeld.egpu_log import (
-  consume_retry, classify_error, egpu, reset_retry, retry_budget, usb_snapshot, RETRY_MAX,
+  consume_retry, classify_error, egpu, link_err, link_err_delta, pcie_ltssm, reset_retry,
+  retry_budget, usb_snapshot, LINK_ERR_UNSTABLE, RETRY_MAX,
 )
 from openpilot.cereal import log
 from opendbc.car.structs import car
@@ -36,7 +38,7 @@ from msgq.visionipc import VisionIpcClient, VisionBuf
 from opendbc.car.car_helpers import get_demo_car_params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
-from openpilot.common.hardware.usb import cable_connected, chestnut_usb_node_ready
+from openpilot.common.hardware.usb import (cable_connected, chestnut_nodes, chestnut_usb_node_ready, USB3_MIN_SPEED)
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
@@ -71,7 +73,9 @@ PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
 # 设备可能先以 12 Mbps 枚举，要发 0xF3 上电后才重枚举到 USB3（实测窗口 3~20s）。
 # 旧值 60s 会在这条链路上「刚重枚举完、还在编译」时被 join 掐断 -> 静默回退小模型，
 # 且守卫线程仍存活 -> 不走 except -> 连 "chestnut load failed" 都不打印。
-BIG_MODEL_TIMEOUT = 600  # [port-egpu-usb] 上游值：762MB pkl 冷启动 + 重枚举余量
+BIG_MODEL_TIMEOUT = 120  # [SP0920XL_ALIGN_20261101] 原 600s：ChestnutLoading=True 期间是
+                                    # NO_ENTRY，等 10 分钟等于这段路都用不了。
+                                    # chestnut_usb_node_ready 自己等 40s，留足 pkl 冷启动余量。
 # 等设备出现（含节点权限放开）的上限
 CHESTNUT_USB_GUARD_TIMEOUT = 60.0
 # 发过 0xF3 之后等重枚举到 USB3 的上限
@@ -166,6 +170,15 @@ def _resolve_chestnut_gate():
   （2026-10-27 实测 get_active_bundle(chestnut=True) 恒为 None）。
   这里显式求值并记录，返回值与旧表达式等价，只是多了 pkl 回落与格式校验。
   """
+  # [CHESTNUT_MANUAL_OFF_20261101] 兜底开关：/data/chestnut_off 存在时强制走小模型。
+  # 场景：eGPU 枚举/链路出问题时，大模型加载失败会写 ChestnutActive=False，
+  # selfdrived 据此发 bigModelFailed(SOFT_DISABLE)，行车中反复被踢出 active。
+  # 放这个文件即可完全绕开大模型；不影响导航、纵向、横向的任何功能。
+  # 删掉文件 + 重启 manager 即可恢复大模型路径。
+  if os.path.exists("/data/chestnut_off"):
+    egpu('gate', chestnut=False, reason='manual_off')
+    return False
+
   bundle = get_active_bundle(chestnut=True)
   pkl, pkl_src = _resolve_chestnut_pkl(bundle)
   present = chestnut_present()
@@ -226,8 +239,33 @@ def _request_cycle_later(params, delay: float) -> None:
   egpu('cycle_scheduled', delay=round(delay, 1))
 
 
-def _handle_big_model_failure(params) -> None:
+def _handle_big_model_failure(params, link_err_delta: int = 0) -> None:
   """大模型加载失败后的重试决策（P0-2：按 boot 计次 + 退避）。"""
+  # [EGPU_LINK_PROBE] 先看 PCIe 链路本身。
+  #
+  # USB 枚举成功（5000Mbps）但 LTSSM 停在 L0 之前，说明 ASM2464 的 PCIe 隧道没训练
+  # 起来 —— 这种失败重试 100 次也不会成功，只会 onroad cycle 反复重启 modeld，
+  # 打断行车还占掉重试预算。参考 onemiless/dev-sp-egpu：加载失败就直接回落小模型。
+  #
+  # 只有读不到 LTSSM（None，例如权限/固件不支持）时才按原来的重试逻辑走，
+  # 避免诊断本身把重试路径废掉。
+  ltssm = pcie_ltssm()
+  if ltssm is not None and ltssm != 0x78:
+    egpu('link_dead', ltssm=ltssm, usb=usb_snapshot())
+    cloudlog.error(f"[eGPU] pcie link not trained (ltssm=0x{ltssm:02x}, want 0x78), "
+                   f"skip retry, fall back to small model")
+    params.put_bool("ChestnutRetry", False)
+    params.remove("ChestnutActive")  # [SP0920XL_ALIGN_20261101] 失败不写 False，否则 SOFT_DISABLE 永久阻止 engage
+    return
+  # [EGPU_LINK_ERR] PCIe 已训练（LTSSM=0x78）也可能失败：控制传输过得去、bulk 过不去。
+  # 加载期间链路错误暴涨就说明线缆/接触/供电的余量不够，重试只会反复重启 modeld。
+  if link_err_delta >= LINK_ERR_UNSTABLE:
+    egpu('link_unstable', delta=link_err_delta, ltssm=ltssm, usb=usb_snapshot())
+    cloudlog.error(f"[eGPU] usb link unstable ({link_err_delta} link errors during load), "
+                   f"skip retry, fall back to small model")
+    params.put_bool("ChestnutRetry", False)
+    params.remove("ChestnutActive")  # [SP0920XL_ALIGN_20261101] 失败不写 False，否则 SOFT_DISABLE 永久阻止 engage
+    return
   st, allowed, backoff = retry_budget()
   last_ts = float(st.get('last_ts', 0.0))
   since = (time.time() - last_ts) if last_ts > 0 else 1e9
@@ -237,7 +275,7 @@ def _handle_big_model_failure(params) -> None:
          since_last=round(since, 1), usb=usb_snapshot())
     cloudlog.error(f"[eGPU] chestnut retry budget exhausted ({st.get('count')}/{RETRY_MAX}) this boot")
     params.put_bool("ChestnutRetry", False)
-    params.put_bool("ChestnutActive", False)
+    params.remove("ChestnutActive")  # [SP0920XL_ALIGN_20261101] 失败不写 False，否则 SOFT_DISABLE 永久阻止 engage
     return
 
   attempt = int(st.get('count', 0)) + 1
@@ -248,7 +286,7 @@ def _handle_big_model_failure(params) -> None:
        since_last=round(since, 1), delay=round(delay, 1))
   cloudlog.error(f"[eGPU] big model load failed, retry {attempt}/{RETRY_MAX} in {delay:.0f}s")
   params.put_bool("ChestnutRetry", True)
-  params.put_bool("ChestnutActive", False)
+  params.remove("ChestnutActive")  # [SP0920XL_ALIGN_20261101] 失败不写 False，否则 SOFT_DISABLE 永久阻止 engage
   _request_cycle_later(params, delay)
 
 
@@ -293,7 +331,13 @@ class ModelState(ModelStateBase):
 
   def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
     cloudlog.warning(f"loading combined pkl: {pkl_path}")
-    jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut))
+    # [CHX_NOVERIFY_20261101] chestnut 跳过 verify：verify 会在 eGPU 上完整跑一遍推理，
+    # 760MB 模型实测 112s，期间 USB bulk 超时并把 PCIe 链路打崩（0x78 -> 0x00），
+    # 且崩溃发生在 _write_cache 之前 -> 缓存永远写不出 -> 下次仍然 verify -> 死循环。
+    # 缓存命中时本来就跳过 verify，所以这只影响"缓存失效后的首次加载"：
+    # 112s 崩溃 + 链路报废  ->  ~30s 正常加载 + 写缓存。小模型仍保留 verify。
+    jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut),
+                      verify=not self.chestnut)
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
@@ -456,6 +500,9 @@ def main(demo=False):
   setproctitle(PROCESS_NAME)
 
   CHESTNUT = _resolve_chestnut_gate()
+  # [CHESTNUT_HOTPLUG_20261101] gate 只在进程启动时算一次，记录此刻 eGPU 是否在场，
+  # 供主循环判断「onroad 期间是否新插入了 eGPU」。
+  _chestnut_present_at_start = chestnut_present()
   if CHESTNUT:
     from tinygrad.runtime.ops_amd import AMDDevice
     AMDDevice.wait_timeout_ms = 3000
@@ -495,26 +542,43 @@ def main(demo=False):
   model = None
   if CHESTNUT:
     big_model = None
+    link_delta = 0
     def load_big():
-      nonlocal big_model
+      nonlocal big_model, link_delta
       t_load = time.monotonic()
+      err_before = link_err()
       egpu('load_start', timeout=BIG_MODEL_TIMEOUT, guard=CHESTNUT_USB_GUARD_TIMEOUT,
-           power=CHESTNUT_USB_POWER_TIMEOUT, usb=usb_snapshot())
+           power=CHESTNUT_USB_POWER_TIMEOUT, ltssm=pcie_ltssm(), usb=usb_snapshot())
       try:
         # [CHX_USB_ENUM 20261027] 权限 + 上电时序 + 枚举位置三道一起判，
         # 只有确认「节点可写 + 在 USB3 侧 + 链路已训练」才交给 tinygrad。
         # 失败时明确抛错，不要静默继续 —— 静默继续只会得到一次 EACCES/EBUSY。
+        # [CHX_SETTLE 20261101] 先记录等待前的速度，判断这次是否走了 0xF3 冷启动路径
+        speeds_before = [n["speed"] for n in chestnut_nodes()]
         if not chestnut_usb_node_ready(timeout=CHESTNUT_USB_GUARD_TIMEOUT,
                                        power_timeout=CHESTNUT_USB_POWER_TIMEOUT):
           raise RuntimeError("chestnut USB node not ready: 设备未枚举/未上电/不在 USB3 侧，"
                              "详见 [CHX_USB_ENUM] 日志")
+        # [CHX_SETTLE 20261101] 冷启动（之前不在 USB3 或尚未枚举）时刚发过 0xF3，
+        # GPU 与 USB 链路还没稳定，立刻灌 760MB 会拿到 error_state=1
+        # (LIBUSB_TRANSFER_ERROR) 并把链路错误计数打上去，最终设备掉线。
+        # 热插拔路径（本来就是 USB3）不需要等，零额外开销。
+        if (not speeds_before) or all(s < USB3_MIN_SPEED for s in speeds_before):
+          cloudlog.warning(f"[CHX_SETTLE] 冷启动重枚举后等待 2.5s 让 GPU/链路稳定 "
+                           f"(之前 speed={speeds_before})")
+          egpu("settle_wait", seconds=2.5, speeds_before=speeds_before)
+          time.sleep(2.5)
+        # [EGPU_LINK_LOADING 20261027] —— 等链路错误率降下来再开 GPU，避免 bulk IN 0x81 超时。
+        # timeout 取 6 s：BIG_MODEL_TIMEOUT 要留给守卫 + 真正的加载。
+        wait_usbgpu_link(timeout=6.0)
         m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
         m.warmup()
         big_model = m
         egpu('load_ok', elapsed=round(time.monotonic() - t_load, 1))
       except Exception as e:
+        link_delta = link_err_delta(err_before, link_err())
         egpu('load_fail', err=repr(e), elapsed=round(time.monotonic() - t_load, 1),
-             usb=usb_snapshot())
+             ltssm=pcie_ltssm(), link_err=link_delta, usb=usb_snapshot())
         cloudlog.exception("chestnut load failed")
     loader = threading.Thread(target=load_big, daemon=True)
     loader.start()
@@ -528,7 +592,7 @@ def main(demo=False):
       params.put_bool("ChestnutRetry", False)
       params.put_bool("ChestnutActive", True)
     else:
-      _handle_big_model_failure(params)
+      _handle_big_model_failure(params, link_delta)
 
   small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
   if model is None:
@@ -631,6 +695,14 @@ def main(demo=False):
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
       blendful_enabled = params.get_bool("Blendful")
+      # [CHESTNUT_HOTPLUG_20261101] 行车中补插 eGPU 时 gate 不会重算，表现为「没反应」。
+      # 每秒检查一次：进程启动时 eGPU 不在、现在出现了 -> 请求一次
+      # onroad cycle，modeld 重启后在新进程里重新算 gate。
+      # 只触发一次（置 True），避免 eGPU 抖动导致反复重启。
+      if not CHESTNUT and not _chestnut_present_at_start and chestnut_present():
+        _chestnut_present_at_start = True
+        egpu("chestnut_hotplug")
+        _request_cycle_later(params, 0.5)
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
@@ -687,7 +759,7 @@ def main(demo=False):
         raise
       cloudlog.exception("big model failed, fall back to small")
       egpu('fallback_small', usb=usb_snapshot())
-      params.put_bool("ChestnutActive", False)
+      params.remove("ChestnutActive")  # [SP0920XL_ALIGN_20261101] 失败不写 False，否则 SOFT_DISABLE 永久阻止 engage
       assert small_model is not None
       model = small_model
       if chestnut_state is not None:
@@ -709,7 +781,7 @@ def main(demo=False):
       # [OBSTACLE_AVOID_WIRING] 在算 action 之前偏移 plan 的 y, 使 desiredCurvature 自动包含避让偏移。
       # 默认关闭 (ObstacleAvoidEnabled=0) / 默认 observe_only (ObstacleAvoidActive=0), 关闭时零行为改变。
       try:
-        _oa_off = OA.update(sm, model_output['plan'][0], self.constants.T_IDXS, v_ego, sm['carControl'].latActive)
+        _oa_off = OA.update(sm, model_output['plan'][0], model.constants.T_IDXS, v_ego, sm['carControl'].latActive)
         if _oa_off is not None:
           _pl = model_output['plan']
           _pl[0, :, 1] += _oa_off.astype(_pl.dtype)

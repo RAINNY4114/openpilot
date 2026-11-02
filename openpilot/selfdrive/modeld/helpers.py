@@ -33,7 +33,7 @@ def chestnut_present() -> bool:
       pass
   return False
 
-def wait_for_chestnut(timeout: float = 60.) -> None:  # [port-egpu-usb] 第三方底座描述符响应慢
+def wait_for_chestnut(timeout: float = 15.) -> None:  # [CHESTNUT_GATE_ALIGN 20261102] 原 60s，须短于 BIG_MODEL_TIMEOUT(20s)
   # the cable is detected before chestnut enumerates
   st = time.monotonic()
   while not chestnut_present():
