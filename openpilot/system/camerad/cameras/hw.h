@@ -46,8 +46,8 @@ const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
   .vignetting_correction = false,
   .output_type = ISP_IFE_PROCESSED,
   .staggered_sof = false,
-  .out_width = 0,
-  .out_height = 0,
+  .out_width = 1344,
+  .out_height = 760,
 };
 
 const CameraConfig NARROW_ROAD_CAMERA_CONFIG = {

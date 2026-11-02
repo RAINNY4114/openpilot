@@ -39,7 +39,7 @@ if [ -z "${AM_POWER_LIMIT:-}" ] && [ -r "$AM_POWER_LIMIT_FILE" ]; then
   AM_POWER_LIMIT="$(tr -cd '0-9.' < "$AM_POWER_LIMIT_FILE" 2>/dev/null)"
 fi
 case "${AM_POWER_LIMIT:-}" in
-  ''|*[!0-9.]*|*.*.*) AM_POWER_LIMIT=120 ;;
+  ''|*[!0-9.]*|*.*.*) AM_POWER_LIMIT=100 ;;
 esac
 export AM_POWER_LIMIT
 unset AM_POWER_LIMIT_FILE
@@ -84,3 +84,8 @@ else
   unset MAPBOX_TOKEN
 fi
 unset MAPBOX_TOKEN_FILE
+
+# [IFE_ROAD_RESIZE_20261102] 参考 onemiless/openpilot commit e0814246c918439f8d05d4518efaa649753e3f3b
+# camerad hw.h 已把 WIDE_ROAD 的 IFE 输出从 1928x1208 降到 1344x760，
+# camera.py 据此缩放内参矩阵 K（fx/fy 独立）。这个变量给 Python 侧做开关。
+export C3XL_IFE_ROAD_SIZE=1344x760
