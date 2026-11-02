@@ -20,6 +20,40 @@ REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
 RECOMPUTE_HOLD = 10  # updates (seconds) between route requests
 
+# [NAV_HOST_20261102] 导航路线源固定指向自建服务，不再依赖 api.mapbox.com / API_HOST。
+#
+# 请求形态（navd.calculate_route）：
+#   GET {NAV_HOST}/directions/v5/mapbox/driving-traffic/{lon},{lat};{lon},{lat}
+#       ?access_token=...&geometries=geojson&overview=full&steps=true
+#       &banner_instructions=true&alternatives=false&language=...&annotations=maxspeed
+#
+# 服务端只需实现上面这一个 Mapbox 兼容端点。MAPBOX_TOKEN 仍然有效，会作为
+# access_token 一起发过去（自建代理可用它回源 api.mapbox.com），所以
+# /data/ford_params/mapbox_token 不需要删除。
+#
+# 想临时改地址又不动代码：把新地址写进 /data/ford_params/nav_host（单行、无引号），
+# 例如 printf 'http://192.168.0.106:8899' > /data/ford_params/nav_host
+NAV_HOST_DEFAULT = 'http://192.168.0.106:8899'
+NAV_HOST_FILE = '/data/ford_params/nav_host'
+
+
+def _resolve_nav_host() -> str:
+  """NAV_HOST 环境变量 > /data/ford_params/nav_host > 内置默认值。"""
+  host = os.getenv('NAV_HOST', '').strip()
+  if not host:
+    try:
+      with open(NAV_HOST_FILE) as f:
+        host = f.read().strip()
+    except OSError:
+      host = ''
+  host = host or NAV_HOST_DEFAULT
+  if '://' not in host:
+    host = 'http://' + host
+  return host.rstrip('/')
+
+
+NAV_HOST = _resolve_nav_host()
+
 # [NAV_LONG] 速度/曲率剖面参数
 PROFILE_STEP = 5.0  # m，采样间距
 PROFILE_LOOKAHEAD = 300.0  # m，向前铺多远
@@ -68,7 +102,10 @@ class RouteEngine:
 
     self.mapbox_token = os.environ.get("MAPBOX_TOKEN")
     self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None else None
-    self.mapbox_host = "https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav'
+    # [NAV_HOST_20261102] NAV_HOST 优先级最高：即使 MAPBOX_TOKEN 存在也走自建服务，
+    # token 只作为 access_token 参数带过去。NAV_HOST 为空时才退回原来的二选一逻辑。
+    self.mapbox_host = NAV_HOST or ("https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav')
+    cloudlog.warning(f"[NAV_HOST] route source = {self.mapbox_host} (token={'set' if self.mapbox_token else 'from-api'})")
 
   def update(self):
     self.sm.update(0)
