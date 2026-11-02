@@ -418,8 +418,11 @@ class FordPathAngleGate:
     kappa_passthrough = kappa             # mode<=1 时原样透传用，保证"影子"不改变输出
     v = max(float(v_ego), 1.0)
 
-    # [BP_ANGLE_UPGRADE] 人工转向接管检测：每拍都跑，未激活时计时器清零
-    if self.humanturn_enable:
+    # [BP_ANGLE_UPGRADE] 人工转向接管检测：每拍都跑，未激活时计时器清零。
+    # mode<=1 必须完全不参与：接管会把输出打成 (0,0) 并让调用方把 mode 降到 0，
+    # 那是实打实改变了下发内容，违反"关闭/影子模式逐字节透传"的契约。
+    # 实车回放实测：mode=0 下 8904 拍横向激活中有 135 拍被接管分支改成 0。
+    if self.humanturn_enable and self.mode >= 2:
       self.human_turn_active = self.human_turn.update(
         bool(lat_active), bool(steering_pressed), float(steering_angle_deg))
     else:
