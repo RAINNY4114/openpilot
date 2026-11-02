@@ -352,7 +352,14 @@ class FordPathAngleGate:
     k = kappa_plan
     b = float(np.clip(self.blend, 0.0, 1.0))
 
-    if _BP_MODEL_AVAILABLE and self.model is not None and len(self.model.orientationRate.z) >= 17:
+    # [BP_ANGLE_UPGRADE 20261102] 模型混合只在 v>9 启用，与下面偏差限幅的门槛一致。
+    # 理由：v<=9 时偏差限幅被跳过（低速扭矩未建立、实测曲率不准），混合结果**没有任何兜底**；
+    # 而实车回放显示低速掉头/挪车时模型前瞻曲率可达规划的 3~6 倍，直接混进来会让 c1 明显偏离。
+    # 低速段 lat_accel=|κ|v² 很小，弯道判据基本不触发 α，所以这里关掉不影响正常弯道能力。
+    _blend_ok = _BP_MODEL_AVAILABLE and self.model is not None \
+        and len(self.model.orientationRate.z) >= 17 and v > 9
+
+    if _blend_ok:
       curvs = np.array(self.model.orientationRate.z) / max(0.01, v)
       # liveDelay 在本机叫 lateralDelay；BluePilot 把它夹到 [0.1,0.15] 再叠加模型周期，
       # 因为该估计偶尔会标到 400ms+，那会把前瞻推到 5m 之外，模型直接看到弯心。
@@ -479,9 +486,16 @@ class FordPathAngleGate:
     # ---- α 已完全收回：原样透传，与上游逐字节一致（直路基线零影响）----
     if a_target == 0.0 and self.alpha <= 1e-9:
       self.c1 = 0.0
-      self.c2 = kappa
+      if self.mode >= 2:
+        # [BP_ANGLE_UPGRADE 20261102] mode=2 下 κ' 已被模型混合 / 偏差限幅改动过，
+        # 单拍可能跳变（改前 κ 来自 CURVATURE_LIMITS.apply_limits，天然已限速）。
+        # 这里补上 c2 的逐拍窗口限制，否则会撞 panda 的 steer_curvature_cmd_checks
+        # （ISO 侧向 jerk）导致整帧被否决。mode<=1 保持逐字节透传，不受影响。
+        self.c2 = self._move(self.c2, kappa, self._curv_step(v))
+      else:
+        self.c2 = kappa
       self._k_last = kappa
-      return 0.0, kappa
+      return 0.0, self.c2
 
     a = self._step_alpha(a_target, kappa, v)
 
