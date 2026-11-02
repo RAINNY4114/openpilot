@@ -163,6 +163,9 @@ CHESTNUT_PRE_POWER_FILE = Path("/data/ford_params/dp_chestnut_pre_power")
 LTSSM_ADDR = 0xB450
 LTSSM_TRAINED = 0x78
 USB3_MIN_SPEED = 5000
+# [LANE_CHECK_20261102] lane a 的 USB3 物理链路质量差，linkErrorCount 超过此阈值判定不稳定。
+# 实测：成功的 boot 全部是 lane b + linkErr=0；失败的 boot 全部是 lane a + linkErr=378~64135。
+LANE_A_MAX_LINK_ERR = 50
 
 
 def _speed_mbps(device: Path) -> int:
@@ -180,12 +183,17 @@ def pre_power_enabled() -> bool:
 
 def chestnut_nodes() -> list[dict]:
   """枚举 sysfs 里所有 chestnut 设备（含 ROM bootloader 的两组 ID）。"""
+  # [LANE_CHECK_20261102] 读取 typec 方向和 USB 控制器，用于判断 lane a/b
+  typec_orientation = read_int(TYPEC_CC_ORIENTATION_PATH)
   nodes = []
   for device in usb_devices():
     vendor_id = read_int(device / "idVendor", 16)
     product_id = read_int(device / "idProduct", 16)
     if not is_chestnut_usb_id(vendor_id, product_id, include_bootloader=True):
       continue
+    ctrl = controller(device)
+    link_err = read_int(ctrl / "portli", 0) & 0xFFFF if ctrl is not None else 0
+    lane = {1: "a", 2: "b"}.get(typec_orientation, "unknown") if ctrl is not None and ctrl.name == PRIMARY_USB_CONTROLLER else "unknown"
     nodes.append({
       "sysfs": device,
       "vendor_id": vendor_id,
@@ -194,6 +202,8 @@ def chestnut_nodes() -> list[dict]:
       "dev": read_int(device / "devnum"),
       "speed": _speed_mbps(device),
       "product": read(device / "product") or "",
+      "usb3Lane": lane,
+      "linkErrorCount": link_err,
     })
   return nodes
 
@@ -333,12 +343,21 @@ def chestnut_usb_node_ready(timeout: float = 60.0, power_timeout: float = 40.0,
       ltssm = chestnut_ltssm(node["vendor_id"], node["product_id"]) if speed >= min_speed else -2
 
       if speed >= min_speed and ltssm in (-1, LTSSM_TRAINED):
+        # [LANE_CHECK_20261102] lane a linkErrorCount high -> PCIe unstable
+        lane = node.get('usb3Lane', 'unknown')
+        link_err = node.get('linkErrorCount', 0)
+        if lane == 'a' and link_err > LANE_A_MAX_LINK_ERR and not reset_done:
+          cloudlog.warning('[LANE_CHECK] lane=a linkErr=%d>%d, USB reset' % (link_err, LANE_A_MAX_LINK_ERR))
+          _chestnut_usb_reset(node['vendor_id'], node['product_id'])
+          reset_done = True
+          time.sleep(2.0)
+          continue
+        if lane == 'a' and link_err > LANE_A_MAX_LINK_ERR and reset_done:
+          cloudlog.warning('[LANE_CHECK] lane=a still unstable after reset, flip USB-C cable')
         if ltssm == LTSSM_TRAINED:
-          cloudlog.warning(f"[CHX_USB_ENUM] chestnut 在 USB3 侧且链路已训练 "
-                           f"(bus={node['bus']:03d}/{node['dev']:03d} speed={speed}Mbps)，大模型路径就绪")
+          cloudlog.warning('[CHX_USB_ENUM] USB3 trained bus=%03d/%03d speed=%d lane=%s linkErr=%d' % (node['bus'], node['dev'], speed, lane, link_err))
         else:
-          cloudlog.warning(f"[CHX_USB_ENUM] chestnut 在 USB3 侧但 LTSSM 读不到 "
-                           f"(speed={speed}Mbps)，交给 tinygrad 判断")
+          cloudlog.warning('[CHX_USB_ENUM] USB3 LTSSM unreadable speed=%d lane=%s' % (speed, lane))
         return True
 
       if not powered:
