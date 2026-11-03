@@ -56,6 +56,12 @@ class RADAR:
   DELPHI_ESR = 'ford_fusion_2018_adas'
   DELPHI_MRR = 'FORD_CADS'
 
+  # Smartmicro MR76 auxiliary radar.
+  #
+  # This is NOT a DBC filename.
+  # RadarInterface handles MR76 directly from raw CAN frames.
+  MR76 = 'MR76'
+
 
 class Footnote(Enum):
   FOCUS = CarFootnote(
