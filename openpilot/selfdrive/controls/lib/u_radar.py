@@ -20,9 +20,8 @@ ObjectData 字段 (Motorola @0, start bit 为信号 MSB):
   Class     52|2   @0+ (1,0)              0 point / 1 vehicle
   RCS       63|8   @0+ (0.5,-64)       dBm2
 
-位序说明: DBC 的 Motorola start bit 是信号最高位, 按 sawtooth 编号。
-换算成 LSB0 位置: lsb = 8*(start//8) + (7 - start%8)。
-按此换算后 8 个字段互不重叠且正好填满 64 bit —— 已用构造帧自检确认。
+解码方式: 使用 opendbc.can.dbc.DBC 加载 u_radar.dbc, 通过 Signal.get_raw_value()
+提取 Motorola 位序的信号值。手写的 _extract() 位序计算不正确, 已弃用。
 
 坐标系: 本模块对外统一输出 openpilot 约定 (y 正 = 左)。
 雷达自身 DistLat 的正方向 DBC 未注明, 用 lat_sign 配置:
@@ -34,10 +33,35 @@ ObjectData 字段 (Motorola @0, start bit 为信号 MSB):
 若实车发现避让方向反了, 把 /data/ford_params/Mr76LatSign 改成 1。
 """
 
+import os
 import time
+
+from opendbc.can.dbc import DBC
+from opendbc import DBC_PATH
 
 ADDR_OBJECT = 0x60B
 ADDR_STATUS = 0x60A
+
+# ============================================================================
+# DBC 加载 —— 用 opendbc 的 DBC 解析器, 正确处理 Motorola 位序
+# ============================================================================
+_dbc = DBC(os.path.join(DBC_PATH, "u_radar.dbc"))
+_status_msg = _dbc.msgs[ADDR_STATUS]       # 0x60A
+_object_msg = _dbc.msgs[ADDR_OBJECT]       # 0x60B
+
+# 预取信号引用, 避免 feed() 里每帧查 dict
+_sig_n_objects = _status_msg.sigs["NoOfObjects"]
+_sig_meas_count = _status_msg.sigs["MeasCount"]
+_sig_iface_ver = _status_msg.sigs["InterfaceVersion"]
+
+_sig_id = _object_msg.sigs["ID"]
+_sig_dist_long = _object_msg.sigs["DistLong"]
+_sig_dist_lat = _object_msg.sigs["DistLat"]
+_sig_vrel_long = _object_msg.sigs["VRelLong"]
+_sig_vrel_lat = _object_msg.sigs["VRelLat"]
+_sig_dyn = _object_msg.sigs["DynProp"]
+_sig_cls = _object_msg.sigs["Class"]
+_sig_rcs = _object_msg.sigs["RCS"]
 
 # ============================================================================
 # 与原车报文区分 (MR76 与整车共用 CAN1)
@@ -52,8 +76,9 @@ ADDR_STATUS = 0x60A
 # 这里保留配对门作为额外保险, 但窗口必须 >= Status 的最慢周期(3.1s),
 # 否则会把正常数据大批误拒。
 STATUS_GATE_SEC = 5.0
-MAX_OBJECTS_HDR = 32          # NoOfObjects 合理上限(雷达最多几十个目标)
-IFACE_VER_MIN = 1             # InterfaceVersion 0 视为无效
+MAX_OBJECTS_HDR = 50          # NoOfObjects 合理上限(实测可达 50)
+# IFACE_VER_MIN 已移除: MR76 固件不填 InterfaceVersion 字段(实测全为 0),
+#   之前用 IFACE_VER_MIN=1 拒绝了所有 Status 帧, 导致配对门永远不开。
 
 # 物理合理性 (取自参考实现的实车标定值)
 D_LONG_RANGE = (-0.5, 150.0)
@@ -125,36 +150,23 @@ _DYN_MAP = {
 }
 
 
-def _lsb0(start):
-  return 8 * (start // 8) + (7 - (start % 8))
-
-
-def _extract(data, start, length):
-  """从 8 字节 Motorola 帧提取无符号原始值。"""
-  lsb = _lsb0(start)
-  val = 0
-  for i in range(length):
-    pos = lsb + i
-    val |= ((data[pos >> 3] >> (pos & 7)) & 1) << i
-  return val
-
-
 def decode_object(data):
-  """解码一帧 ObjectData。data 为 bytes/list, 长度 >= 8。"""
+  """解码一帧 ObjectData。data 为 bytes/list, 长度 >= 8。
+
+  使用 DBC 加载的 Signal.get_raw_value() 提取 Motorola 位序信号。
+  """
   if data is None or len(data) < 8:
     return None
-  d = _extract(data, 15, 13) * 0.2 - 500.0
-  lat = _extract(data, 18, 11) * 0.2 - 204.6
-  vr = _extract(data, 39, 10) * 0.25 - 128.0
+  d = bytes(data) if not isinstance(data, bytes) else data
   return {
-    "id": _extract(data, 7, 8),
-    "d": d,
-    "lat": lat,
-    "vr": vr,
-    "vr_lat": _extract(data, 45, 9) * 0.25 - 64.0,
-    "dyn": _extract(data, 50, 3),
-    "cls": _extract(data, 52, 2),
-    "rcs": _extract(data, 63, 8) * 0.5 - 64.0,
+    "id": _sig_id.get_raw_value(d),
+    "d": _sig_dist_long.get_raw_value(d) * 0.2 - 500.0,
+    "lat": _sig_dist_lat.get_raw_value(d) * 0.2 - 204.6,
+    "vr": _sig_vrel_long.get_raw_value(d) * 0.25 - 128.0,
+    "vr_lat": _sig_vrel_lat.get_raw_value(d) * 0.25 - 64.0,
+    "dyn": _sig_dyn.get_raw_value(d),
+    "cls": _sig_cls.get_raw_value(d),
+    "rcs": _sig_rcs.get_raw_value(d) * 0.5 - 64.0,
   }
 
 
@@ -177,13 +189,17 @@ def classify(obj):
 
 
 def decode_status(data):
-  """解码 Status (0x60A): NoOfObjects / MeasCount / InterfaceVersion。"""
+  """解码 Status (0x60A): NoOfObjects / MeasCount / InterfaceVersion。
+
+  使用 DBC 加载的 Signal.get_raw_value() 提取 Motorola 位序信号。
+  """
   if data is None or len(data) < 8:
     return None
+  d = bytes(data) if not isinstance(data, bytes) else data
   return {
-    "n_objects": _extract(data, 7, 8),
-    "meas_count": _extract(data, 15, 16),
-    "iface_ver": _extract(data, 31, 4),
+    "n_objects": _sig_n_objects.get_raw_value(d),
+    "meas_count": _sig_meas_count.get_raw_value(d),
+    "iface_ver": _sig_iface_ver.get_raw_value(d),
   }
 
 
@@ -240,7 +256,8 @@ class Mr76Tracker:
       st = decode_status(data)
       if st is None:
         return True
-      if 0 <= st["n_objects"] <= MAX_OBJECTS_HDR and st["iface_ver"] >= IFACE_VER_MIN:
+      # 不再检查 iface_ver: MR76 固件实测 InterfaceVersion 始终为 0
+      if 0 <= st["n_objects"] <= MAX_OBJECTS_HDR:
         self.n_objects = st["n_objects"]
         self._last_status = t
         self.last_status_rx = t
