@@ -82,9 +82,71 @@ class HudRendererSP(HudRenderer):
     y = rect.y + 45
 
     set_speed_rect = rl.Rectangle(x, y, set_speed_width, UI_CONFIG.set_speed_height)
+    # [CURVE_SIGN_ANCHOR 20261027] 必须和基类一样把 rect 存下来。
+    # 基类 _draw_curve_widget() 用 self._set_speed_rect 当定位锚点（标志贴在
+    # MAX 框右边），它第一行就是 `if ... or self._set_speed_rect is None: return`。
+    # 这里重写了基类的 _draw_set_speed 却漏了这一行 ⇒ 锚点恒为 None ⇒
+    # 弯道角度照算、diag 照写，但**永远画不出来**（2026-10-27 定位到的根因）。
+    self._set_speed_rect = set_speed_rect
     rl.draw_rectangle_rounded(set_speed_rect, 0.35, 10, COLORS.BLACK_TRANSLUCENT)
     rl.draw_rectangle_rounded_lines_ex(set_speed_rect, 0.35, 10, 6, COLORS.BORDER_TRANSLUCENT)
 
     max_color = COLORS.GREY
     set_speed_color = COLORS.DARK_GREY
-    if se
+    if self.is_cruise_set:
+      set_speed_color = COLORS.WHITE
+      if long_plan_sp.speedLimit.assist.active:
+        set_speed_color = SLA_ACTIVE_COLOR if long_override else rl.Color(0, 0xff, 0, 0xff)
+        max_color = SLA_ACTIVE_COLOR if long_override else rl.Color(0x80, 0xd8, 0xa6, 0xff)
+      else:
+        if ui_state.status == UIStatus.ENGAGED:
+          max_color = COLORS.ENGAGED
+        elif ui_state.status == UIStatus.DISENGAGED:
+          max_color = COLORS.DISENGAGED
+        elif ui_state.status == UIStatus.OVERRIDE:
+          max_color = COLORS.OVERRIDE
+
+    max_str_size = 60 if self.show_icbm_status else 40
+    max_str_y = 15 if self.show_icbm_status else 27
+
+    max_text = str(round(self.speed_cluster)) if self.show_icbm_status else tr("MAX")
+    max_text_width = measure_text_cached(self._font_semi_bold, max_text, max_str_size).x
+    rl.draw_text_ex(
+      self._font_semi_bold,
+      max_text,
+      rl.Vector2(x + (set_speed_width - max_text_width) / 2, y + max_str_y),
+      max_str_size,
+      0,
+      max_color,
+    )
+
+    set_speed_text = CRUISE_DISABLED_CHAR if not self.is_cruise_set else str(round(self.set_speed))
+    speed_text_width = measure_text_cached(self._font_bold, set_speed_text, FONT_SIZES.set_speed).x
+    rl.draw_text_ex(
+      self._font_bold,
+      set_speed_text,
+      rl.Vector2(x + (set_speed_width - speed_text_width) / 2, y + 77),
+      FONT_SIZES.set_speed,
+      0,
+      set_speed_color,
+    )
+
+  def _draw_current_speed(self, rect: rl.Rectangle) -> None:
+    self.speed_renderer.render(rect)
+
+  def _render(self, rect: rl.Rectangle) -> None:
+    super()._render(rect)
+
+    if ui_state.torque_bar:
+      torque_rect = rect
+      if ui_state.developer_ui in (DeveloperUiState.BOTTOM, DeveloperUiState.BOTH):
+        torque_rect = rl.Rectangle(rect.x, rect.y, rect.width, rect.height - get_bottom_dev_ui_offset())
+      self._torque_bar.render(torque_rect)
+
+    self.developer_ui.render(rect)
+    self.road_name_renderer.render(rect)
+    self.speed_limit_renderer.render(rect)
+    self.smart_cruise_control_renderer.render(rect)
+    self.turn_signal_controller.render(rect)
+    self.circular_alerts_renderer.render(rect)
+    self.rocket_fuel.render(rect, ui_state.sm)
