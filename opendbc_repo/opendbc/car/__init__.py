@@ -144,7 +144,6 @@ class CanSignalRateCalculator:
 
 @dataclass(frozen=True, kw_only=True)
 class CarSpecs:
-  mass: float = 0.0  # kg, curb weight (default 0 = unknown)
   wheelbase: float  # meters
   steerRatio: float
   centerToFrontRatio: float = 0.5
