@@ -152,6 +152,10 @@ class CAR(Platforms):
     ],
     CarSpecs(wheelbase=3.025, steerRatio=16.8),
   )
+  LINCOLN_NAUTILUS = FordPlatformConfig(
+    [FordCarDocs("Lincoln Nautilus 2018-21", "Adaptive Cruise Control with Lane Centering")],
+    CarSpecs(wheelbase=3.025, steerRatio=19.33),
+  )
   FORD_EXPEDITION_MK4 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Expedition 2022-24", "Co-Pilot360 Assist 2.0", hybrid=False)],
     CarSpecs(wheelbase=3.69, steerRatio=17.0),
