@@ -117,6 +117,16 @@ class UIState(UIStateSP):
     self.CP: car.CarParams | None = None
     self.light_sensor: float = -1.0
 
+    # [AUTO_DAY_NIGHT_20261104] Auto day/night mode: uses camera light_sensor
+    # to detect dark environment and switch to dark UI after 3s sustained darkness.
+    # When bright again, immediately switches back to light mode.
+    self.auto_day_night_enabled: bool = False
+    self.is_dark_mode: bool = False
+    self._dark_timer_start: float = 0.0
+    self._dark_threshold: float = 15.0   # light_sensor below this = dark
+    self._bright_threshold: float = 35.0  # light_sensor above this = bright (hysteresis)
+    self._dark_delay: float = 3.0         # seconds of darkness before switching
+
     self._params_thread: threading.Thread | None = None
 
     # Callbacks
@@ -182,6 +192,30 @@ class UIState(UIStateSP):
       self.light_sensor = max(100.0 - cam_state.exposureValPercent, 0.0)
     elif not self.sm.alive["wideRoadCameraState"] or not self.sm.valid["wideRoadCameraState"]:
       self.light_sensor = -1
+
+    # [AUTO_DAY_NIGHT_20261104] Detect dark environment via camera light_sensor
+    # Uses hysteresis (dark=15, bright=35) to prevent rapid toggling.
+    # Sustained darkness for 3 seconds triggers dark mode.
+    if self.auto_day_night_enabled and self.started and self.light_sensor >= 0:
+      now_t = time.monotonic()
+      if self.is_dark_mode:
+        # Currently dark: switch to light if bright enough
+        if self.light_sensor > self._bright_threshold:
+          self.is_dark_mode = False
+          self._dark_timer_start = 0.0
+      else:
+        # Currently light: start/continue timer if dark
+        if self.light_sensor < self._dark_threshold:
+          if self._dark_timer_start == 0.0:
+            self._dark_timer_start = now_t
+          elif now_t - self._dark_timer_start >= self._dark_delay:
+            self.is_dark_mode = True
+        else:
+          self._dark_timer_start = 0.0
+    elif not self.started:
+      # Reset when offroad
+      self.is_dark_mode = False
+      self._dark_timer_start = 0.0
 
     # Update started state
     self.started = self.sm["deviceState"].started and self.ignition
@@ -300,6 +334,9 @@ class UIState(UIStateSP):
         self.usb_connected_ts = None
         self.usb_unknown = False
 
+    # [AUTO_DAY_NIGHT_20261104] Read auto day/night mode setting
+    self.auto_day_night_enabled = self.params.get_bool("AutoDayNightMode")
+
     UIStateSP.update_params(self)
 
 
@@ -388,6 +425,9 @@ class Device(DeviceSP):
       min_brightness = 30
       if gui_app.sunnypilot_ui():
         min_brightness = DeviceSP.set_min_onroad_brightness(ui_state, min_brightness)
+      # [AUTO_DAY_NIGHT_20261104] Lower minimum brightness in dark mode
+      if ui_state.auto_day_night_enabled and ui_state.is_dark_mode:
+        min_brightness = 10
 
       clipped_brightness = float(np.interp(clipped_brightness, [0, 1], [min_brightness, 100]))
 
