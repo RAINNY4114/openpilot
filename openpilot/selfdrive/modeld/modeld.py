@@ -6,7 +6,7 @@ import gc
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
-os.environ.setdefault('AM_POWER_LIMIT', '100')
+os.environ.setdefault('AM_POWER_LIMIT', '120')
 # [port-egpu-usb] 禁止钉最高频：AM_PERF_LEVEL=high -> set_clocks(-1)，与 120W 上限叠加
 # 是最抖的组合。stock model 回退路径（system/manager/process_config.py:127）也会走到这里，
 # 必须保持 amdev 默认 auto 管频，否则大模型一加载失败就变成钉频+撞功率墙。

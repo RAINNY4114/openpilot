@@ -39,7 +39,7 @@ if [ -z "${AM_POWER_LIMIT:-}" ] && [ -r "$AM_POWER_LIMIT_FILE" ]; then
   AM_POWER_LIMIT="$(tr -cd '0-9.' < "$AM_POWER_LIMIT_FILE" 2>/dev/null)"
 fi
 case "${AM_POWER_LIMIT:-}" in
-  ''|*[!0-9.]*|*.*.*) AM_POWER_LIMIT=100 ;;
+  ''|*[!0-9.]*|*.*.*) AM_POWER_LIMIT=120 ;;
 esac
 export AM_POWER_LIMIT
 unset AM_POWER_LIMIT_FILE

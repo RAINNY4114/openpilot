@@ -13,7 +13,7 @@ import os
 os.environ['GMMU'] = '0'
 # [port-egpu-usb] 功率上限的唯一来源是 launch_env.sh（读 /data/ford_params/am_power_limit，默认 120）。
 # 这里只在完全没有环境变量时兜底，数值必须与 launch_env.sh 的默认值保持一致。
-os.environ.setdefault('AM_POWER_LIMIT', '100')
+os.environ.setdefault('AM_POWER_LIMIT', '120')
 from tinygrad.device import Device
 import numpy as np
 import threading
