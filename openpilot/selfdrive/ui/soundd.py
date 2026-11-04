@@ -117,4 +117,103 @@ class Soundd(QuietMode):
 
       while written_frames < frames and (num_loops is None or loops < num_loops):
         available_frames = sound_data.shape[0] - current_sound_frame
-        frames_to_write = min(available_frames, frames - written_fra
+        frames_to_write = min(available_frames, frames - written_frames)
+        ret[written_frames:written_frames+frames_to_write] = sound_data[current_sound_frame:current_sound_frame+frames_to_write]
+        written_frames += frames_to_write
+        self.current_sound_frame += frames_to_write
+        current_sound_frame = self.current_sound_frame % len(sound_data)
+        loops = self.current_sound_frame // len(sound_data)
+        if self.pending_stop and current_sound_frame == 0:
+          self.current_alert = AudibleAlert.none
+          self.pending_stop = False
+          break
+
+    return ret * self.current_volume
+
+  def callback(self, data_out: np.ndarray, frames: int, time, status) -> None:
+    if status:
+      cloudlog.warning(f"soundd stream over/underflow: {status}")
+    data_out[:frames, 0] = self.get_sound_data(frames)
+
+  def update_alert(self, new_alert):
+    current_alert_played_once = self.current_alert == AudibleAlert.none or self.current_sound_frame >= len(self.loaded_sounds[self.current_alert])
+    # let looping sounds finish the current loop instead of cutting off mid tone
+    if new_alert == AudibleAlert.none and self.current_alert != AudibleAlert.none and sound_list[self.current_alert][1] is None:
+      if current_alert_played_once:
+        self.pending_stop = True
+      else:
+        self.current_alert = AudibleAlert.none
+        self.current_sound_frame = 0
+      return
+    self.pending_stop = False
+    if self.current_alert != new_alert and (new_alert != AudibleAlert.none or current_alert_played_once):
+      if new_alert == AudibleAlert.warningImmediate:
+        self.ramp_start_volume = self.current_volume
+        self.ramp_start_time = time.monotonic()
+      self.current_alert = new_alert
+      self.current_sound_frame = 0
+
+  def get_audible_alert(self, sm):
+    if sm.updated['selfdriveState']:
+      new_alert = sm['selfdriveState'].alertSound.raw
+      self.update_alert(new_alert)
+    elif check_selfdrive_timeout_alert(sm):
+      self.update_alert(AudibleAlert.warningImmediate)
+      self.selfdrive_timeout_alert = True
+    elif self.selfdrive_timeout_alert:
+      self.update_alert(AudibleAlert.none)
+      self.selfdrive_timeout_alert = False
+
+  def calculate_volume(self, weighted_db):
+    volume = ((weighted_db - AMBIENT_DB) / DB_SCALE) * (MAX_VOLUME - MIN_VOLUME) + MIN_VOLUME
+    return math.pow(VOLUME_BASE, (np.clip(volume, MIN_VOLUME, MAX_VOLUME) - 1))
+
+  @retry(attempts=10, delay=3)
+  def get_stream(self, sd):
+    # reload sounddevice to reinitialize portaudio
+    sd._terminate()
+    sd._initialize()
+    return sd.OutputStream(channels=1, samplerate=SAMPLE_RATE, callback=self.callback, blocksize=SAMPLE_BUFFER)
+
+  def soundd_thread(self):
+    # sounddevice must be imported after forking processes
+    import sounddevice as sd
+    micd.patch_sounddevice(sd)
+
+    sm = messaging.SubMaster(['selfdriveState', 'selfdriveStateSP', 'soundPressure'])
+
+    with self.get_stream(sd) as stream:
+      rk = Ratekeeper(20)
+
+      cloudlog.info(f"soundd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
+      while True:
+        sm.update(0)
+
+        self.load_param()
+
+        # freeze volume during alerts to avoid mic feedback increasing volume
+        if sm.updated['soundPressure']:
+          self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
+          if self.current_alert == AudibleAlert.none:
+            self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
+
+        self.get_audible_alert(sm)
+
+        # Ramp up immediate warning sound over 4s
+        if self.current_alert == AudibleAlert.warningImmediate:
+          elapsed = time.monotonic() - self.ramp_start_time
+          ramp_vol = float(np.interp(elapsed, [0, ALERT_RAMP_TIME], [self.ramp_start_volume, MAX_VOLUME]))
+          self.current_volume = max(self.current_volume, ramp_vol)
+
+        rk.keep_time()
+
+        assert stream.active
+
+
+def main():
+  s = Soundd()
+  s.soundd_thread()
+
+
+if __name__ == "__main__":
+  main()

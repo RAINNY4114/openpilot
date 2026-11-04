@@ -607,7 +607,7 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay", "amapNavi",
+                  "carControl", "controlsState", "lateralDelay",
                   # [AUTO_OVERTAKE_WIRING] AO 唯一触发源（radard 融合的 leadOne）
                   # [AUTO_AVOIDANCE_WIRING] AA 障碍物点云源（card.py 发布的前向雷达）
                   "radarState", "radarTracks"])
@@ -818,9 +818,7 @@ def main(demo=False):
       _ao_aa = AOA.update(sm=sm, dh=DH, v_ego=v_ego, modelv2=modelv2_send.modelV2,
                           lat_active=sm['carControl'].latActive,
                           left_edge=left_edge, right_edge=right_edge, is_rhd=is_rhd)
-      DH.update(sm['amapNavi'], sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
-                auto_lane_change_direction=_ao_aa.direction,
-                auto_confirm_delay_sec=_ao_aa.confirm_delay_sec)
+      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
