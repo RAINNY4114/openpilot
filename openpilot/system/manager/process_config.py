@@ -195,7 +195,7 @@ procs = [
   PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar)),
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
   PythonProcess("amap_navi", "openpilot.carrot.amap_navi", always_run),
-  # [NAV_DEST_WEB] 手机上设目的地的小网页（http://<车机IP>:8899）。
+  # [NAV_DEST_WEB] 手机上设目的地的小网页（http://192.168.0.106:8899）。
   # 车机上没有目的地选择界面，说明见 /data/nav_web.py 顶部。
   PythonProcess("nav_web", "openpilot.carrot.nav_web", always_run),
 
