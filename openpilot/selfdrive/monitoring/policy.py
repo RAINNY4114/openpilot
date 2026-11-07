@@ -28,12 +28,12 @@ class DRIVER_MONITOR_SETTINGS:
     # https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=OJ:L_202501899
     self._ALERT_MIN_SPEED = 2.8  # 10 km/h
 
-    self._WHEELTOUCH_POLICY_ALERT_1_TIMEOUT = 5.
-    self._WHEELTOUCH_POLICY_ALERT_2_TIMEOUT = 15.
-    self._WHEELTOUCH_POLICY_ALERT_3_TIMEOUT = 25.
-    self._VISION_POLICY_ALERT_1_TIMEOUT = 5.
-    self._VISION_POLICY_ALERT_2_TIMEOUT = 8.
-    self._VISION_POLICY_ALERT_3_TIMEOUT = 13.
+    self._WHEELTOUCH_POLICY_ALERT_1_TIMEOUT = 7.
+    self._WHEELTOUCH_POLICY_ALERT_2_TIMEOUT = 20.
+    self._WHEELTOUCH_POLICY_ALERT_3_TIMEOUT = 30.
+    self._VISION_POLICY_ALERT_1_TIMEOUT = 7.
+    self._VISION_POLICY_ALERT_2_TIMEOUT = 12.
+    self._VISION_POLICY_ALERT_3_TIMEOUT = 18.
 
     # no response = alert_3 sustained for certain amount of time
     self._NO_RESPONSE_TIMEOUT = 5.
