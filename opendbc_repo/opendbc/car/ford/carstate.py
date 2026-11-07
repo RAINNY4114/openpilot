@@ -18,7 +18,7 @@ class CarState(CarStateBase, MadsCarState):
     MadsCarState.__init__(self, CP, CP_SP)
     can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
     if CP.transmissionType == TransmissionType.automatic:
-      self.shifter_values = can_define.dv["PowertrainData_10"]["TrnRng_D_Rq"]
+      self.shifter_values = can_define.dv["TransGearData"]["GearLvrPos_D_Actl"]
 
     self.distance_button = 0
     self.lc_button = 0
@@ -32,10 +32,10 @@ class CarState(CarStateBase, MadsCarState):
 
     # Occasionally on startup, the ABS module recalibrates the steering pinion offset, so we need to block engagement
     # The vehicle usually recovers out of this state within a minute of normal driving
-    ret.vehicleSensorsInvalid = cp.vl["SteeringPinion_Data"]["StePinCompAnEst_D_Qf"] != 3
+    self.vehicle_sensors_valid = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"] < 32766
 
     # car speed
-    ret.vEgoRaw = cp.vl["BrakeSysFeatures"]["Veh_V_ActlBrk"] * CV.KPH_TO_MS
+    ret.steeringAngleDeg = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"]
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
     ret.yawRate = cp.vl["Yaw_Data_FD1"]["VehYaw_W_Actl"]
     ret.standstill = cp.vl["DesiredTorqBrk"]["VehStop_D_Stat"] == 1
@@ -70,11 +70,14 @@ class CarState(CarStateBase, MadsCarState):
     if not self.CP.openpilotLongitudinalControl:
       ret.accFaulted = ret.accFaulted or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
 
-    # gear
+     # gear
     if self.CP.transmissionType == TransmissionType.automatic:
-      gear = self.shifter_values.get(cp.vl["PowertrainData_10"]["TrnRng_D_Rq"])
-      ret.gearShifter = self.parse_gear_shifter(gear)
+      if (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] in (3, 4, 5)):
+        ret.gearShifter = GearShifter.drive
+      elif (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] == 1):
+        ret.gearShifter = GearShifter.reverse
     elif self.CP.transmissionType == TransmissionType.manual:
+      ret.clutchPressed = cp.vl["Engine_Clutch_Data"]["CluPdlPos_Pc_Meas"] > 0
       if bool(cp.vl["BCM_Lamp_Stat_FD1"]["RvrseLghtOn_B_Stat"]):
         ret.gearShifter = GearShifter.reverse
       else:
