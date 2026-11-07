@@ -56,6 +56,13 @@ class RADAR:
   DELPHI_ESR = 'ford_fusion_2018_adas'
   DELPHI_MRR = 'FORD_CADS'
 
+  # Smartmicro MR76 auxiliary radar.
+  #
+  # This is NOT a DBC filename.
+  # RadarInterface handles MR76 directly from raw CAN frames.
+  MR76 = 'MR76'
+
+
 
 class Footnote(Enum):
   FOCUS = CarFootnote(
@@ -176,6 +183,10 @@ class CAR(Platforms):
   FORD_RANGER_MK2 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Ranger 2024", "Adaptive Cruise Control with Lane Centering", setup_video="https://www.youtube.com/watch?v=2oJlXCKYOy0")],
     CarSpecs(wheelbase=3.27, steerRatio=17.0),
+  )
+  LINCOLN_NAUTILUS = FordPlatformConfig(
+    [FordCarDocs("Lincoln Nautilus 2018-21", "Adaptive Cruise Control with Lane Centering")],
+    CarSpecs(wheelbase=3.025, steerRatio=19.33),
   )
 
 
