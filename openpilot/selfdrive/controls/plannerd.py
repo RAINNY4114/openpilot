@@ -23,13 +23,21 @@ def main():
   cloudlog.info("plannerd got CarParamsSP")
 
   gps_location_service = get_gps_location_service(params)
-  ignore_services = ["liveMapDataSP", "carStateSP", "selfdriveStateSP", gps_location_service]
+  # [NAV_LONG] navProfile 只有 NavigationEnabled=1 时才有发布者；amapNavi 是
+  # 0 Hz 的按需服务（外部导航桥写入）。两者都必须 ignore_*，否则会让
+  # sm.all_checks() 恒假、driverAssistance 一直 invalid。
+  # [FIX_RADARTRACKS_20261105] radarState may be invalid when Ford radar_interface
+  # returns None (no OEM radar CAN data). radard still publishes radarState but
+  # with valid=False. Ignore radarState in alive/valid checks so plannerd works.
+  ignore_services = ["liveMapDataSP", "carStateSP", "selfdriveStateSP", gps_location_service,
+                     "navProfile", "amapNavi", "radarState"]
 
   ldw = LaneDepartureWarning()
   longitudinal_planner = LongitudinalPlanner(CP, CP_SP)
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance', 'longitudinalPlanSP'])
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'radarState', 'modelV2', 'selfdriveState',
-                            'liveMapDataSP', 'carStateSP', 'selfdriveStateSP', gps_location_service],
+                            'liveMapDataSP', 'carStateSP', 'selfdriveStateSP', gps_location_service,
+                            'navProfile', 'amapNavi'],
                            poll='modelV2', ignore_alive=ignore_services, ignore_avg_freq=ignore_services, ignore_valid=ignore_services)
 
   while True:
@@ -49,3 +57,4 @@ def main():
 
 if __name__ == "__main__":
   main()
+

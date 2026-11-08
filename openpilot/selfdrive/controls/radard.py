@@ -285,7 +285,13 @@ def main() -> None:
   cloudlog.info("radard got CarParamsSP")
 
   # *** setup messaging
-  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2')
+  # [FIX_RADARTRACKS_20261105] Ford radar_interface returns None when no radar CAN data
+  # is available (e.g. offroad, no OEM radar). radarTracks is not published in
+  # that case, causing all_checks() to be permanently False and radarState.valid
+  # to be False, which cascades to longitudinalPlan and driverAssistance.
+  # Ignore radarTracks in alive/freq/valid checks so radard still works.
+  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2',
+                           ignore_alive=['radarTracks'], ignore_avg_freq=['radarTracks'], ignore_valid=['radarTracks'])
   pm = messaging.PubMaster(['radarState'])
 
   RD = RadarD(CP, CP_SP, CP.radarDelay)

@@ -1,0 +1,332 @@
+eGPU 取证报告  生成时间 2026-10-27 11:31:31
+主机 comma-4b8fe88e
+
+========================================================================
+阶段 A —— 瞬态观察（45 s）
+========================================================================
+★ 现在请：拔掉显卡 → 等 3 秒 → 重新插上（只做一次）
+
+[  0.00s] 起始 USB : 1-1 2c7c:0125 480M EG25-G
+[  0.00s] 起始 link_state='Rx.Detect'  flash.py=3
+[  0.00s] 起始告警: （无）
+
+观察结束：共 0 个事件
+结束 USB : 1-1 2c7c:0125 480M EG25-G
+结束 link_state='Rx.Detect'  flash.py=3
+结束告警: （无）
+
+【观察阶段事件数 = 0】
+
+========================================================================
+B1. 身份 / 环境
+========================================================================
+uptime        : 307.32 1203.31
+boot_id       : e006db6e-f349-46b5-9811-95942980b551
+date (UTC)    : 2026-10-27 11:32:17
+root          : True
+
+git branch    : staging-chestnut
+git HEAD      : 2f5a2d1 feat(chestnut): eGPU 大模型功率上限 100W -> 120W
+CHESTNUT_FW   : True
+  [usb.py] CHESTNUT_FW_VERSION = "8516b768"
+  [usb.py] CHESTNUT_USB_PRODUCT = f"custom {CHESTNUT_FW_VERSION}-CLEAN"
+
+========================================================================
+B2. lsusb
+========================================================================
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 002: ID 2c7c:0125 Quectel Wireless Solutions Co., Ltd. EC25 LTE modem
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 004 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+
+--- lsusb -t ---
+/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 480M
+    |__ Port 001: Dev 002, If 0, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 1, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 2, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 3, Class=Vendor Specific Class, Driver=option, 480M
+    |__ Port 001: Dev 002, If 4, Class=Vendor Specific Class, Driver=qmi_wwan, 480M
+/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 5000M
+/:  Bus 003.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 480M
+/:  Bus 004.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 5000M
+/sys/bus/usb/devices/usb3/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb3/tx_lanes: No such file or directory
+/sys/bus/usb/devices/usb1/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb1/tx_lanes: No such file or directory
+/sys/bus/usb/devices/1-1/rx_lanes: No such file or directory
+/sys/bus/usb/devices/1-1/tx_lanes: No such file or directory
+/sys/bus/usb/devices/usb4/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb4/tx_lanes: No such file or directory
+/sys/bus/usb/devices/usb2/rx_lanes: No such file or directory
+/sys/bus/usb/devices/usb2/tx_lanes: No such file or directory
+
+
+========================================================================
+B3. /sys/bus/usb/devices 全量
+========================================================================
+1-1        {'speed': '480', 'id': '2c7c:0125', 'product': 'EG25-G', 'version': '2.00', 'busnum': '1', 'devnum': '2', 'bDeviceClass': 'ef'}
+usb1       {'speed': '480', 'id': '1d6b:0002', 'product': 'xHCI Host Controller', 'version': '2.00', 'busnum': '1', 'devnum': '1', 'bDeviceClass': '09'}
+usb2       {'speed': '5000', 'id': '1d6b:0003', 'product': 'xHCI Host Controller', 'version': '3.00', 'busnum': '2', 'devnum': '1', 'bDeviceClass': '09'}
+usb3       {'speed': '480', 'id': '1d6b:0002', 'product': 'xHCI Host Controller', 'version': '2.00', 'busnum': '3', 'devnum': '1', 'bDeviceClass': '09'}
+usb4       {'speed': '5000', 'id': '1d6b:0003', 'product': 'xHCI Host Controller', 'version': '3.00', 'busnum': '4', 'devnum': '1', 'bDeviceClass': '09'}
+
+========================================================================
+B4. dwc3 / ssusb 控制器
+========================================================================
+debugfs/mode           = 'host'
+debugfs/link_state     = 'Rx.Detect'
+debugfs/state          = None
+debugfs/maximum_speed  = None
+debugfs/is_otg         = None
+ssusb/mode             = 'host'
+ssusb/state            = None
+ssusb/power            = None
+
+（★ 必须 root 才读得到 debugfs，普通用户读到空串）
+
+========================================================================
+B5. dmesg 指纹
+========================================================================
+总行数 2031
+  bus3 重注册                 = 1
+  bus4 重注册                 = 1
+  Cannot enable            = 172
+  unable to enumerate      = 42
+  attempt power cycle      = 42
+  new full-speed           = 42
+  QMP PHY TYPEC CTRL       = 1
+  usb-storage              = 3
+  DWC3                     = 6
+
+--- 最后 60 行含 usb/xhci/dwc3/QMP 的行 ---
+[  263.685796] usb usb3-port1: attempt power cycle
+[  264.915231] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  265.825523] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  265.827816] usb usb3-port1: unable to enumerate USB device
+[  265.945516] usb 3-1: new full-speed USB device number 88 using xhci-hcd
+[  266.065622] usb 3-1: Device not responding to setup address.
+[  266.275659] usb 3-1: Device not responding to setup address.
+[  266.485742] usb 3-1: device not accepting address 88, error -71
+[  269.776845] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  270.677155] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  270.677446] usb usb3-port1: attempt power cycle
+[  271.897580] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  272.797819] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  272.798069] usb usb3-port1: unable to enumerate USB device
+[  272.917805] usb 3-1: new full-speed USB device number 94 using xhci-hcd
+[  273.058231] usb 3-1: device descriptor read/all, error -71
+[  276.799082] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  277.699315] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  277.699582] usb usb3-port1: attempt power cycle
+[  278.919732] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  279.820454] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  279.821180] usb usb3-port1: unable to enumerate USB device
+[  279.939967] usb 3-1: new full-speed USB device number 100 using xhci-hcd
+[  280.080220] usb 3-1: device descriptor read/all, error -71
+[  283.811098] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  284.711860] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  284.712098] usb usb3-port1: attempt power cycle
+[  285.931585] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  286.831873] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  286.832229] usb usb3-port1: unable to enumerate USB device
+[  286.951892] usb 3-1: new full-speed USB device number 106 using xhci-hcd
+[  287.092567] usb 3-1: device descriptor read/all, error -71
+[  290.822795] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  291.722998] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  291.723239] usb usb3-port1: attempt power cycle
+[  292.943531] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  293.843633] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  293.844188] usb usb3-port1: unable to enumerate USB device
+[  293.963483] usb 3-1: new full-speed USB device number 112 using xhci-hcd
+[  294.103748] usb 3-1: device descriptor read/all, error -71
+[  297.834650] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  298.744645] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  298.744990] usb usb3-port1: attempt power cycle
+[  299.964745] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  300.864921] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  300.865170] usb usb3-port1: unable to enumerate USB device
+[  300.984871] usb 3-1: new full-speed USB device number 118 using xhci-hcd
+[  301.115443] usb 3-1: Device not responding to setup address.
+[  301.325031] usb 3-1: Device not responding to setup address.
+[  301.535033] usb 3-1: device not accepting address 118, error -71
+[  304.836991] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  305.735852] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  305.736131] usb usb3-port1: attempt power cycle
+[  306.956165] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  307.856254] usb usb3-port1: Cannot enable. Maybe the USB cable is bad?
+[  307.856487] usb usb3-port1: unable to enumerate USB device
+[  307.976212] usb 3-1: new full-speed USB device number 124 using xhci-hcd
+[  308.106344] usb 3-1: Device not responding to setup address.
+[  308.316346] usb 3-1: Device not responding to setup address.
+[  308.526237] usb 3-1: device not accepting address 124, error -71
+
+--- Type-C Sink connected 首次出现时刻 ---
+
+========================================================================
+B6. Params（告警 + chestnut 相关）
+========================================================================
+Offroad_Chestnut* 参数（0 个）:
+  （无 —— 说明当前没有告警，橙色不应出现）
+
+  ChestnutLoading                  <不存在>
+  ChestnutActive                   <不存在>
+  ChestnutRetry                    <不存在>
+  ModelRunnerTypeCache             text=b'1'
+  UpdaterTargetBranch              <不存在>
+
+========================================================================
+B7. 进程
+========================================================================
+--- flash.py ---
+5118       04:52 sudo /usr/local/venv/bin/python3 /data/openpilot/openpilot/system/hardware/chestnut/flash.py 8516b768
+   5120       04:52 sudo /usr/local/venv/bin/python3 /data/openpilot/openpilot/system/hardware/chestnut/flash.py 8516b768
+   5121       04:52 /usr/local/venv/bin/python3 /data/openpilot/openpilot/system/hardware/chestnut/flash.py 8516b768
+--- modeld ---
+4485       04:56 openpilot.sunnypilot.modeld_v2.warmup
+--- hardwared ---
+4465       04:56 openpilot.system.hardware.hardwared
+--- ui ---
+4462       04:56 openpilot.selfdrive.ui.ui
+
+========================================================================
+B8. swaglog 关键行（最近 3 个文件）
+========================================================================
+--- swaglog.0000000351 (8493 B) ---
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100518.6335282, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Read timed out. (read timeout=10)", "id": "15059bd5155e44469b6167aaf0796f45"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100518.635016, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "28b7304441424763bd3e896587e45667"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "application.py", "lineno": 701, "pathname": "/data/openpilot/openpilot/system/ui/lib/application.py", "module": "application", "funcName": "render", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100527.9737577, "msg$s": "FPS dropped below 20: 1", "id": "0d5ccdf087b9459b820a73d6ac295585"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100529.0733826, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Read timed out. (read timeout=10)", "id": "e6f2901c33474dbd99bb0efe0c7816aa"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100529.0760963, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "2dfdc1c18eab4999b8b8754b97c87d12"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100540.4995766, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Read timed out. (read timeout=10)", "id": "f5b50190a059426fa76e6bb0110166b6"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100540.5013118, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "70e6629b531f44afa8c62e8e3ce9a4a2"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100561.1043656, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Read timed out. (read timeout=10)", "id": "a75f371ecf4146c8a0031c0482059a24"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100561.1056192, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "5838ba86ead94befb1c63e1d79ac1be7"}
+{"ctx": {"daemon": "uploader", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "uploader.py", "lineno": 170, "pathname": "/data/openpilot/openpilot/system/loggerd/uploader.py", "module": "uploader", "funcName": "upload", "host": "comma-4b8fe88e", "process": 4471, "thread": 548227344160, "threadName": "MainThread", "created": 1793100563.6202269, "msg": {"event$s": "upload_start", "key$s": "boot/00000036--3ace3da80e.zst", "fn$s": "/data/media/0/realdata/boot/00000036--3ace3da80e.zst", "sz$i": 63699, "network_type$i": 1, "metered$b": false}, "id": "ca4b8314315c4b47bf34c7a5532a0b3a"}
+{"ctx": {"daemon": "uploader", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "INFO", "levelnum": 20, "name": "swaglog", "filename": "uploader.py", "lineno": 196, "pathname": "/data/openpilot/openpilot/system/loggerd/uploader.py", "module": "uploader", "funcName": "upload", "host": "comma-4b8fe88e", "process": 4471, "thread": 548227344160, "threadName": "MainThread", "created": 1793100569.7654371, "msg": {"event$s": "upload_success", "key$s": "boot/00000036--3ace3da80e.zst", "fn$s": "/data/media/0/realdata/boot/00000036--3ace3da80e.zst", "sz$i": 63699, "content_length$i": 63699, "network_type$i": 1, "metered$b": false, "speed$f": 0.010373526222105337}, "id": "d4c020369df4418b9cd90e54e507080f"}
+--- swaglog.0000000352 (4222 B) ---
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100603.867205, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v25.json (Caused by NewConnectionError(\"HTTPSConnection(host='raw.githubusercontent.com', port=443): Failed to establish a new connection: [Errno 101] Network is unreachable\"))", "id": "6da4e4f6eff24723a395cc4af25c2ea2"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100603.8727496, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "3de52022d1784ef19260d1b19929a552"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "application.py", "lineno": 701, "pathname": "/data/openpilot/openpilot/system/ui/lib/application.py", "module": "application", "funcName": "render", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100621.16954, "msg$s": "FPS dropped below 20: 0", "id": "1afbbcb2b6fd4699aa06787823b73f91"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100643.9570856, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v28.json (Caused by NewConnectionError(\"HTTPSConnection(host='raw.githubusercontent.com', port=443): Failed to establish a new connection: [Errno 101] Network is unreachable\"))", "id": "8b2ef4194df74328ae6a6e909eac1c04"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100643.9584596, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "0d37677f32864a13b8c16e689f6be162"}
+--- swaglog.0000000353 (4224 B) ---
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100687.953055, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v25.json (Caused by NewConnectionError(\"HTTPSConnection(host='raw.githubusercontent.com', port=443): Failed to establish a new connection: [Errno 101] Network is unreachable\"))", "id": "0469edb0fad6430583b1a0960376c3e7"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100687.9552824, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "96a475640e60499780e39077013be621"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "fetcher.py", "lineno": 207, "pathname": "/data/openpilot/openpilot/sunnypilot/models/fetcher.py", "module": "fetcher", "funcName": "get_bundles_for_source", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100728.0581145, "msg$s": "Request transport error while fetching models: HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v28.json (Caused by NewConnectionError(\"HTTPSConnection(host='raw.githubusercontent.com', port=443): Failed to establish a new connection: [Errno 101] Network is unreachable\"))", "id": "944402df0cb84c12b646dc135304aa13"}
+{"ctx": {"daemon": "models_manager", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "manager.py", "lineno": 377, "pathname": "/data/openpilot/openpilot/sunnypilot/models/manager.py", "module": "manager", "funcName": "main_thread", "host": "comma-4b8fe88e", "process": 4483, "thread": 548227344160, "threadName": "MainThread", "created": 1793100728.0590506, "msg$s": "Failed to fetch fresh data. Using expired cache as fallback", "id": "7a0cc49d5a70428c8a176afe5238d0ab"}
+{"ctx": {"daemon": "ui", "dongle_id": "c71663a273761bda", "version": "2026.003.000", "origin": "github.com/rainny4114/openpilot", "branch": "staging-chestnut", "commit": "2f5a2d1c0dc40db75f71c198ef59c8716b2a2be2", "dirty": false, "device": "tizi"}, "level": "WARNING", "levelnum": 30, "name": "swaglog", "filename": "application.py", "lineno": 701, "pathname": "/data/openpilot/openpilot/system/ui/lib/application.py", "module": "application", "funcName": "render", "host": "comma-4b8fe88e", "process": 4462, "thread": 548227344160, "threadName": "MainThread", "created": 1793100736.9475617, "msg$s": "FPS dropped below 20: 0", "id": "99b32938e3fe4f1e9638d3741c636ee8"}
+
+========================================================================
+B9. /data/egpu_usb_perm.log（尾部）
+========================================================================
+--- /data/egpu_usb_perm.log (7053 B) ---
+2026-10-27T10:42:11Z [start] pid=63083 uid=0 uptime=510.95s
+2026-07-28T15:04:53Z [start] pid=3973 uid=0 uptime=11.38s
+2026-10-27T11:02:10Z unbind 3-1:1.0 from usb-storage  uptime=486.28s
+2026-10-27T11:02:16Z chmod 666 /dev/bus/usb/003/011  (was: 664 root:root)  uptime=492.85s
+2026-10-27T11:02:16Z [USB2] /dev/bus/usb/003/011 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:02:17Z unbind 3-1:1.0 from usb-storage  uptime=493.02s
+                                                                                                                                                                                                                                                                                                                                                                      2026-07-28T15:04:53Z [start] pid=4057 uid=0 uptime=11.66s
+2026-07-28T15:04:53Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=11.75s
+2026-07-28T15:04:53Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:53Z unbind 3-1:1.0 from usb-storage  uptime=11.95s
+2026-07-28T15:04:52Z [start] pid=3841 uid=0 uptime=10.31s
+2026-07-28T15:04:52Z chmod 666 /dev/bus/usb/003/006  (was: 600 root:root)  uptime=10.41s
+2026-07-28T15:04:52Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:52Z unbind 3-1:1.0 from usb-storage  uptime=10.79s
+2026-07-28T15:04:58Z [start] pid=4188 uid=0 uptime=16.16s
+2026-10-27T11:09:04Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=48.53s
+2026-10-27T11:09:04Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:09:04Z unbind 3-1:1.0 from usb-storage  uptime=48.80s
+2026-07-28T15:04:53Z [start] pid=3989 uid=0 uptime=11.67s
+2026-10-27T11:15:06Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=64.08s
+2026-10-27T11:15:06Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:15:06Z unbind 3-1:1.0 from usb-storage  uptime=64.35s
+                                                          2026-07-28T15:04:53Z [start] pid=4031 uid=0 uptime=11.77s
+2026-10-27T11:22:21Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=70.56s
+2026-10-27T11:22:21Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-10-27T11:22:21Z unbind 3-1:1.0 from usb-storage  uptime=70.83s
+2026-07-28T15:04:52Z [start] pid=3976 uid=0 uptime=11.05s
+2026-07-28T15:04:53Z chmod 666 /dev/bus/usb/003/006  (was: 664 root:root)  uptime=11.12s
+2026-07-28T15:04:53Z [USB2] /dev/bus/usb/003/006 speed=12Mbps -> PCIe 未上电的正常态；modeld 会主动上电并等待重枚举到 USB3
+2026-07-28T15:04:53Z unbind 3-1:1.0 from usb-storage  uptime=11.36s
+--- /data/egpu_diag.jsonl (5113 B) ---
+[eGPU] {"boot": "c7617eba", "bundle_generation": null, "bundle_models": 0, "cable": false, "chestnut": false, "compiled": true, "ev": "gate", "pkl": null, "present": false, "ts": 1793072737.815}
+[eGPU] {"attempt": 1, "backoff": 10.0, "boot": "c7617eba", "delay": 0.0, "ev": "retry_request", "max": 3, "since_last": 1000000000.0, "ts": 1793072755.087}
+[eGPU] {"attempt": 2, "backoff": 30.0, "boot": "c7617eba", "delay": 30.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072755.092}
+[eGPU] {"attempt": 3, "backoff": 60.0, "boot": "c7617eba", "delay": 60.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072755.094}
+[eGPU] {"attempts": 3, "boot": "c7617eba", "ev": "retry_exhausted", "max": 3, "since_last": 0.0, "ts": 1793072755.095, "usb": {"error": "ImportError(\"cannot import name 'chestnut_present' from 'openpilot.common.hardware.usb' (/data/openpilot/openpilot/common/hardware/usb.py)\")"}}
+[eGPU] {"attempt": 1, "backoff": 10.0, "boot": "c7617eba", "delay": 0.0, "ev": "retry_request", "max": 3, "since_last": 1000000000.0, "ts": 1793072798.457}
+[eGPU] {"attempt": 2, "backoff": 30.0, "boot": "c7617eba", "delay": 30.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072798.461}
+[eGPU] {"attempt": 3, "backoff": 60.0, "boot": "c7617eba", "delay": 60.0, "ev": "retry_request", "max": 3, "since_last": 0.0, "ts": 1793072798.463}
+[eGPU] {"attempts": 3, "boot": "c7617eba", "ev": "retry_exhausted", "max": 3, "since_last": 0.0, "ts": 1793072798.481, "usb": {"cable": false, "devices": [{"busnum": 1, "devnum": 2, "linkErrorCount": 0, "manufacturer": "Quectel", "product": "EG25-G", "productId": 293, "speedMbps": 480, "usb3Lane": "unknown", "vendorId": 11388}, {"busnum": 1, "devnum": 1, "linkErrorCount": 0, "manufacturer": "Linux 4.9.103 xhci-hcd", "product": "xHCI Host Controller", "productId": 2, "speedMbps": 480, "usb3Lane": "unknown", "vendorId": 7531}, {"busnum": 2, "devnum": 1, "linkErrorCount": 0, "manufacturer": "Linux 4.9.103 xhci-hcd", "product": "xHCI Host Controller", "productId": 3, "speedMbps": 5000, "usb3Lane": "unknown", "vendorId": 7531}], "nodes": [], "present": false}}
+[eGPU] {"boot": "f3c834e7", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": null, "present": false, "ts": 1785251120.742}
+[eGPU] {"boot": "2ffbb9f5", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": null, "present": false, "ts": 1785251108.69}
+[eGPU] {"boot": "72eea4d9", "bundle_generation": null, "bundle_models": 0, "cable": false, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "unknown", "pkl_src": "fallback", "present": false, "ts": 1793082236.835}
+[eGPU] {"boot": "72eea4d9", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "unknown", "pkl_src": "fallback", "ts": 1793082236.837}
+[eGPU] {"boot": "72eea4d9", "bundle_generation": null, "bundle_models": 0, "cable": false, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1793082278.591}
+[eGPU] {"boot": "72eea4d9", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1793082278.592}
+[eGPU] {"boot": "f05f5b9c", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1785251112.806}
+[eGPU] {"boot": "f05f5b9c", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1785251112.807}
+[eGPU] {"boot": "32f984fb", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1785251110.076}
+[eGPU] {"boot": "32f984fb", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1785251110.077}
+[eGPU] {"boot": "f8cbea77", "bundle_generation": null, "bundle_models": 0, "cable": true, "chestnut": false, "compiled": true, "ev": "gate", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "present": false, "ts": 1785251109.649}
+[eGPU] {"boot": "f8cbea77", "ev": "gate_pkl_bad_fmt", "pkl": "/data/openpilot/openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl", "pkl_fmt": "legacy", "pkl_src": "fallback", "ts": 1785251109.65}
+--- /data/egpu_retry.json <不存在>
+
+========================================================================
+B10. /data/chestnut_config（ROM 恢复依赖）
+========================================================================
+total 12
+drwxr-xr-x  2 root  root  4096 Jul 28 15:05 .
+drwxr-xr-x 33 comma comma 4096 Jul 28 15:04 ..
+-rw-------  1 root  root   256 Jul 28 15:05 comma-4b8fe88e.bin
+
+========================================================================
+B11. 大模型 pkl 清单（chestnut_compiled 判据）
+========================================================================
+MODELS_DIR = /data/openpilot/openpilot/selfdrive/modeld/models
+total 876428
+drwxr-xr-x 2 comma comma      4096 Oct 26 11:23 .
+drwxr-xr-x 4 comma comma      4096 Oct 27 03:45 ..
+-rw-r--r-- 1 comma comma 799941965 Oct 26 11:23 big_driving_tinygrad.pkl
+-rw-r--r-- 1 comma comma    858796 Oct 26 11:23 big_driving_warp_1344x760_tinygrad.pkl
+-rw-r--r-- 1 comma comma    858531 Oct 26 11:23 big_driving_warp_1928x1208_tinygrad.pkl
+-rw-r--r-- 1 comma comma  20781963 Oct 26 11:21 dmonitoring_model_tinygrad.pkl
+-rw-r--r-- 1 comma comma   1401865 Oct 26 11:21 dm_warp_1344x760_tinygrad.pkl
+-rw-r--r-- 1 comma comma   1401817 Oct 26 11:21 dm_warp_1928x1208_tinygrad.pkl
+-rw-r--r-- 1 comma comma  70491206 Oct 26 11:21 driving_tinygrad.pkl
+-rw-r--r-- 1 comma comma    844693 Oct 26 11:21 driving_warp_1344x760_tinygrad.pkl
+-rw-r--r-- 1 comma comma    844502 Oct 26 11:21 driving_warp_1928x1208_tinygrad.pkl
+-rw-r--r-- 1 comma comma         0 Oct 26 11:07 __init__.py
+-rw-r--r-- 1 comma comma       121 Oct 26 11:07 README.md
+
+  ✅ big_driving_tinygrad.pkl                      799941965 B  head=41 84 0c 00 00 00 00 00 80 04
+  ✅ big_driving_warp_1344x760_tinygrad.pkl           858796 B  head=80 04 95 2e 02 00 00 00 00 00
+  ✅ big_driving_warp_1928x1208_tinygrad.pkl          858531 B  head=80 04 95 2e 02 00 00 00 00 00
+
+========================================================================
+B12. Type-C / 供电
+========================================================================
+usb/typec_cc_orientation   = 2
+usb/typec_power_role       = dual power role
+usb/typec_mode             = Powered cable w/ sink
+usb/voltage_now            = 4531250
+usb/pd_active              = 0
+usb/real_type              = Unknown
+usb/present                = 0
+dc/online               = 0
+
+========================================================================
+B13. /dev/bus/usb 节点权限
+========================================================================
+/dev/bus/usb/003/:
+drwxr-xr-x 2 root root       60 Oct 27 11:31 .
+drwxr-xr-x 6 root root      120 Jan  1  1970 ..
+crw-rw-r-- 1 root root 189, 256 Jul 28 15:04 001
+
+/dev/bus/usb/004/:
+drwxr-xr-x 2 root root       60 Jan  1  1970 .
+drwxr-xr-x 6 root root      120 Jan  1  1970 ..
+crw-rw-r-- 1 root root 189, 384 Jul 28 15:04 001

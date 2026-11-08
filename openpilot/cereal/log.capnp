@@ -2477,6 +2477,33 @@ struct NavRoute {
   }
 }
 
+struct NavProfile {
+  # [NAV_LONG][NAV_LAT_FALLBACK] 导航速度/曲率剖面，由 navd 在算路或偏航重算后
+  # 发布（1 Hz），供纵向速度规划（nav_speed_planner）与横向弱融合
+  # （nav_curvature_blend）消费。
+  #
+  # 设计要点：
+  #   1. 采样点用「沿路线的绝对进度 progress(m)」，不用「相对本车的距离」。
+  #      消费侧用自身 v_ego 外推补掉 1 Hz 的发布滞后，避免高速下 ~30 m 的
+  #      系统性滞后（表现为减速开始得太晚）。
+  #   2. 曲率符号与 openpilot 一致：正 = 左转。
+  #   3. speedCap 已经把「弯道曲率上限 / 法定限速变化 / 路线终点」三者折进去，
+  #      消费侧只需 v_allow = sqrt(v_cap^2 + 2*a_dec*d) 取 min。
+  #   4. 只追加字段，旧的订阅者按原 schema 解析不受影响。
+
+  progress @0 :Float32;      # m，发布时刻本车沿路线的进度
+  points @1 :List(Point);
+  speedLimit @2 :Float32;    # m/s，本车所在路段的法定限速；< 0 表示未知
+  valid @3 :Bool;
+  sourceMonoTime @4 :UInt64; # 发布时刻（time.monotonic_ns 域），消费侧判过期用
+
+  struct Point {
+    progress @0 :Float32;    # m，沿路线的绝对进度，严格递增
+    curvature @1 :Float32;   # 1/m，正 = 左转（openpilot 约定）
+    speedCap @2 :Float32;    # m/s，该点允许的最高速度；< 0 表示无约束
+  }
+}
+
 struct MapRenderState {
   locationMonoTime @0 :UInt64;
   renderTime @1 :Float32;
@@ -2648,6 +2675,7 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
+    amapNavi @154 :Custom.AmapNavi;
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
@@ -2712,6 +2740,7 @@ struct Event {
     uploaderStateDEPRECATED @79 :UploaderState;
     navInstruction @82 :NavInstruction;
     navRoute @83 :NavRoute;
+    navProfile @155 :NavProfile;
     navThumbnailDEPRECATED @84 :Thumbnail;
     gnssMeasurementsDEPRECATED @91 :GnssMeasurements;
     mapRenderStateDEPRECATED @105: MapRenderState;

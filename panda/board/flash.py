@@ -22,6 +22,6 @@ if __name__ == "__main__":
 
   for s in serials:
     with Panda(serial=s) as p:
-      print("flashing", p.get_usb_serial())
-      p.flash()
+      print("connected", p.get_usb_serial())
+
   exit(1 if len(serials) == 0 else 0)

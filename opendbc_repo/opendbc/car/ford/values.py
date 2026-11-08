@@ -63,7 +63,6 @@ class RADAR:
   MR76 = 'MR76'
 
 
-
 class Footnote(Enum):
   FOCUS = CarFootnote(
     "Refers only to the Focus Mk4 (C519) available in Europe/China/Taiwan/Australasia, not the Focus Mk3 (C346) in " +
@@ -153,6 +152,10 @@ class CAR(Platforms):
     ],
     CarSpecs(wheelbase=3.025, steerRatio=16.8),
   )
+  LINCOLN_NAUTILUS = FordPlatformConfig(
+    [FordCarDocs("Lincoln Nautilus 2018-21", "Adaptive Cruise Control with Lane Centering")],
+    CarSpecs(wheelbase=3.025, steerRatio=19.33),
+  )
   FORD_EXPEDITION_MK4 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Expedition 2022-24", "Co-Pilot360 Assist 2.0", hybrid=False)],
     CarSpecs(wheelbase=3.69, steerRatio=17.0),
@@ -183,10 +186,6 @@ class CAR(Platforms):
   FORD_RANGER_MK2 = FordCANFDPlatformConfig(
     [FordCarDocs("Ford Ranger 2024", "Adaptive Cruise Control with Lane Centering", setup_video="https://www.youtube.com/watch?v=2oJlXCKYOy0")],
     CarSpecs(wheelbase=3.27, steerRatio=17.0),
-  )
-  LINCOLN_NAUTILUS = FordPlatformConfig(
-    [FordCarDocs("Lincoln Nautilus 2018-21", "Adaptive Cruise Control with Lane Centering")],
-    CarSpecs(wheelbase=3.025, steerRatio=19.33),
   )
 
 

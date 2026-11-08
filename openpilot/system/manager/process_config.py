@@ -1,6 +1,7 @@
 import os
 import operator
 import platform
+import time
 
 from opendbc.car.structs import car
 from openpilot.cereal import custom
@@ -86,13 +87,43 @@ def use_sunnylink_uploader_shim(started, params, CP: car.CarParams) -> bool:
   """Shim for use_sunnylink_uploader to match the process manager signature."""
   return use_sunnylink_uploader(params)
 
+_EGPU_CACHE = {"ts": 0.0, "ok": False}
+
+def egpu_ready() -> bool:
+  """[EGPU_AUTODETECT] chestnut(ASM2464) eGPU 是否在线。
+
+  tinygrad runner 依赖 eGPU 推理；eGPU 不在线时 modeld_tinygrad 会卡在
+  gate_wait_hw 然后退出，manager 报 Process Not Running，车无法居中/巡航。
+  这里 1s 缓存探测结果，供 is_tinygrad_model / is_stock_model 做互斥判定。
+  """
+  now = time.monotonic()
+  if now - _EGPU_CACHE["ts"] < 1.0:
+    return _EGPU_CACHE["ok"]
+  try:
+    from openpilot.common.hardware.usb import chestnut_nodes
+    ok = len(chestnut_nodes()) > 0
+  except Exception:
+    ok = False
+  _EGPU_CACHE["ts"] = now
+  _EGPU_CACHE["ok"] = ok
+  return ok
+
 def is_tinygrad_model(started, params, CP: car.CarParams) -> bool:
-  """Check if the active model runner is tinygrad."""
-  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.tinygrad)
+  """Check if the active model runner is tinygrad (requires eGPU online)."""
+  if get_active_model_runner(params, not started) != custom.ModelManagerSP.Runner.tinygrad:
+    return False
+  return egpu_ready()
 
 def is_stock_model(started, params, CP: car.CarParams) -> bool:
-  """Check if the active model runner is stock."""
-  return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.stock)
+  """Check if the active model runner is stock.
+
+  [EGPU_AUTODETECT] 配置为 tinygrad 但 eGPU 掉线时回落到内置 stock modeld，
+  保证没有 eGPU 也能正常居中巡航。
+  """
+  runner = get_active_model_runner(params, not started)
+  if runner == custom.ModelManagerSP.Runner.stock:
+    return True
+  return runner == custom.ModelManagerSP.Runner.tinygrad and not egpu_ready()
 
 def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   return bool(os.path.exists(Paths.mapd_root()))
@@ -163,6 +194,10 @@ procs = [
   NativeProcess("bridge", "openpilot/cereal/messaging", ["./bridge"], notcar),
   PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar)),
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
+  PythonProcess("amap_navi", "openpilot.carrot.amap_navi", always_run),
+  # [NAV_DEST_WEB] 手机上设目的地的小网页（http://192.168.0.106:8899）。
+  # 车机上没有目的地选择界面，说明见 /data/nav_web.py 顶部。
+  PythonProcess("nav_web", "openpilot.carrot.nav_web", always_run),
 
   # sunnylink <3
   DaemonProcess("manage_sunnylinkd", "openpilot.sunnypilot.sunnylink.athena.manage_sunnylinkd", "SunnylinkdPid"),
@@ -201,5 +236,16 @@ if os.path.exists("../../third_party/copyparty/copyparty-sfx.py"):
   copyparty_args += ["-z"]
   copyparty_args += ["-q"]
   procs += [NativeProcess("copyparty-sfx", "openpilot/third_party/copyparty", ["./copyparty-sfx.py", *copyparty_args], and_(only_offroad, use_copyparty))]
+
+# [MR76_WIRING] MR76 毫米波雷达解析守护进程
+# 默认不跑: 只有 /data/ford_params/Mr76Enabled 存在且非 0 才注册。
+# 未接 MR76 的用户完全不受影响(进程列表与原生一致)。
+try:
+  if os.path.exists("/data/ford_params/Mr76Enabled"):
+    with open("/data/ford_params/Mr76Enabled") as _mr76f:
+      if _mr76f.read().strip() not in ("", "0"):
+        procs += [PythonProcess("mr76d", "openpilot.selfdrive.controls.mr76d", only_onroad)]
+except Exception:
+  pass
 
 managed_processes = {p.name: p for p in procs}

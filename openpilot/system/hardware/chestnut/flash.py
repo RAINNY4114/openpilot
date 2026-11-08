@@ -458,6 +458,14 @@ def defer_signal(signum, _frame):
 def flash_chestnut(expected_version=None, force=False):
   global _deadline
 
+  # [flash-lock] 彻底锁死：本设备底座是第三方 ASM2464，绝不自动刷官方固件。
+  # 2026-10-26 hardwared 误刷官方固件致第三方底座砖机；此后即便 --force 也必须
+  # 显式设置环境变量 CHESTNUT_FLASH_UNLOCK=<magic> 才允许，杜绝任何自动/半自动路径。
+  _unlock = os.environ.get("CHESTNUT_FLASH_UNLOCK", "")
+  if _unlock != "ALLOW-THIRD-PARTY-DOCK-FLASH":
+    raise RuntimeError("chestnut flashing is DISABLED on this device (third-party dock). "
+                       "Refusing to flash. To override, set CHESTNUT_FLASH_UNLOCK explicitly.")
+
   image = FIRMWARE_PATH.read_bytes()
   validate_image(image)
   expected_product = image_product(image)

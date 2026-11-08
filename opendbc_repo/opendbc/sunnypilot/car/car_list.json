@@ -3164,9 +3164,9 @@
     ],
     "package": "EyeSight Driver Assistance"
   },
-  "Škoda Fabia 2022-23": {
+  "?koda Fabia 2022-23": {
     "platform": "SKODA_FABIA_MK4",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Fabia",
     "year": [
@@ -3175,9 +3175,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Kamiq 2021-23": {
+  "?koda Kamiq 2021-23": {
     "platform": "SKODA_KAMIQ_MK1",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Kamiq",
     "year": [
@@ -3187,9 +3187,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Karoq 2019-23": {
+  "?koda Karoq 2019-23": {
     "platform": "SKODA_KAROQ_MK1",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Karoq",
     "year": [
@@ -3201,9 +3201,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Kodiaq 2017-23": {
+  "?koda Kodiaq 2017-23": {
     "platform": "SKODA_KODIAQ_MK1",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Kodiaq",
     "year": [
@@ -3217,9 +3217,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Octavia 2015-19": {
+  "?koda Octavia 2015-19": {
     "platform": "SKODA_OCTAVIA_MK3",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Octavia",
     "year": [
@@ -3231,9 +3231,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Octavia RS 2016": {
+  "?koda Octavia RS 2016": {
     "platform": "SKODA_OCTAVIA_MK3",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Octavia RS",
     "year": [
@@ -3241,9 +3241,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Octavia Scout 2017-19": {
+  "?koda Octavia Scout 2017-19": {
     "platform": "SKODA_OCTAVIA_MK3",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Octavia Scout",
     "year": [
@@ -3253,9 +3253,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Scala 2020-23": {
+  "?koda Scala 2020-23": {
     "platform": "SKODA_KAMIQ_MK1",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Scala",
     "year": [
@@ -3266,9 +3266,9 @@
     ],
     "package": "Adaptive Cruise Control (ACC) & Lane Assist"
   },
-  "Škoda Superb 2015-22": {
+  "?koda Superb 2015-22": {
     "platform": "SKODA_SUPERB_MK3",
-    "make": "Škoda",
+    "make": "?koda",
     "brand": "volkswagen",
     "model": "Superb",
     "year": [

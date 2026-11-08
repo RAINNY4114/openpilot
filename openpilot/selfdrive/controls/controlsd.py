@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from numbers import Number
 
 from openpilot.cereal import log
@@ -19,6 +20,10 @@ from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, S
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+# [AA_BRAKE_FALLBACK] 紧急转向避让的纵向兜底（消费 AvoidBrakeReq 心跳）
+from openpilot.selfdrive.controls.lib.aa_brake_apply import AABrakeApply
+# [NAV_LAT_FALLBACK] 导航曲率的横向弱融合（只在大半径弯道且与模型一致时介入）
+from openpilot.selfdrive.controls.lib.nav_curvature_blend import NavCurvatureBlend
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -43,10 +48,24 @@ class Controls(ControlsExt):
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP, self.CP_SP)
 
+    # [AA_BRAKE_FALLBACK] AA 的纵向兜底消费器。
+    # 默认配置（/data/aa_brake_apply.json）是 enabled=false / observe_only=true
+    # -> update() 恒返回 0.0，纵向行为与原生逐字节一致。
+    self.AAB = AABrakeApply()
+
+    # [NAV_LAT_FALLBACK] 导航曲率弱融合器。
+    # 默认配置（/data/nav_lat_blend.json）是 enabled=false / observe_only=true
+    # -> blend() 原样返回模型曲率，横向行为与原生逐字节一致。
+    self.NCB = NavCurvatureBlend(dt=DT_CTRL)
+
     self.sm = messaging.SubMaster(['lateralDelay', 'vehicleParameters', 'lateralTorqueParameters', 'modelV2', 'selfdriveState',
                                    'extrinsicsCalibration', 'deviceMotion', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'] + self.sm_services_ext,
-                                  poll='selfdriveState')
+                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'navProfile'] + self.sm_services_ext,
+                                  poll='selfdriveState',
+                                  # [NAV_LAT_FALLBACK] navd 只在 NavigationEnabled=1 时运行，
+                                  # 不 ignore 会让 all_checks() 恒假（torque 参数那条链会失效）
+                                  ignore_alive=['navProfile'], ignore_avg_freq=['navProfile'],
+                                  ignore_valid=['navProfile'])
     self.pm = messaging.PubMaster(['carControl', 'controlsState'] + self.pm_services_ext)
 
     self.steer_limited_by_safety = False
@@ -130,6 +149,7 @@ class Controls(ControlsExt):
 
     if not CC.latActive:
       self.LaC.reset()
+      self.NCB.reset()
     if not CC.longActive:
       self.LoC.reset()
 
@@ -137,12 +157,58 @@ class Controls(ControlsExt):
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
 
+    # ------------------------------------------------------------------
+    # [AA_BRAKE_FALLBACK] 紧急转向避让的纵向兜底叠加。
+    #
+    # 消费 modeld 侧 AoAaBridge 写的 /data/ford_params/AvoidBrakeReq
+    # （格式 "<值>:<monotonic秒>"，内嵌时间戳即心跳）。
+    #
+    # 三道安全边界，缺一不可：
+    #   1. AABrakeApply 自身：enabled=false / observe_only=true -> 恒 0；
+    #      纵向未激活 -> 0；车速 < v_min_kmh -> 0；心跳超过 req_stale_sec
+    #      （默认 0.5 s）-> 0（写入侧已死则自动释放）。
+    #   2. 只往下压，绝不上抬：`_aa_delta <= 0.0`，且叠加后不低于车辆
+    #      PID 加速度下限 `pid_accel_limits[0]`。
+    #   3. 输出值仍走下面那道 NaN/Inf 检查。
+    #
+    # ★ 默认配置下这一整段是死代码（恒 0.0），纵向行为与原生完全一致。
+    # ------------------------------------------------------------------
+    try:
+      _aa_delta = float(self.AAB.update(v_ego=CS.vEgo, long_active=CC.longActive))
+      if _aa_delta < 0.0:
+        actuators.accel = max(float(actuators.accel) + _aa_delta, float(pid_accel_limits[0]))
+    except Exception:
+      cloudlog.exception("aa brake apply failed")
+
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
     if self.sm.valid['lateralManeuverPlan']:
       new_desired_curvature = self.sm['lateralManeuverPlan'].desiredCurvature if CC.latActive else self.curvature
     else:
       new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+
+    # ------------------------------------------------------------------
+    # [NAV_LAT_FALLBACK] 导航曲率的横向弱融合。
+    #
+    # 只在「大半径弯道 + 模型与地图走向一致」时把期望曲率往导航方向拉一点点，
+    # 抑制长直路/缓弯上的缓慢漂移。分歧变大即退出（什么都不做）。
+    #
+    # 四道边界：
+    #   1. NavCurvatureBlend 自身：enabled=false / observe_only=true -> 原样返回；
+    #      横向未激活 / 车速 < v_min / 剖面过期 -> 原样返回。
+    #   2. |k_nav| <= 1/150 1/m（大半径弯道才介入）；|k_model - k_nav| <= 0.008
+    #      才介入 —— 两个独立来源互相印证是唯一的安全前提。
+    #   3. 权重 <= 0.25，单帧修正量 |delta| <= 0.0015 1/m，且按 0.002 1/m/s 爬升。
+    #   4. 输出仍走下面的 clip_curvature（车速相关的曲率变化率限制）。
+    #
+    # ★ 默认配置下这一整段是死代码（原样返回），横向行为与原生完全一致。
+    # ------------------------------------------------------------------
+    try:
+      new_desired_curvature = self.NCB.blend(CS.vEgo, CC.latActive, new_desired_curvature,
+                                             self.sm['navProfile'], time.monotonic())
+    except Exception:
+      cloudlog.exception("nav curvature blend failed")
+
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 

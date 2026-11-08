@@ -1,0 +1,60 @@
+diff --git a/openpilot/system/camerad/cameras/hw.h b/openpilot/system/camerad/cameras/hw.h
+index 8f9de5b..0b5e14c 100644
+--- a/openpilot/system/camerad/cameras/hw.h
++++ b/openpilot/system/camerad/cameras/hw.h
+@@ -27,6 +27,10 @@ struct CameraConfig {
+   bool vignetting_correction;
+   SpectraOutputType output_type;
+   bool staggered_sof;  // SOF is staggered (half-period offset) from other cameras
++  // [ife-resize] IFE 输出尺寸。0 表示跟随传感器全分辨率（默认行为）。
++  // 非 0 时由 IFE 的定标器做硬件降采样，用来压低 MIPI/USB 带宽。
++  uint32_t out_width;
++  uint32_t out_height;
+ };
+ 
+ // NOTE: to be able to disable road and wide road, we still have to configure the sensor over i2c
+@@ -42,6 +46,8 @@ const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
+   .vignetting_correction = false,
+   .output_type = ISP_IFE_PROCESSED,
+   .staggered_sof = false,
++  .out_width = 0,
++  .out_height = 0,
+ };
+ 
+ const CameraConfig NARROW_ROAD_CAMERA_CONFIG = {
+@@ -55,6 +61,8 @@ const CameraConfig NARROW_ROAD_CAMERA_CONFIG = {
+   .vignetting_correction = true,
+   .output_type = ISP_IFE_PROCESSED,
+   .staggered_sof = false,
++  .out_width = 1344,
++  .out_height = 760,
+ };
+ 
+ const CameraConfig CABIN_CAMERA_CONFIG = {
+@@ -68,6 +76,8 @@ const CameraConfig CABIN_CAMERA_CONFIG = {
+   .vignetting_correction = false,
+   .output_type = ISP_BPS_PROCESSED,
+   .staggered_sof = true,
++  .out_width = 0,
++  .out_height = 0,
+ };
+ 
+ const CameraConfig ALL_CAMERA_CONFIGS[] = {WIDE_ROAD_CAMERA_CONFIG, NARROW_ROAD_CAMERA_CONFIG, CABIN_CAMERA_CONFIG};
+diff --git a/openpilot/system/camerad/cameras/spectra.cc b/openpilot/system/camerad/cameras/spectra.cc
+index 2cbf359..b695df5 100644
+--- a/openpilot/system/camerad/cameras/spectra.cc
++++ b/openpilot/system/camerad/cameras/spectra.cc
+@@ -280,8 +280,11 @@ void SpectraCamera::camera_open(VisionIpcServer *v) {
+ 
+   if (!enabled) return;
+ 
+-  buf.out_img_width = sensor->frame_width / sensor->out_scale;
+-  buf.out_img_height = (sensor->hdr_offset > 0 ? (sensor->frame_height - sensor->hdr_offset) / 2 : sensor->frame_height) / sensor->out_scale;
++  // [ife-resize] 允许按相机显式指定 IFE 输出尺寸（0 = 跟随传感器全分辨率）。
++  // IFE 定标寄存器是 16.16 定标比，非整数比也支持，所以不必受 out_scale 整除限制。
++  buf.out_img_width = cc.out_width > 0 ? cc.out_width : sensor->frame_width / sensor->out_scale;
++  buf.out_img_height = cc.out_height > 0 ? cc.out_height
++    : (sensor->hdr_offset > 0 ? (sensor->frame_height - sensor->hdr_offset) / 2 : sensor->frame_height) / sensor->out_scale;
+ 
+   // size is driven by all the HW that handles frames,
+   // the video encoder has certain alignment requirements in this case
