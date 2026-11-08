@@ -28,12 +28,6 @@ SIDE_LEAD_Y_MAX = 5.0     # m, maximum |yRel| for side lead zone
 SIDE_LEAD_D_MAX = 10.0    # m, maximum dRel for side lead (rear blind zone)
 SIDE_LEAD_D_MIN = -5.0    # m, minimum dRel (slightly behind is still blind spot)
 
-# [BSD_20261108] Side lead detection parameters
-LANE_WIDTH_MIN = 2.5      # m, minimum lane width to consider side leads
-SIDE_LEAD_Y_MIN = 1.5     # m, minimum |yRel| to be a side lead
-SIDE_LEAD_Y_MAX = 5.0     # m, maximum |yRel| for side lead zone
-SIDE_LEAD_D_MAX = 10.0    # m, maximum dRel for side lead (rear blind zone)
-SIDE_LEAD_D_MIN = -5.0    # m, minimum dRel (slightly behind is still blind spot)
 
 # radar tracks
 SPEED, ACCEL = 0, 1     # Kalman filter states enum

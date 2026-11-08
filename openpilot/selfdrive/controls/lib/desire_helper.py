@@ -35,28 +35,7 @@ class ExistCounter:
     self.cnt = 0
     self.state = False
 
-# [BSD_20261108] Blind spot detection delay and counter (cpv9-inspired)
-BSD_DETECTED_HOLD_SEC = 1.5   # Keep BSD active for 1.5s after last detection
-BSD_EXIST_THRESHOLD = 3       # Need 3 consecutive frames to confirm
-SIDE_LEAD_DANGER_DIST = 5.0   # m, side lead within this distance blocks lane change
 
-class ExistCounter:
-  """Debounce counter: confirms a signal after N consecutive True frames."""
-  def __init__(self, threshold: int = BSD_EXIST_THRESHOLD):
-    self.threshold = threshold
-    self.cnt = 0
-    self.state = False
-
-  def update(self, detected: bool) -> None:
-    if detected:
-      self.cnt = min(self.cnt + 1, self.threshold)
-    else:
-      self.cnt = max(self.cnt - 1, 0)
-    self.state = self.cnt >= self.threshold
-
-  def reset(self) -> None:
-    self.cnt = 0
-    self.state = False
 
 TURN_DESIRES = {
   TurnDirection.none: log.Desire.none,
@@ -80,12 +59,7 @@ class DesireHelper:
     self.bsd_hold_timer = 0.0  # Timer to hold BSD detection after last signal
     self.left_bsd_active = False
     self.right_bsd_active = False
-    # [BSD_20261108] Blind spot debouncing
-    self.left_bsd_counter = ExistCounter()
-    self.right_bsd_counter = ExistCounter()
-    self.bsd_hold_timer = 0.0  # Timer to hold BSD detection after last signal
-    self.left_bsd_active = False
-    self.right_bsd_active = False
+
 
   @staticmethod
   def get_lane_change_direction(CS):
