@@ -119,12 +119,29 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
 #   * shadow_curvature / ford.h 偏差检查（panda 固件不可改）
 #
 # ---- 新增参数（/data/ford_params/，全部热加载，缺失即用默认值）----
-#   dp_ford_angle_blend     0.00~1.00   默认 0.50   模型预测混合比（0=纯规划，1=纯模型）
-#   dp_ford_angle_vlt       0.00~0.20   默认 0.10   最大额外前瞻（s）
-#   dp_ford_angle_lc        0.85~1.50   默认 1.15   变道增益
+#   dp_ford_angle_blend     0.00~1.00   默认 0.25   模型预测混合比（0=纯规划，1=纯模型）
+#   dp_ford_angle_vlt       0.00~0.20   默认 0.05   最大额外前瞻（s）
+#   dp_ford_angle_lc        0.85~1.50   默认 1.00   变道增益
 #   dp_ford_angle_damp      0.50~1.25   默认 1.00   高速阻尼（1.0=不启用）
 #   dp_ford_angle_humanturn 0 / 1       默认 1      人工转向接管强制 mode 0
 #   dp_ford_angle_unwind    0.10~1.00   默认 0.40   饱和退绕速率（rad/s）
+#   dp_ford_angle_min_v     0.0~20.0    默认 9.0    启用 angle 的最低车速（m/s），0=不限制
+# =================================================================================================
+#
+# ---- [ANGLE_TUNE_20261108] 基于 /data/media/0/path_angle_shadow.log + realdata rlog 的调校 ----
+# 4804 帧（约 1201 s）实测：in_curve=1 占 97.3%，alpha 均值 0.957，alpha==1 占 92.9%，
+# c1 左右变号 89 次；c1_can 与 alpha*kappa*v*gain 的误差仅 1e-5，说明 κ 的噪声全部直通
+# 方向盘，限幅/饱和退绕一次都没拦住。根因有三：
+#   1) enter=0.50 / exit=0.30 远低于实测 lat_accel 分布（p50=0.589, p90=1.113 m/s²），
+#      gate 一旦进入就出不来；
+#   2) mode=2 在 alpha 归零后把 _shape_kappa 改过的 κ 当 c2 下发，直道并非逐字节透传，
+#      而 blend_eff>0 占 83.4%（模型前瞻曲率 7x24 混进转向指令）；
+#   3) 低速段无下限：c2 的 ISO jerk 窗口 ∝ 1/v²，低速余量比高速大一个数量级，angle
+#      模式在低速没有收益，但实测 0~12 m/s 的 mean|dc1| 是高速的 3~5 倍，55/92 次变号
+#      发生在低速，正是"左右打方向"最明显的工况。
+# 对策：提高滞回阈值、直道恢复 kappa_passthrough、加最低车速；参数见 /data/ford_params。
+# 滞回回放（同一份日志）：0.50/0.30 -> ON 95.9%；1.20/0.70 -> ON 12.9%；
+# 1.50/0.90 -> ON 6.0%。取 1.20/0.70 保留真实弯道能力，同时把直道还给上游规划器。
 # =================================================================================================
 
 _PARAM_DIR = "/data/ford_params"
@@ -137,7 +154,7 @@ _SHADOW_LOG_MAX_BYTES = 2_000_000
 
 # ---- [BP_ANGLE_UPGRADE 20261102] 模型预测混合 / VLT 常量（数值取自 BluePilot bp-7.0）----
 _DT_MDL = 0.05                      # 模型循环周期，与 common/realtime.py 一致
-_VLT_T_EXTRA_MAX = 0.10             # 额外前瞻上限（s）
+_VLT_T_EXTRA_MAX = 0.05             # 额外前瞻默认值（s）[ANGLE_TUNE_20261108] 原 0.10 过大
 _VLT_V_LOW_MS = 25.0 * 0.44704      # 25 mph —— 此速度及以下给满额外前瞻
 _VLT_V_HIGH_MS = 55.0 * 0.44704     # 55 mph —— 此速度及以上不再给额外前瞻
 _VLT_KAPPA_FULL = 0.005             # 1/m —— 此曲率以下给满额外前瞻（半径 200m+）
@@ -219,10 +236,10 @@ class FordPathAngleGate:
   _PA_MARGIN = 0.95
 
   def __init__(self):
-    self.mode = 0
-    self.gain = 1.20
-    self.enter = 0.80
-    self.exit = 0.50
+    self.mode = 0                # 参数缺失时保持关闭，最保守兜底
+    self.gain = 1.00             # [ANGLE_TUNE_20261108] 与实车调校值一致
+    self.enter = 1.20
+    self.exit = 0.70
     self.in_curve = False
     self.alpha = 0.0
     self.c1 = 0.0
@@ -232,12 +249,13 @@ class FordPathAngleGate:
     self._log_n = 0
 
     # ---- [BP_ANGLE_UPGRADE 20261102] 模型预测混合相关 ----
-    self.blend = 0.50            # dp_ford_angle_blend
-    self.vlt_extra_max = _VLT_T_EXTRA_MAX   # dp_ford_angle_vlt
-    self.lc_factor = 1.15        # dp_ford_angle_lc
+    self.blend = 0.25            # dp_ford_angle_blend
+    self.vlt_extra_max = 0.05    # dp_ford_angle_vlt
+    self.lc_factor = 1.00        # dp_ford_angle_lc
     self.damp = 1.00             # dp_ford_angle_damp
     self.humanturn_enable = True  # dp_ford_angle_humanturn
     self.unwind_rate = 0.40      # dp_ford_angle_unwind（rad/s）
+    self.min_v = 9.0             # [ANGLE_TUNE_20261108] dp_ford_angle_min_v（m/s）
 
     # 由 CarController 每拍注入的上下文（模型缺失时为 None，功能自动退化）
     self.model = None
@@ -259,17 +277,19 @@ class FordPathAngleGate:
 
   def reload(self):
     self.mode = int(_read_param("dp_ford_angle_mode", 0, int))
-    self.gain = float(np.clip(_read_param("dp_ford_angle_gain", 1.20, float), 0.5, 2.0))
-    self.enter = float(np.clip(_read_param("dp_ford_angle_enter", 0.80, float), 0.30, 3.0))
-    lo = float(np.clip(_read_param("dp_ford_angle_exit", 0.50, float), 0.10, 2.90))
+    self.gain = float(np.clip(_read_param("dp_ford_angle_gain", 1.00, float), 0.5, 2.0))
+    self.enter = float(np.clip(_read_param("dp_ford_angle_enter", 1.20, float), 0.30, 3.0))
+    lo = float(np.clip(_read_param("dp_ford_angle_exit", 0.70, float), 0.10, 2.90))
     self.exit = min(lo, self.enter - 0.05)
-    # [BP_ANGLE_UPGRADE] 新增项一律"缺失即保持旧行为"，除 blend 外默认值都不改变现有手感。
-    self.blend = float(np.clip(_read_param("dp_ford_angle_blend", 0.50, float), 0.0, 1.0))
+    # [ANGLE_TUNE_20261108] 缺失参数时回落到实车调校值，而不是旧的易摆动默认值。
+    self.blend = float(np.clip(_read_param("dp_ford_angle_blend", 0.25, float), 0.0, 1.0))
     self.vlt_extra_max = float(np.clip(_read_param("dp_ford_angle_vlt", _VLT_T_EXTRA_MAX, float), 0.0, 0.20))
-    self.lc_factor = float(np.clip(_read_param("dp_ford_angle_lc", 1.15, float), 0.85, 1.50))
+    self.lc_factor = float(np.clip(_read_param("dp_ford_angle_lc", 1.00, float), 0.85, 1.50))
     self.damp = float(np.clip(_read_param("dp_ford_angle_damp", 1.00, float), 0.50, 1.25))
     self.humanturn_enable = bool(int(_read_param("dp_ford_angle_humanturn", 1, int)))
     self.unwind_rate = float(np.clip(_read_param("dp_ford_angle_unwind", 0.40, float), 0.10, 1.00))
+    # [ANGLE_TUNE_20261108] 低速禁用闸门；写 0 可完整关闭该限制做 A/B 对照。
+    self.min_v = float(np.clip(_read_param("dp_ford_angle_min_v", 9.0, float), 0.0, 20.0))
 
   def set_context(self, model, lateral_delay):
     """每拍由 CarController 注入模型与延迟估计。任一缺失都不影响主流程。"""
@@ -467,7 +487,12 @@ class FordPathAngleGate:
       a_target = 0.0
     else:
       # ---- 弯道判据：侧向加速度，带滞回 ----
-      if self.in_curve:
+      # [ANGLE_TUNE_20261108] 低速禁用：c2 的 ISO jerk 窗口 ∝ 1/v²，低速余量充足，
+      # angle 模式没有收益；而实测低速 c1 抖动/变号最严重，是左右打方向的主要来源。
+      # 放在滞回之前直接清 in_curve，减速穿越阈值时 alpha 会按原斜坡平滑收回。
+      if v < self.min_v:
+        self.in_curve = False
+      elif self.in_curve:
         if lat_accel < self.exit:
           self.in_curve = False
       else:
@@ -490,11 +515,17 @@ class FordPathAngleGate:
     if a_target == 0.0 and self.alpha <= 1e-9:
       self.c1 = 0.0
       if self.mode >= 2:
-        # [BP_ANGLE_UPGRADE 20261102] mode=2 下 κ' 已被模型混合 / 偏差限幅改动过，
-        # 单拍可能跳变（改前 κ 来自 CURVATURE_LIMITS.apply_limits，天然已限速）。
-        # 这里补上 c2 的逐拍窗口限制，否则会撞 panda 的 steer_curvature_cmd_checks
-        # （ISO 侧向 jerk）导致整帧被否决。mode<=1 保持逐字节透传，不受影响。
-        self.c2 = self._move(self.c2, kappa, self._curv_step(v))
+        # [BP_ANGLE_UPGRADE 20261102] 补上 c2 的逐拍窗口限制，避免撞 panda 的
+        # steer_curvature_cmd_checks（ISO 侧向 jerk）导致整帧被否决。
+        #
+        # [ANGLE_TUNE_20261108] 直道基线必须是**上游规划曲率**，不能用 κ'：
+        # _shape_kappa 已经把 κ 换成 40% 模型前瞻 + VLT + 变道增益 + 偏差限幅的结果，
+        # 原来这里下发 κ' 等于让模型曲率噪声在直道 7x24 直通方向盘（实测 blend_eff>0
+        # 占 83.4%）。上游 CarController.update 已对 apply_curvature 做过偏差限幅与
+        # CURVATURE_LIMITS 限速，kappa_passthrough 本身就是安全且逐帧连续的；
+        # 保留 _move 只为让 alpha 刚收回那一拍的切换继续平滑。
+        # 注意 _k_last 仍记 κ'：c1 的目标值用 κ' 算，其逐拍预算应按 κ' 的变化量估计。
+        self.c2 = self._move(self.c2, kappa_passthrough, self._curv_step(v))
       else:
         self.c2 = kappa
       self._k_last = kappa
