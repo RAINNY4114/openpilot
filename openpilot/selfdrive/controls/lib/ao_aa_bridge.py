@@ -66,6 +66,14 @@ AO_LOG_PATH = "/data/media/0/auto_overtake.log"
 AA_LOG_PATH = "/data/media/0/auto_avoidance.log"
 LOG_MAX_BYTES = 5_000_000
 
+# [BSD_20261108] 侧方雷达目标进入该距离即视为该侧盲区被占用。
+# 与 desire_helper.py 的 SIDE_LEAD_DANGER_DIST 保持一致。
+SIDE_LEAD_DANGER_DIST = 5.0
+
+# [AUTO_LC_20261108] AA（紧急转向避让）的确认窗口。AO 用
+# AutoOvertakeConfirmSec（默认 3 s），AA 是紧急兜底，只留半秒让转向灯亮起。
+AA_CONFIRM_DELAY_SEC = 0.5
+
 # 自动变道的确认窗口（秒）。这期间转向灯已经亮起（controlsd 从
 # laneChangeState 推 CC.left/rightBlinker），驾驶员随时可取消。
 CONFIRM_DELAY_SEC_DEFAULT = 3.0
@@ -178,6 +186,26 @@ def read_cfg():
       pass
 
   return ao, aa
+
+
+def effective_bsm(sm, cs):
+  """[BSD_20261108] 融合 OEM 盲区信号与 radarState.leadLeft/leadRight 侧方雷达。
+
+  AO / AA 共用同一判据：侧方 5 m 内有目标即视为该侧被占用，安全门一律拦变道。
+  只做「加严」不做「放宽」—— 任何异常都回落到 OEM BSM 原值，
+  绝不会因为侧方雷达读取失败而放行未知状态。
+  """
+  left = bool(cs.leftBlindspot)
+  right = bool(cs.rightBlindspot)
+  try:
+    rs = sm['radarState']
+    if rs.leadLeft.present and float(rs.leadLeft.dRel) < SIDE_LEAD_DANGER_DIST:
+      left = True
+    if rs.leadRight.present and float(rs.leadRight.dRel) < SIDE_LEAD_DANGER_DIST:
+      right = True
+  except Exception:
+    pass
+  return left, right
 
 
 # ============================================================================
@@ -378,10 +406,13 @@ class AoAaBridge:
     # ---- 合并：AA（安全兜底）优先于 AO（舒适性）----
     direction = aa_dir if aa_dir != LaneChangeDirection.none else ao_dir
 
+    # [AUTO_LC_20261108] AA 是紧急兜底，不能套用 AO 的 3 s 确认窗口；
+    # 留 0.5 s 让转向灯亮起给后车一个提示即可（AA 内部已有多帧危险确认）。
+    confirm = AA_CONFIRM_DELAY_SEC if aa_dir != LaneChangeDirection.none else float(ao_cfg["confirm_delay_sec"])
     return BridgeOut(
       direction=direction,
       brake_req=brake,
-      confirm_delay_sec=float(ao_cfg["confirm_delay_sec"]),
+      confirm_delay_sec=float(confirm),
       ao_state=self.ao.get_state(),
       aa_state=self.aa.get_state(),
     )
@@ -427,47 +458,8 @@ class AoAaBridge:
       except Exception:
         lz, rz, rf = None, None, None
 
-      # [BSD_20261108] Side radar leads from radarState (leadLeft/leadRight)
-      side_lead_left_d = None
-      side_lead_right_d = None
-      try:
-        rs = sm['radarState']
-        if rs.leadLeft.present:
-          side_lead_left_d = float(rs.leadLeft.dRel)
-        if rs.leadRight.present:
-          side_lead_right_d = float(rs.leadRight.dRel)
-      except Exception:
-        pass
-      # If side lead is within danger zone, treat as BSM detected
-      if side_lead_left_d is not None and side_lead_left_d < 5.0:
-        cs_left_bsm_effective = True
-      else:
-        cs_left_bsm_effective = bool(cs.leftBlindspot)
-      if side_lead_right_d is not None and side_lead_right_d < 5.0:
-        cs_right_bsm_effective = True
-      else:
-        cs_right_bsm_effective = bool(cs.rightBlindspot)
-
-      # [BSD_20261108] Side radar leads from radarState (leadLeft/leadRight)
-      side_lead_left_d = None
-      side_lead_right_d = None
-      try:
-        rs = sm['radarState']
-        if rs.leadLeft.present:
-          side_lead_left_d = float(rs.leadLeft.dRel)
-        if rs.leadRight.present:
-          side_lead_right_d = float(rs.leadRight.dRel)
-      except Exception:
-        pass
-      # If side lead is within danger zone, treat as BSM detected
-      if side_lead_left_d is not None and side_lead_left_d < 5.0:
-        cs_left_bsm_effective = True
-      else:
-        cs_left_bsm_effective = bool(cs.leftBlindspot)
-      if side_lead_right_d is not None and side_lead_right_d < 5.0:
-        cs_right_bsm_effective = True
-      else:
-        cs_right_bsm_effective = bool(cs.rightBlindspot)
+      # [BSD_20261108] 侧方雷达增强 BSM（AO / AA 共用同一判据）
+      cs_left_bsm_effective, cs_right_bsm_effective = effective_bsm(sm, cs)
 
       mr76_l_occ = bool((mr76_lane // 10) % 10) if mr76_fresh else None
       mr76_r_occ = bool(mr76_lane % 10) if mr76_fresh else None
@@ -570,6 +562,10 @@ class AoAaBridge:
     try:
       cs = sm['carState']
       lead = sm['radarState'].leadOne if sm.seen.get("radarState", False) else None
+      # [AUTO_LC_20261108] 原先这里直接引用了只在 _update_ao 内定义的
+      # cs_left/right_bsm_effective，一启用 AA 就抛 NameError 被外层 except
+      # 吞掉 -> AA 恒返回 none/brake=0。改为调用共用判据。
+      cs_left_bsm_effective, cs_right_bsm_effective = effective_bsm(sm, cs)
 
       # ---- 障碍物：radarTracks 前向点云，取本车道内最近者 ----
       obs_d, obs_vr, obs_in_path = None, None, False

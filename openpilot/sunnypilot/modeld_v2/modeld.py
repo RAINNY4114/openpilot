@@ -818,7 +818,16 @@ def main(demo=False):
       _ao_aa = AOA.update(sm=sm, dh=DH, v_ego=v_ego, modelv2=modelv2_send.modelV2,
                           lat_active=sm['carControl'].latActive,
                           left_edge=left_edge, right_edge=right_edge, is_rhd=is_rhd)
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
+      # [AUTO_LC_20261108] 恢复在 02029409b0「DH.update() 签名兼容」中被删掉的
+      # 两个参数。此前 _ao_aa.direction 是死值，AO/AA 只写日志、从不发起变道。
+      # 现在把方向交给 DesireHelper，由它复用全部原生安全门后生成变道 desire。
+      try:
+        DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
+                  auto_lane_change_direction=_ao_aa.direction,
+                  auto_confirm_delay_sec=_ao_aa.confirm_delay_sec)
+      except Exception:
+        cloudlog.exception('auto lane change injection failed')
+        DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
