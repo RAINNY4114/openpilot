@@ -12,6 +12,52 @@ LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 LANE_CHANGE_START_TIME = 0.5
 
+# [BSD_20261108] Blind spot detection delay and counter (cpv9-inspired)
+BSD_DETECTED_HOLD_SEC = 1.5   # Keep BSD active for 1.5s after last detection
+BSD_EXIST_THRESHOLD = 3       # Need 3 consecutive frames to confirm
+SIDE_LEAD_DANGER_DIST = 5.0   # m, side lead within this distance blocks lane change
+
+class ExistCounter:
+  """Debounce counter: confirms a signal after N consecutive True frames."""
+  def __init__(self, threshold: int = BSD_EXIST_THRESHOLD):
+    self.threshold = threshold
+    self.cnt = 0
+    self.state = False
+
+  def update(self, detected: bool) -> None:
+    if detected:
+      self.cnt = min(self.cnt + 1, self.threshold)
+    else:
+      self.cnt = max(self.cnt - 1, 0)
+    self.state = self.cnt >= self.threshold
+
+  def reset(self) -> None:
+    self.cnt = 0
+    self.state = False
+
+# [BSD_20261108] Blind spot detection delay and counter (cpv9-inspired)
+BSD_DETECTED_HOLD_SEC = 1.5   # Keep BSD active for 1.5s after last detection
+BSD_EXIST_THRESHOLD = 3       # Need 3 consecutive frames to confirm
+SIDE_LEAD_DANGER_DIST = 5.0   # m, side lead within this distance blocks lane change
+
+class ExistCounter:
+  """Debounce counter: confirms a signal after N consecutive True frames."""
+  def __init__(self, threshold: int = BSD_EXIST_THRESHOLD):
+    self.threshold = threshold
+    self.cnt = 0
+    self.state = False
+
+  def update(self, detected: bool) -> None:
+    if detected:
+      self.cnt = min(self.cnt + 1, self.threshold)
+    else:
+      self.cnt = max(self.cnt - 1, 0)
+    self.state = self.cnt >= self.threshold
+
+  def reset(self) -> None:
+    self.cnt = 0
+    self.state = False
+
 TURN_DESIRES = {
   TurnDirection.none: log.Desire.none,
   TurnDirection.turnLeft: log.Desire.turnLeft,
@@ -28,6 +74,18 @@ class DesireHelper:
     self.alc = AutoLaneChangeController(self)
     self.lane_turn_controller = LaneTurnController(self)
     self.lane_turn_direction = TurnDirection.none
+    # [BSD_20261108] Blind spot debouncing
+    self.left_bsd_counter = ExistCounter()
+    self.right_bsd_counter = ExistCounter()
+    self.bsd_hold_timer = 0.0  # Timer to hold BSD detection after last signal
+    self.left_bsd_active = False
+    self.right_bsd_active = False
+    # [BSD_20261108] Blind spot debouncing
+    self.left_bsd_counter = ExistCounter()
+    self.right_bsd_counter = ExistCounter()
+    self.bsd_hold_timer = 0.0  # Timer to hold BSD detection after last signal
+    self.left_bsd_active = False
+    self.right_bsd_active = False
 
   @staticmethod
   def get_lane_change_direction(CS):
@@ -64,8 +122,22 @@ class DesireHelper:
                          ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
                           (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right))
 
-        blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
-                              (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
+        # [BSD_20261108] Debounced blind spot + side radar distance check
+        raw_left_bsd = carstate.leftBlindspot
+        raw_right_bsd = carstate.rightBlindspot
+        self.left_bsd_counter.update(raw_left_bsd)
+        self.right_bsd_counter.update(raw_right_bsd)
+        # Hold BSD active for BSD_DETECTED_HOLD_SEC after last detection
+        any_bsd_raw = raw_left_bsd or raw_right_bsd
+        if any_bsd_raw:
+          self.bsd_hold_timer = BSD_DETECTED_HOLD_SEC
+        else:
+          self.bsd_hold_timer = max(0.0, self.bsd_hold_timer - DT_MDL)
+        bsd_holding = self.bsd_hold_timer > 0.0
+        self.left_bsd_active = self.left_bsd_counter.state or (raw_left_bsd and bsd_holding)
+        self.right_bsd_active = self.right_bsd_counter.state or (raw_right_bsd and bsd_holding)
+        blindspot_detected = ((self.left_bsd_active and self.lane_change_direction == LaneChangeDirection.left) or
+                              (self.right_bsd_active and self.lane_change_direction == LaneChangeDirection.right))
 
         edge_detected = ((left_edge_detected and self.lane_change_direction == LaneChangeDirection.left) or
                          (right_edge_detected and self.lane_change_direction == LaneChangeDirection.right))

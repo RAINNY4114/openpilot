@@ -21,7 +21,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 
 J_CRUISE_VALS = [2.2, 1.6, 1.1, 0.8, 0.60, 0.42, 0.34, 0.28, 0.22, 0.025]
 J_CRUISE_BP = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
-A_CRUISE_MIN = -0.5
+A_CRUISE_MIN = -1.2  # [BSD_20261108] was -0.5, increased for faster decel
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 
@@ -31,6 +31,29 @@ def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt):
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
   return target_accel
+
+
+# [BSD_20261108] Limit longitudinal acceleration in turns (cpv9-inspired)
+# When lateral acceleration is high, reduce max longitudinal accel to maintain stability
+TURN_ACCEL_LIMIT = 2.0   # m/s^2 lateral accel threshold
+MAX_ACCEL_IN_TURN = 1.0  # m/s^2 max longitudinal accel when in turn
+
+
+def limit_accel_in_turns(v_ego, steer_angle, steer_ratio, wheel_base, accel):
+  """Reduce longitudinal acceleration when going through a curve."""
+  if v_ego < 5.0:
+    return accel
+  # Estimate lateral acceleration from steer angle
+  steer_rad = steer_angle * (3.14159 / 180) / steer_ratio
+  if abs(steer_rad) < 0.001:
+    return accel
+  curvature = steer_rad / wheel_base
+  lat_accel = v_ego * v_ego * abs(curvature)
+  if lat_accel > TURN_ACCEL_LIMIT:
+    # Scale down longitudinal accel proportionally
+    factor = max(0.0, 1.0 - (lat_accel - TURN_ACCEL_LIMIT) / TURN_ACCEL_LIMIT)
+    return min(accel, MAX_ACCEL_IN_TURN * factor)
+  return accel
 
 
 class LongitudinalPlanner(LongitudinalPlannerSP):
@@ -47,6 +70,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
     self.output_a_target = init_a
+    self._steer_ratio = CP.steerRatio if hasattr(CP, 'steerRatio') else 15.0
+    self._wheel_base = CP.wheelbase if hasattr(CP, 'wheelbase') else 2.8
+    self._steer_ratio = CP.steerRatio if hasattr(CP, 'steerRatio') else 15.0
+    self._wheel_base = CP.wheelbase if hasattr(CP, 'wheelbase') else 2.8
     self.output_should_stop = False
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)

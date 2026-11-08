@@ -21,6 +21,20 @@ from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 # Default lead acceleration decay set to 50% at 1s
 _LEAD_ACCEL_TAU = 1.5
 
+# [BSD_20261108] Side lead detection parameters
+LANE_WIDTH_MIN = 2.5      # m, minimum lane width to consider side leads
+SIDE_LEAD_Y_MIN = 1.5     # m, minimum |yRel| to be a side lead
+SIDE_LEAD_Y_MAX = 5.0     # m, maximum |yRel| for side lead zone
+SIDE_LEAD_D_MAX = 10.0    # m, maximum dRel for side lead (rear blind zone)
+SIDE_LEAD_D_MIN = -5.0    # m, minimum dRel (slightly behind is still blind spot)
+
+# [BSD_20261108] Side lead detection parameters
+LANE_WIDTH_MIN = 2.5      # m, minimum lane width to consider side leads
+SIDE_LEAD_Y_MIN = 1.5     # m, minimum |yRel| to be a side lead
+SIDE_LEAD_Y_MAX = 5.0     # m, maximum |yRel| for side lead zone
+SIDE_LEAD_D_MAX = 10.0    # m, maximum dRel for side lead (rear blind zone)
+SIDE_LEAD_D_MIN = -5.0    # m, minimum dRel (slightly behind is still blind spot)
+
 # radar tracks
 SPEED, ACCEL = 0, 1     # Kalman filter states enum
 
@@ -182,6 +196,23 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
   return lead_dict
 
 
+def get_lead_side(v_ego: float, tracks: dict[int, Track], side: str = "left") -> dict[str, Any]:
+  """[BSD_20261108] Get side lead (blind spot) from radar tracks."""
+  sign = -1.0 if side == "left" else 1.0
+  side_tracks = []
+  for t in tracks.values():
+    if t.cnt < 3:
+      continue
+    y_in_zone = (sign * t.yRel) > SIDE_LEAD_Y_MIN and (sign * t.yRel) < SIDE_LEAD_Y_MAX
+    d_in_zone = t.dRel < SIDE_LEAD_D_MAX and t.dRel > SIDE_LEAD_D_MIN
+    if y_in_zone and d_in_zone:
+      side_tracks.append(t)
+  if len(side_tracks) == 0:
+    return {"present": False}
+  closest = min(side_tracks, key=lambda c: abs(c.dRel))
+  return closest.get_RadarState()
+
+
 def get_custom_yrel(CP: structs.CarParams, CP_SP: structs.CarParamsSP, lead_dict: dict[str, Any],
                     lead_msg: capnp._DynamicStructReader) -> dict[str, Any]:
   if CP.brand == "hyundai" and (CP_SP.flags & HyundaiFlagsSP.ENHANCED_SCC or
@@ -261,6 +292,10 @@ class RadarD:
                                           self.CP, self.CP_SP, low_speed_override=True)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
                                           self.CP, self.CP_SP, low_speed_override=False)
+
+      # [BSD_20261108] Publish side leads (blind spot detection)
+      self.radar_state.leadLeft = get_lead_side(self.v_ego, self.tracks, side="left")
+      self.radar_state.leadRight = get_lead_side(self.v_ego, self.tracks, side="right")
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

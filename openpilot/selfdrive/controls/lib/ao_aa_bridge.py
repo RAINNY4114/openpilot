@@ -427,6 +427,48 @@ class AoAaBridge:
       except Exception:
         lz, rz, rf = None, None, None
 
+      # [BSD_20261108] Side radar leads from radarState (leadLeft/leadRight)
+      side_lead_left_d = None
+      side_lead_right_d = None
+      try:
+        rs = sm['radarState']
+        if rs.leadLeft.present:
+          side_lead_left_d = float(rs.leadLeft.dRel)
+        if rs.leadRight.present:
+          side_lead_right_d = float(rs.leadRight.dRel)
+      except Exception:
+        pass
+      # If side lead is within danger zone, treat as BSM detected
+      if side_lead_left_d is not None and side_lead_left_d < 5.0:
+        cs_left_bsm_effective = True
+      else:
+        cs_left_bsm_effective = bool(cs.leftBlindspot)
+      if side_lead_right_d is not None and side_lead_right_d < 5.0:
+        cs_right_bsm_effective = True
+      else:
+        cs_right_bsm_effective = bool(cs.rightBlindspot)
+
+      # [BSD_20261108] Side radar leads from radarState (leadLeft/leadRight)
+      side_lead_left_d = None
+      side_lead_right_d = None
+      try:
+        rs = sm['radarState']
+        if rs.leadLeft.present:
+          side_lead_left_d = float(rs.leadLeft.dRel)
+        if rs.leadRight.present:
+          side_lead_right_d = float(rs.leadRight.dRel)
+      except Exception:
+        pass
+      # If side lead is within danger zone, treat as BSM detected
+      if side_lead_left_d is not None and side_lead_left_d < 5.0:
+        cs_left_bsm_effective = True
+      else:
+        cs_left_bsm_effective = bool(cs.leftBlindspot)
+      if side_lead_right_d is not None and side_lead_right_d < 5.0:
+        cs_right_bsm_effective = True
+      else:
+        cs_right_bsm_effective = bool(cs.rightBlindspot)
+
       mr76_l_occ = bool((mr76_lane // 10) % 10) if mr76_fresh else None
       mr76_r_occ = bool(mr76_lane % 10) if mr76_fresh else None
       tgt_l = bool((mr76_gain_lane // 10) % 10) if mr76_gain_fresh else None
@@ -445,8 +487,8 @@ class AoAaBridge:
         is_rhd=bool(is_rhd),
         manual_blinker=bool(cs.leftBlinker or cs.rightBlinker),
         bsm_available=True,
-        left_bsm=bool(cs.leftBlindspot),
-        right_bsm=bool(cs.rightBlindspot),
+        left_bsm=cs_left_bsm_effective,
+        right_bsm=cs_right_bsm_effective,
         left_rear_zone=lz,
         right_rear_zone=rz,
         rear_sensor_fault=rf,
@@ -574,8 +616,8 @@ class AoAaBridge:
         is_rhd=bool(is_rhd),
         manual_blinker=bool(cs.leftBlinker or cs.rightBlinker),
         bsm_available=True,
-        left_bsm_blocked=bool(cs.leftBlindspot),
-        right_bsm_blocked=bool(cs.rightBlindspot),
+        left_bsm_blocked=cs_left_bsm_effective,
+        right_bsm_blocked=cs_right_bsm_effective,
         obstacle_dist=obs_d,
         obstacle_rel_speed=obs_vr,
         lead_dist=float(lead.dRel) if lead is not None else None,

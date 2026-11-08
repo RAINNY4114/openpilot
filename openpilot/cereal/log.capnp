@@ -737,6 +737,8 @@ struct RadarState @0x9a185389d6fdd05f {
 
   leadOne @3 :LeadData;
   leadTwo @4 :LeadData;
+  leadLeft @14 :LeadData;   # [BSD_20261108] left side lead (blind spot)
+  leadRight @15 :LeadData;  # [BSD_20261108] right side lead (blind spot)
 
   struct LeadData {
     dRel @0 :Float32;  # m from the front bumper of the car
