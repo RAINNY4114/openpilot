@@ -53,6 +53,47 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
+# =================================================================================================
+# [LOC_TEMP_FIX_20261109] 检查并修正此前处理 "locationd Temporary Error" 的方法
+#
+# 此前的方法（chestnut 大模型适配时引入）：用 big_model_settling 在加载窗口内一次性抑制
+# commIssue / 定位类 / 硬件类共 8 类告警。实测有三个缺陷：
+#   1) 完全依赖 ChestnutLoading 参数。参数未写（offroad、未插 eGPU、modeld 未起）时
+#      big_model_settling 恒 False，抑制整体失效。11-02 已发现，最新 rlog 仍复现。
+#   2) ChestnutLoading 若卡在 True（加载失败/超时未清），big_model_settling 会永久为 True，
+#      8 类告警被无限期屏蔽，真实硬件/定位故障无声。
+#   3) 加载窗口外的 inputsOK 单帧毛刺完全没处理。locationd 里
+#      inputs_valid = sm.all_valid() and critical_service_inputs_valid，任一服务单帧 invalid
+#      即 inputsOK=False；selfdrived 立刻 add locationdTemporaryError(NO_ENTRY + SOFT_DISABLE)。
+#      最新 rlog：一段 1200 帧里仅 1~2 帧 False，就产生 1~3 次告警并可导致瞬时软退出。
+#
+# 修正（保留原方法"加载期不误报"的效果，补齐上述缺陷）：
+#   * big_model_settling 加硬上限（默认 120s，与 BIG_MODEL_TIMEOUT 对齐），warmup 分支要求
+#     big_model_ready_t 确实被写过，杜绝永久屏蔽。
+#   * locationdTemporaryError 改为 inputsOK 需连续无效 >= LocTempDebounceSec(默认 0.5s) 才上报，
+#     单帧毛刺不再阻止 engage / 触发软退出。该逻辑不依赖任何参数，所有场景都生效。
+#   * 安全兜底：连续无效 >= LocTempHardSec(默认 10s) 时，即使仍在加载窗口也照常上报，
+#     避免真定位故障被窗口吞掉。
+# 热配参数（/data/ford_params/ 纯文本，缺失即用默认值，1Hz 节流读取）：
+#   LocTempDebounceSec       0.0~5.0    默认 0.5
+#   LocTempHardSec           3.0~60.0   默认 10.0
+#   BigModelSettlingMaxSec   30~300     默认 120.0
+# =================================================================================================
+_PARAM_DIR = "/data/ford_params"
+LOC_TEMP_DEBOUNCE_SEC = 0.5
+LOC_TEMP_HARD_SEC = 10.0
+BIG_MODEL_SETTLING_MAX_SEC = 120.0
+
+
+def _ford_num(key: str, default: float, lo: float, hi: float) -> float:
+  """Read a hot-reloadable numeric param from /data/ford_params, fall back to default."""
+  try:
+    with open(f"{_PARAM_DIR}/{key}") as f:
+      v = float(f.read().strip())
+    return min(hi, max(lo, v))
+  except Exception:
+    return default
+
 
 class SelfdriveD:
   def __init__(self, CP=None, CP_SP=None):
@@ -85,6 +126,14 @@ class SelfdriveD:
     self.big_model_active = False
     self.big_model_failed = False
     self.big_model_ready_t = 0.
+    # [LOC_TEMP_FIX_20261109] 加载窗口起点 + inputsOK 去抖状态
+    self.big_model_loading_t = 0.
+    self.loc_inputs_bad_t = 0.
+    self.loc_reported = False
+    self.loc_cfg_t = 0.
+    self.loc_debounce_sec = LOC_TEMP_DEBOUNCE_SEC
+    self.loc_hard_sec = LOC_TEMP_HARD_SEC
+    self.settling_max_sec = BIG_MODEL_SETTLING_MAX_SEC
 
     # Setup sockets
     self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'])
@@ -191,6 +240,8 @@ class SelfdriveD:
       self.startup_event = None
 
     loading = self.params.get_bool("ChestnutLoading")
+    if loading and not self.big_model_loading:
+      self.big_model_loading_t = time.monotonic()  # [LOC_TEMP_FIX_20261109] 窗口起点, 用于硬上限
     if self.big_model_loading and not loading:
       self.big_model_ready_t = time.monotonic()
       self.events_sp.add(custom.OnroadEventSP.EventName.bigModelReady)
@@ -430,7 +481,36 @@ class SelfdriveD:
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
     warmup_sec = 5.
-    big_model_settling = self.big_model_loading or time.monotonic() < self.big_model_ready_t + warmup_sec
+    now = time.monotonic()
+
+    # [LOC_TEMP_FIX_20261109] 热配参数 1Hz 节流读取, 不增加 100Hz 主循环的文件 IO
+    if now - self.loc_cfg_t >= 1.0:
+      self.loc_cfg_t = now
+      self.loc_debounce_sec = _ford_num("LocTempDebounceSec", LOC_TEMP_DEBOUNCE_SEC, 0.0, 5.0)
+      self.loc_hard_sec = _ford_num("LocTempHardSec", LOC_TEMP_HARD_SEC, 3.0, 60.0)
+      self.settling_max_sec = _ford_num("BigModelSettlingMaxSec", BIG_MODEL_SETTLING_MAX_SEC, 30.0, 300.0)
+
+    # 原方法在这里是 "self.big_model_loading or now < ready_t + 5s": 无上限, 参数卡 True 会永久屏蔽。
+    # 现在两段都要求时间戳确实被写过, 且 loading 段有硬上限。
+    loading_settling = (self.big_model_loading and self.big_model_loading_t > 0. and
+                        (now - self.big_model_loading_t) < self.settling_max_sec)
+    warmup_settling = self.big_model_ready_t > 0. and now < self.big_model_ready_t + warmup_sec
+    big_model_settling = loading_settling or warmup_settling
+
+    # inputsOK 连续无效计时。特意放在加载窗口之外累积: 窗口一结束就能立即反映真实状态,
+    # 不会被 5s warmup 再拖一轮。seen=False 视为未收到消息(沿用上游语义, 不算定位故障)。
+    dm_seen = self.sm.seen['deviceMotion']
+    inputs_ok = (not dm_seen) or bool(self.sm['deviceMotion'].inputsOK)
+    if not inputs_ok:
+      if self.loc_inputs_bad_t == 0.:
+        self.loc_inputs_bad_t = now
+    else:
+      self.loc_inputs_bad_t = 0.
+      self.loc_reported = False
+    loc_bad_dur = (now - self.loc_inputs_bad_t) if self.loc_inputs_bad_t > 0. else 0.
+    loc_inputs_bad = loc_bad_dur >= self.loc_debounce_sec
+    loc_inputs_hard = loc_bad_dur >= max(self.loc_hard_sec, self.loc_debounce_sec)
+
     if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
       if not self.sm.all_alive():
         self.events.add(EventName.commIssue)
@@ -450,12 +530,18 @@ class SelfdriveD:
     else:
       self.logged_comm_issue = None
 
-    if not self.CP.notCar and not big_model_settling:  # localization has nothing to work with during the load
+    # [LOC_TEMP_FIX_20261109] 加载窗口仍抑制预期内的定位抖动, 但连续无效超过硬阈值时
+    # 必须放行 —— 真定位故障不能被大模型加载窗口吞掉。
+    if not self.CP.notCar and (not big_model_settling or loc_inputs_hard):
       # the defaults of a message that was never received are not a localizer failure
-      if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].posenetOK:
+      if dm_seen and not self.sm['deviceMotion'].posenetOK:
         self.events.add(EventName.posenetInvalid)
-      if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].inputsOK:
+      if dm_seen and loc_inputs_bad:
         self.events.add(EventName.locationdTemporaryError)
+        if not self.loc_reported:
+          cloudlog.warning(f"locationdTemporaryError: inputsOK invalid for {loc_bad_dur:.2f}s "
+                           f"(debounce={self.loc_debounce_sec:.2f}s, settling={big_model_settling})")
+          self.loc_reported = True
       if (self.sm.seen['vehicleParameters'] and not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
           not TESTING_CLOSET and (not SIMULATION or REPLAY)):
         self.events.add(EventName.paramsdTemporaryError)
