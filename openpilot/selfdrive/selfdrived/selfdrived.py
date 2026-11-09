@@ -122,6 +122,46 @@ MODEL_LAG_SMALL_PERC = 1.0
 MODEL_LAG_HARD_PERC = 60.0
 MODEL_LAG_DEBOUNCE_SEC = 2.0
 
+# =================================================================================================
+# [COMM_ISSUE_FIX_20261109] "Communication Issue Between Processes" 误报修复
+#
+# 实测（2026-11-09 route 0000009c / 0000009d，rlog 逐帧对齐）：
+#   commIssue 出现时 managerState.processes 全部 shouldBeRunning=running，
+#   memoryUsagePercent 60%、frameDropPerc < 5.2%，没有任何进程崩溃或资源异常。
+#   cloudlog 明细里 not_alive/not_freq_ok 恒为 ['alertDebug','lateralManeuverPlan']
+#   （这两个已在 ignore 列表，只是明细遍历原始 dict 时的噪音，并非触发者）；
+#   真正的触发者是 invalid 列表中的 5 个学习参数服务：
+#     extrinsicsCalibration / driverMonitoringState / vehicleParameters /
+#     lateralDelay / lateralTorqueParameters
+#
+# 根因：calibrationd -> paramsd/torqued/lagd -> dmonitoringd 这条学习链路，
+#   每个进程都用 `msg.valid = sm.all_checks()` 作为自己输出消息的 Event.valid。
+#   任一上游输入单帧抖动，整条链会在同一时刻连锁发出 Event.valid=False。
+#   SubMaster.update_msgs() 里 `self.valid[s] = msg.valid`，于是 selfdrived 的
+#   all_checks() 把这些"内容尚未收敛"误判为"进程间通信中断"，
+#   触发 commIssue（NO_ENTRY + SOFT_DISABLE），行车中直接打断 ACC。
+#   逐帧证据：这 5 个服务 Event.valid=False 的帧仅占 0.8%~3.4%，
+#   其时间戳与 commIssue 时间窗完全重合；无告警的段则 100% 为 True。
+#   注意 lateralTorqueParameters 的**结构体内部** valid 全程 False，
+#   那是 torqued 学习器自身状态，与 SubMaster 使用的 Event.valid 无关。
+#
+# 修正（只放宽"内容 valid"，绝不放宽通信活性）：
+#   * 仅把这 5 个服务加入 ignore_valid；ignore_alive 与 ignore_avg_freq 保持原样。
+#     进程崩溃 / 停止发布 / 频率异常仍会照常触发 commIssue。
+#   * 启动期(从未收到过第一帧)同样豁免，避免点火后必然误报。
+#   * 硬兜底：已 seen 的服务若连续 invalid >= CommIssueLearnerHardSec(默认 5s)，
+#     临时撤掉豁免，真实的学习链路故障仍会报警，不会永久屏蔽。
+#   * cloudlog 明细改为只列真正参与 all_checks() 判定的服务，避免误导排查。
+# 热配（/data/ford_params/，1Hz 节流，缺失即用默认值）：
+#   CommIssueIgnoreLearnerValid  0/1    默认 1（写 0 可一键回退到上游行为）
+#   CommIssueLearnerHardSec     0~30   默认 5.0
+# =================================================================================================
+COMM_ISSUE_LEARNER_SERVICES = (
+  'extrinsicsCalibration', 'driverMonitoringState', 'vehicleParameters',
+  'lateralDelay', 'lateralTorqueParameters',
+)
+COMM_ISSUE_LEARNER_HARD_SEC = 5.0
+
 
 def _ford_num(key: str, default: float, lo: float, hi: float) -> float:
   """Read a hot-reloadable numeric param from /data/ford_params, fall back to default."""
@@ -179,6 +219,10 @@ class SelfdriveD:
     self.model_lag_small_perc = MODEL_LAG_SMALL_PERC
     self.model_lag_hard_perc = MODEL_LAG_HARD_PERC
     self.model_lag_debounce_sec = MODEL_LAG_DEBOUNCE_SEC
+    # [COMM_ISSUE_FIX_20261109] 学习参数 valid 豁免状态与热配值
+    self.comm_learner_ignore = True
+    self.comm_learner_hard_sec = COMM_ISSUE_LEARNER_HARD_SEC
+    self.comm_learner_bad_t = 0.
 
     # Setup sockets
     self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'])
@@ -197,6 +241,8 @@ class SelfdriveD:
     if REPLAY:
       # no vipc in replay will make them ignored anyways
       ignore += ['narrowRoadCameraState', 'wideRoadCameraState']
+    # [COMM_ISSUE_FIX_20261109] 学习参数服务只忽略"内容 valid"，alive / avg_freq 仍严格检查
+    ignore_valid = ignore + list(COMM_ISSUE_LEARNER_SERVICES)
     self.sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'extrinsicsCalibration',
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'deviceMotion', 'lateralDelay',
                                    'managerState', 'vehicleParameters', 'radarState', 'lateralTorqueParameters',
@@ -204,7 +250,7 @@ class SelfdriveD:
                                    'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
-                                  ignore_valid=ignore, frequency=int(1/DT_CTRL))
+                                  ignore_valid=ignore_valid, frequency=int(1/DT_CTRL))
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
@@ -538,6 +584,9 @@ class SelfdriveD:
       self.model_lag_small_perc = _ford_num("ModelLagSmallPerc", MODEL_LAG_SMALL_PERC, 0.0, 20.0)
       self.model_lag_hard_perc = _ford_num("ModelLagHardPerc", MODEL_LAG_HARD_PERC, 20.0, 100.0)
       self.model_lag_debounce_sec = _ford_num("ModelLagDebounceSec", MODEL_LAG_DEBOUNCE_SEC, 0.0, 10.0)
+      # [COMM_ISSUE_FIX_20261109]
+      self.comm_learner_ignore = _ford_num("CommIssueIgnoreLearnerValid", 1.0, 0.0, 1.0) >= 0.5
+      self.comm_learner_hard_sec = _ford_num("CommIssueLearnerHardSec", COMM_ISSUE_LEARNER_HARD_SEC, 0.0, 30.0)
 
     # 原方法在这里是 "self.big_model_loading or now < ready_t + 5s": 无上限, 参数卡 True 会永久屏蔽。
     # 现在两段都要求时间戳确实被写过, 且 loading 段有硬上限。
@@ -560,6 +609,26 @@ class SelfdriveD:
     loc_inputs_bad = loc_bad_dur >= self.loc_debounce_sec
     loc_inputs_hard = loc_bad_dur >= max(self.loc_hard_sec, self.loc_debounce_sec)
 
+    # [COMM_ISSUE_FIX_20261109] 学习链路的 Event.valid 瞬时抖动不是通信故障。
+    # 只豁免"已收到过消息但内容未收敛"的短暂窗口；持续 invalid 超硬阈值则撤掉豁免，
+    # 真实的学习链路故障仍能触发 commIssue。alive / freq_ok 检查始终不豁免。
+    learner_bad = any(self.sm.seen.get(s, False) and not self.sm.valid.get(s, True)
+                      for s in COMM_ISSUE_LEARNER_SERVICES)
+    if learner_bad:
+      if self.comm_learner_bad_t == 0.:
+        self.comm_learner_bad_t = now
+    else:
+      self.comm_learner_bad_t = 0.
+    learner_bad_dur = (now - self.comm_learner_bad_t) if self.comm_learner_bad_t > 0. else 0.
+    learner_hard = learner_bad_dur >= max(self.comm_learner_hard_sec, 0.0)
+    learner_ignore = self.comm_learner_ignore and not learner_hard
+    for _svc in COMM_ISSUE_LEARNER_SERVICES:
+      if learner_ignore:
+        if _svc not in self.sm.ignore_valid:
+          self.sm.ignore_valid.append(_svc)
+      elif _svc in self.sm.ignore_valid:
+        self.sm.ignore_valid.remove(_svc)
+
     if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
       if not self.sm.all_alive():
         self.events.add(EventName.commIssue)
@@ -568,10 +637,15 @@ class SelfdriveD:
       else:
         self.events.add(EventName.commIssue)
 
+      # 只列真正参与 all_checks() 判定的服务，避免把已在 ignore 中的项当故障记录
       logs = {
-        'invalid': [s for s, valid in self.sm.valid.items() if not valid],
-        'not_alive': [s for s, alive in self.sm.alive.items() if not alive],
-        'not_freq_ok': [s for s, freq_ok in self.sm.freq_ok.items() if not freq_ok],
+        'invalid': [s for s, valid in self.sm.valid.items()
+                    if not valid and s not in self.sm.ignore_valid],
+        'not_alive': [s for s, alive in self.sm.alive.items()
+                      if not alive and s not in self.sm.ignore_alive],
+        'not_freq_ok': [s for s, freq_ok in self.sm.freq_ok.items()
+                        if not freq_ok and s not in self.sm.ignore_alive
+                        and s not in self.sm.ignore_average_freq],
       }
       if logs != self.logged_comm_issue:
         cloudlog.event("commIssue", error=True, **logs)
