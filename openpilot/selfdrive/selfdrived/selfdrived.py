@@ -84,6 +84,44 @@ LOC_TEMP_DEBOUNCE_SEC = 0.5
 LOC_TEMP_HARD_SEC = 10.0
 BIG_MODEL_SETTLING_MAX_SEC = 120.0
 
+# =================================================================================================
+# [MODEL_LAG_FIX_20261109] 检查并修正此前处理 "Driving Model Lagging / N% frames dropped" 的方法
+#
+# 历史方法（git 历史 368ce473a6，标记 [CHX_LAG_TOLERANCE 20261017]）：
+#   chestnut 大模型走 eGPU(USB3) 时推理 71.5ms/帧（upload 40.4ms 是隧道瓶颈），
+#   超 20Hz 的 50ms 预算，稳定掉帧约 34%；上游 1% 阈值会永久触发 modeldLagging
+#   （NO_ENTRY + SOFT_DISABLE），ACC 无法接合。当时把 `> 1` 放宽到 `> 50`。
+#   该方法在后续 staging 更新中被冲掉，现所有分支又变回 `> 1 and not big_model_settling`。
+#
+# 实测（2026-11-09 今早 route 0000009b，分辨率已降到 1344x760 后）：
+#   modelV2.big 全程 True，modelExecutionTime 约 36.5ms（在 50ms 预算内），
+#   大部分段 frameDropPerc=0；仅段 1 有 2.5% 峰值 / 均值 0.5%，
+#   但 18.8% 的帧 >1%，硬触发了 31 次 modeldLagging。用户反馈提示约 12%。
+#   frameDropPerc 是 10s 一阶滤波的 frames_dropped/(1+frames_dropped)：
+#   12% 约等于 17.6Hz 的降级推理，每帧仍是完整推理，不是模型失效。
+#
+# 原方法 / 现状的问题：
+#   1) 单一 1% 阈值对大模型过严，降级运行也被判为故障并挡住 engage。
+#   2) 历史 50% 硬编码又过松：模型掉一半帧还继续开，且对小模型同样放宽，安全风险。
+#   3) big_model_settling 只覆盖加载窗口；行驶中的偶发掉帧完全不设防（参数未写时恒 False）。
+#   4) 单帧尖峰即报，没有持续时间判断。
+#
+# 修正：区分大小模型 + 去抖 + 硬兜底，全部阈值热配：
+#   * 大模型(big=True) 用 ModelLagBigPerc(默认 25%，覆盖实测 12% 并留 2x 余量)；
+#     小模型保持上游严格阈值 ModelLagSmallPerc(默认 1%)。
+#   * 超阈值需持续 ModelLagDebounceSec(默认 2s) 才上报，滤掉单帧尖峰。
+#   * 掉帧 >= ModelLagHardPerc(默认 60%) 视为模型近乎不工作，立即上报且不受加载窗口抑制。
+# 热配（/data/ford_params/，1Hz 节流，缺失即用默认值）：
+#   ModelLagBigPerc      1~80    默认 25.0
+#   ModelLagSmallPerc    0~20    默认 1.0
+#   ModelLagHardPerc     20~100  默认 60.0
+#   ModelLagDebounceSec  0~10    默认 2.0
+# =================================================================================================
+MODEL_LAG_BIG_PERC = 25.0
+MODEL_LAG_SMALL_PERC = 1.0
+MODEL_LAG_HARD_PERC = 60.0
+MODEL_LAG_DEBOUNCE_SEC = 2.0
+
 
 def _ford_num(key: str, default: float, lo: float, hi: float) -> float:
   """Read a hot-reloadable numeric param from /data/ford_params, fall back to default."""
@@ -134,6 +172,13 @@ class SelfdriveD:
     self.loc_debounce_sec = LOC_TEMP_DEBOUNCE_SEC
     self.loc_hard_sec = LOC_TEMP_HARD_SEC
     self.settling_max_sec = BIG_MODEL_SETTLING_MAX_SEC
+    # [MODEL_LAG_FIX_20261109] 掉帧率超阈值计时与热配值
+    self.model_lag_over_t = 0.
+    self.model_lag_reported = False
+    self.model_lag_big_perc = MODEL_LAG_BIG_PERC
+    self.model_lag_small_perc = MODEL_LAG_SMALL_PERC
+    self.model_lag_hard_perc = MODEL_LAG_HARD_PERC
+    self.model_lag_debounce_sec = MODEL_LAG_DEBOUNCE_SEC
 
     # Setup sockets
     self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'])
@@ -489,6 +534,10 @@ class SelfdriveD:
       self.loc_debounce_sec = _ford_num("LocTempDebounceSec", LOC_TEMP_DEBOUNCE_SEC, 0.0, 5.0)
       self.loc_hard_sec = _ford_num("LocTempHardSec", LOC_TEMP_HARD_SEC, 3.0, 60.0)
       self.settling_max_sec = _ford_num("BigModelSettlingMaxSec", BIG_MODEL_SETTLING_MAX_SEC, 30.0, 300.0)
+      self.model_lag_big_perc = _ford_num("ModelLagBigPerc", MODEL_LAG_BIG_PERC, 1.0, 80.0)
+      self.model_lag_small_perc = _ford_num("ModelLagSmallPerc", MODEL_LAG_SMALL_PERC, 0.0, 20.0)
+      self.model_lag_hard_perc = _ford_num("ModelLagHardPerc", MODEL_LAG_HARD_PERC, 20.0, 100.0)
+      self.model_lag_debounce_sec = _ford_num("ModelLagDebounceSec", MODEL_LAG_DEBOUNCE_SEC, 0.0, 10.0)
 
     # 原方法在这里是 "self.big_model_loading or now < ready_t + 5s": 无上限, 参数卡 True 会永久屏蔽。
     # 现在两段都要求时间戳确实被写过, 且 loading 段有硬上限。
@@ -590,8 +639,29 @@ class SelfdriveD:
 
     # TODO: fix simulator
     if not SIMULATION or REPLAY:
-      if self.sm['modelV2'].frameDropPerc > 1 and not big_model_settling:
+      # [MODEL_LAG_FIX_20261109] 大模型降级推理不等于模型失效, 详见文件头注释
+      mv = self.sm['modelV2']
+      drop = float(mv.frameDropPerc)
+      is_big = bool(mv.big)
+      limit = self.model_lag_big_perc if is_big else self.model_lag_small_perc
+      over = drop > limit
+      hard = drop >= max(self.model_lag_hard_perc, limit)
+      if over:
+        if self.model_lag_over_t == 0.:
+          self.model_lag_over_t = now
+      else:
+        self.model_lag_over_t = 0.
+        self.model_lag_reported = False
+      lag_dur = (now - self.model_lag_over_t) if self.model_lag_over_t > 0. else 0.
+      sustained = lag_dur >= self.model_lag_debounce_sec
+
+      # 硬超限立即上报且不受加载窗口抑制; 其余需持续超阈值, 滤掉单帧尖峰
+      if hard or (over and sustained and not big_model_settling):
         self.events.add(EventName.modeldLagging)
+        if not self.model_lag_reported:
+          cloudlog.warning(f"modeldLagging: frameDropPerc={drop:.1f}% big={is_big} limit={limit:.1f}% "
+                           f"sustained={lag_dur:.1f}s hard={hard} settling={big_model_settling}")
+          self.model_lag_reported = True
 
     # mute canBusMissing event if in Park, as it sometimes may trigger a false alarm with MADS in Paused state
     if CS.gearShifter == car.CarState.GearShifter.park and self.mads.enabled:
