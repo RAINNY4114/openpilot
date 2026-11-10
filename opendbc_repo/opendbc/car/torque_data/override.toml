@@ -42,7 +42,6 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 "FORD_MUSTANG_MACH_E_MK1" = [nan, 1.5, nan]
 "FORD_RANGER_MK2" = [nan, 1.5, nan]
 "LINCOLN_NAUTILUS" = [nan, 1.5, nan]
-###
 
 # No steering wheel
 "COMMA_BODY" = [nan, 1000, nan]

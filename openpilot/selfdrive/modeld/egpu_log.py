@@ -1,14 +1,3 @@
-"""egpu_log.py — [eGPU] 结构化诊断（P1-2 / P2-1，2026-10-27）
-
-设计约束（照 egpucp 的教训）：
-  1. 只写 **stderr** 与独立文件，绝不进 worker 的 stdout —— stdout 是 tinygrad 的协议通道。
-  2. 任何异常都被吞掉：诊断代码永远不能把 modeld 带崩。
-  3. 一条记录一行 JSON，便于 `grep '\\[eGPU\\]' /data/egpu_diag.jsonl | jq`。
-
-为什么需要它：本机大模型失败时**一条日志都没有**（`get_active_bundle(chestnut=True)`
-返回 None 导致整条分支短路），只能事后靠 `chestnutPresent` 猜。有了 `gate` 记录，
-一眼就能看出卡在 bundle 还是卡在硬件。
-"""
 
 import json
 import os
@@ -19,19 +8,9 @@ DIAG_PATH = os.environ.get('EGPU_DIAG_PATH', '/data/egpu_diag.jsonl')
 DIAG_MAX_BYTES = 256 * 1024
 RETRY_PATH = os.environ.get('EGPU_RETRY_PATH', '/data/egpu_retry.json')
 
-# 每 boot 最多请求几次 onroad cycle 来重试大模型（egpucp 用 3，照抄）
-RETRY_MAX = 1  # [SP0920XL_ALIGN_20261101] 对齐 sp0920xl：最多 cycle 一次，别反复重启 modeld
-# 第 1/2/3 次重试的最小间隔（秒）。由 threading.Timer 兑现，不阻塞帧循环。
+RETRY_MAX = 1
 RETRY_BACKOFF = (10.0, 30.0, 60.0)
 
-# ---------------------------------------------------------------------------
-# libusb 错误码分类
-#
-# 关键教训（egpucp）：旧分类器只认 -1，把 +1 = LIBUSB_TRANSFER_ERROR 当成
-# 「数值失败」永久拒绝重试。**正数来自 USB 传输层、负数来自 libusb 调用层**，
-# 必须分开看，否则会把「偶发一次传输错误」升级成「设备永久不可用」。
-# 来源：autogen/libusb.py:204（libusb_transfer_status）与 libusb.h（libusb_error）。
-# ---------------------------------------------------------------------------
 _TRANSFER = {
   0: 'OK',
   1: 'TRANSFER_ERROR',
@@ -57,27 +36,21 @@ _USB = {
   -99: 'OTHER',
 }
 
-
 def classify_error(raw: int) -> str:
-  """把 error_state 的原始整数翻译成可读类别。"""
   if raw == 0:
     return 'ok'
   if raw > 0:
     return 'transfer:' + _TRANSFER.get(raw, f'unknown_{raw}')
   return 'usb:' + _USB.get(raw, f'unknown_{raw}')
 
-
 def boot_id() -> str:
-  """一次开机一个 id。用它给重试预算分段，跨 modeld 重启保留、换 boot 自动归零。"""
   try:
     with open('/proc/sys/kernel/random/boot_id') as f:
       return f.read().strip()
   except OSError:
     return 'unknown'
 
-
 def egpu(event: str, **fields) -> dict:
-  """记一条结构化诊断。永远不抛异常。"""
   rec = {'ts': round(time.time(), 3), 'boot': boot_id()[:8], 'ev': event}
   rec.update(fields)
   try:
@@ -91,7 +64,6 @@ def egpu(event: str, **fields) -> dict:
   _append(line)
   return rec
 
-
 def _append(line: str) -> None:
   try:
     if os.path.exists(DIAG_PATH) and os.path.getsize(DIAG_PATH) > DIAG_MAX_BYTES:
@@ -101,17 +73,8 @@ def _append(line: str) -> None:
   except Exception:
     pass
 
-
 def usb_snapshot() -> dict:
-  """一次 USB 拓扑快照。
-
-  用途是把「零枚举」和「枚举了但传输出错」分开：
-    零枚举      -> nodes == [] 且 devices 里没有 chestnut 的 vendorId
-    在 USB2 侧  -> nodes 非空但 speed < 5000
-    传输出错    -> nodes 在 USB3 侧，但 error_state != 0
-  """
   try:
-    # ⚠️ chestnut_present 在 selfdrive/modeld/helpers.py，**不在** common/hardware/usb.py
     from openpilot.common.hardware.usb import cable_connected, chestnut_nodes, get_usb_state
     from openpilot.selfdrive.modeld.helpers import chestnut_present
     nodes = [{k: v for k, v in n.items() if k != 'sysfs'} for n in chestnut_nodes()]
@@ -124,30 +87,13 @@ def usb_snapshot() -> dict:
   except Exception as e:
     return {'error': repr(e)}
 
-
 def read_error_state(dev: str) -> tuple[int, str]:
-  """读 tinygrad Device 的 error_state[0]。读不到返回 (-1000, 'unavailable:...')。"""
   try:
     from tinygrad.device import Device
     raw = int(Device[dev].error_state.host.view(fmt='q')[0])
     return raw, classify_error(raw)
   except Exception as e:
     return -1000, f'unavailable:{e.__class__.__name__}'
-
-
-# ---------------------------------------------------------------------------
-# 重试预算（P0-2）
-#
-# 原实现只有 `params.put_bool("ChestnutRetry", True)`，而该键带
-# CLEAR_ON_MANAGER_START|CLEAR_ON_IGNITION_ON（params_keys.h:140）——
-# 也就是说**每次 manager 启动就会被清掉**，所以「一次失败永久放弃」的准确说法是
-# 「同一个 manager 生命周期内只重试一次」，跨 manager 重启则无上限、也无退避。
-#
-# 这里换成按 boot_id 记次：上限 3 次、10/30/60 s 退避、换 boot 自动归零。
-# 用文件而不是 Params，是因为 Params 会被 CLEAR_ON_* 清掉，且新增键必须重编
-# libparams_c.so（踩过：不重编 -> UnknownKeyName -> 卡 comma logo）。
-# ---------------------------------------------------------------------------
-
 
 def _load_retry() -> dict:
   try:
@@ -159,7 +105,6 @@ def _load_retry() -> dict:
     pass
   return {'boot': boot_id(), 'count': 0, 'last_ts': 0.0}
 
-
 def _save_retry(st: dict) -> None:
   try:
     tmp = RETRY_PATH + '.tmp'
@@ -169,15 +114,12 @@ def _save_retry(st: dict) -> None:
   except Exception:
     pass
 
-
 def retry_budget() -> tuple[dict, bool, float]:
-  """返回 (state, allowed, backoff)。allowed=False 表示本 boot 预算已用尽。"""
   st = _load_retry()
   idx = int(st.get('count', 0))
   if idx >= RETRY_MAX:
     return st, False, 0.0
   return st, True, RETRY_BACKOFF[min(idx, len(RETRY_BACKOFF) - 1)]
-
 
 def consume_retry(st: dict) -> dict:
   st['count'] = int(st.get('count', 0)) + 1
@@ -185,23 +127,10 @@ def consume_retry(st: dict) -> dict:
   _save_retry(st)
   return st
 
-
 def reset_retry() -> None:
-  """大模型加载成功时调用：本 boot 的失败计数清零，下次失败还能重试。"""
   _save_retry({'boot': boot_id(), 'count': 0, 'last_ts': 0.0})
 
-
 def pcie_ltssm() -> int | None:
-  """只读 ASM2464 的 PCIe LTSSM（0x78 = L0，链路已训练）。读不到返回 None。
-
-  两条读取通道，先 libusb 后 ioctl：
-    1. common/hardware/usb.py 的 chestnut_ltssm()（libusb controlRead 0xC0/0xE4）
-    2. flash.py 的 open_device() + USBDEVFS_CONTROL（直接 ioctl）
-  第 2 条是给 libusb 打不开设备（被 tinygrad 占用 / 权限不足）时兜底的。
-
-  纯读：不发 0x40/0xF3 上电请求，也不改链路状态，所以可以在 tinygrad 初始化的
-  时间窗口里安全调用。参考 onemiless/dev-sp-egpu 的 read_pcie_ltssm()。
-  """
   try:
     from openpilot.common.hardware.usb import chestnut_ltssm, chestnut_nodes
     for node in chestnut_nodes():
@@ -233,14 +162,9 @@ def pcie_ltssm() -> int | None:
       except Exception:
         pass
 
-
-# 一次加载尝试里允许出现的 USB3 链路错误数。超过它说明链路余量不足，
-# 再重试也只是把 modeld 反复重启，不如直接回退小模型。
 LINK_ERR_UNSTABLE = 10
 
-
 def link_err() -> int | None:
-  """chestnut 所在 USB 端口的链路错误计数（xHCI PORTLI 低 16 位）。读不到返回 None。"""
   try:
     from openpilot.common.hardware.usb import get_usb_state
     for dev in get_usb_state():
@@ -250,9 +174,7 @@ def link_err() -> int | None:
     pass
   return None
 
-
 def link_err_delta(before: int | None, after: int | None) -> int:
-  """两次采样的增量，按 16 位回绕处理。任一为 None 时返回 0。"""
   if before is None or after is None:
     return 0
   return (after - before) & 0xFFFF

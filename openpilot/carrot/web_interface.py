@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Web界面模块 - 优化版
-负责HTTP服务器和Web界面处理
-"""
 
 import json
 import os
@@ -15,7 +11,6 @@ from openpilot.system.manager.manager import get_default_params_key
 params = Params()
 
 def get_all_toggle_values():
-  """导出所有 OpenPilot 参数值，bytes -> str"""
   all_keys = get_default_params_key()
   toggle_values = {}
   for key in all_keys:
@@ -26,9 +21,7 @@ def get_all_toggle_values():
     toggle_values[key] = value.decode('utf-8') if value is not None else "0"
   return toggle_values
 
-
 def store_toggle_values(updated_values):
-  """将前端发送的 JSON 写入 OpenPilot Params"""
   for key, value in updated_values.items():
     try:
       params.put(key, value.encode('utf-8'))
@@ -36,7 +29,6 @@ def store_toggle_values(updated_values):
       print(f"Failed to update {key}: {e}")
 
 class WebInterface:
-    """Web界面处理器"""
 
     def __init__(self, controller, port=None):
         self.controller = controller
@@ -44,12 +36,10 @@ class WebInterface:
         self.port = port
 
     def create_web_handler(self):
-        """创建Web处理器"""
         controller = self.controller
 
         class WebPageHTTPHandler(BaseHTTPRequestHandler):
             def safe_write(self, data):
-                """安全写入数据，处理连接中断"""
                 try:
                     if isinstance(data, str):
                         data = data.encode('utf-8')
@@ -61,11 +51,9 @@ class WebInterface:
                     print(f"写入数据时发生错误: {e}")
 
             def log_message(self, format, *args):
-                """自定义日志格式，避免每次请求都打印到控制台"""
                 pass
 
             def do_OPTIONS(self):
-                """处理CORS预检请求"""
                 try:
                     self.send_response(200)
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -77,7 +65,6 @@ class WebInterface:
                     print(f"OPTIONS请求处理错误: {e}")
 
             def do_GET(self):
-                """处理GET请求"""
                 try:
                     if self.path == '/':
                         self.send_response(301)
@@ -130,7 +117,6 @@ class WebInterface:
                     self.send_error(500, f"Internal server erro: {str(e)}")
 
             def do_POST(self):
-                """处理POST请求"""
                 try:
                     content_length = int(self.headers.get('Content-Length', 0))
                     post_data = self.rfile.read(content_length).decode('utf-8')
@@ -166,7 +152,6 @@ class WebInterface:
                 self.send_json_response({"status": "error", "message": f"写入失败: {e}"})
 
             def send_nav_params_page(self):
-                """发送CP导航参数设置页面"""
                 try:
                     html = self.get_html_content('nav_params.html')
                     self.safe_write(html)
@@ -176,7 +161,6 @@ class WebInterface:
                     print(f"发送参数页面错误: {e}")
 
             def send_default_nav_params(self):
-                """发送默认的CP导航参数数据"""
                 try:
                     default_data = controller.params._get_default_nav_data()
                     self.safe_write(json.dumps(default_data, ensure_ascii=False))
@@ -186,7 +170,6 @@ class WebInterface:
                     print(f"发送默认参数错误: {e}")
 
             def send_nav_params_data(self):
-                """发送CP导航参数数据"""
                 try:
                     controller.params._match_system_param()
                     nav_data = controller.params.nav_data
@@ -197,7 +180,6 @@ class WebInterface:
                     print(f"发送参数数据错误: {e}")
 
             def handle_nav_params(self, data):
-                """处理CP导航参数更新 - 复用UnifiedParams类逻辑"""
                 try:
                     if not data:
                         self.send_json_response({'status': 'error', 'message': '无效的数据'})
@@ -220,7 +202,6 @@ class WebInterface:
                     self.send_json_response({'status': 'error', 'message': f'保存失败: {str(e)}'})
 
             def send_json_response(self, data):
-                """发送JSON响应"""
                 try:
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json; charset=utf-8')
@@ -233,7 +214,6 @@ class WebInterface:
                     print(f"发送JSON响应错误: {e}")
 
             def send_radar_page(self):
-                """发送雷达数据显示页面"""
                 try:
                     html = self.get_html_content('radar.html')
                     self.safe_write(html)
@@ -243,7 +223,6 @@ class WebInterface:
                     print(f"发送雷达页面错误: {e}")
 
             def send_radar_data(self):
-                """发送雷达数据JSON"""
                 try:
                     radar_data = controller.get_radar_data()
                     self.safe_write(json.dumps(radar_data, ensure_ascii=False))
@@ -253,7 +232,6 @@ class WebInterface:
                     print(f"发送雷达数据错误: {e}")
 
             def get_html_content(self, filename):
-                """HTML文件读取加载"""
                 try:
                     base_dir = os.path.abspath(os.path.dirname(__file__))
                     html_file_path = os.path.join(base_dir, filename)
@@ -271,7 +249,6 @@ class WebInterface:
         return WebPageHTTPHandler
 
     def start_web_server(self):
-        """启动Web服务器"""
         try:
             handler = self.create_web_handler()
             self.web_server = HTTPServer(('0.0.0.0', self.port), handler)
@@ -283,7 +260,6 @@ class WebInterface:
             raise
 
     def stop_web_server(self):
-        """停止Web服务器"""
         if self.web_server:
             self.web_server.shutdown()
             self.web_server.server_close()

@@ -17,12 +17,6 @@ class CarInterface(CarInterfaceBase):
   CarController = CarController
   RadarInterface = RadarInterface
 
-  # Gears in which openpilot may engage. `sport` is Ford's selector position 4
-  # ("Sport_DriveSport"). It must be listed here because car_events.py raises
-  # EventName.wrongGear for any gear that is neither `drive` nor in this tuple,
-  # and wrongGear carries a NO_ENTRY event ("Gear not D") that blocks cruise.
-  # Every other brand that can select a sport position declares it too
-  # (Hyundai `(sport, manumatic)`, VW, GM, Toyota, Honda).
   DRIVABLE_GEARS = (
     structs.CarState.GearShifter.low,
     structs.CarState.GearShifter.manumatic,

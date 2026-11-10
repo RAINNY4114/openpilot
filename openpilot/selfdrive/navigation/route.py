@@ -40,47 +40,23 @@ def along_path(path: np.ndarray, point) -> tuple[float, float]:
   return float(cumulative_distance(path)[segment] + np.linalg.norm(local_meters(point, path[segment]))), lateral
 
 
-# [NAV_LONG] 速度/曲率剖面的纯几何工具。放在这里而不是 navd 里，是为了能脱离
-# cereal / messaging 单测（本文件只依赖 numpy）。
-
-CURVATURE_WINDOW = 12.0  # meters; 密集几何下的基准窗口（弦长，单侧）
-CURVATURE_WINDOW_MAX = 80.0  # meters; 稀疏几何下窗口上限
-CURVATURE_POINTS_PER_WINDOW = 3.0  # 窗口至少覆盖这么多个几何点间距
-MIN_RADIUS = 1000.0  # meters; flatter than this is treated as straight
-MIN_RADIUS_FOR_CAP = 25.0  # meters; 曲率限幅，超过视为几何折角噪声
-
+CURVATURE_WINDOW = 12.0
+CURVATURE_WINDOW_MAX = 80.0
+CURVATURE_POINTS_PER_WINDOW = 3.0
+MIN_RADIUS = 1000.0
+MIN_RADIUS_FOR_CAP = 25.0
 
 def curvature_window_for(distance: np.ndarray) -> float:
-  """Pick a chord window that actually spans several geometry points.
-
-  Mapbox simplifies long routes (measured: 12.3 km -> 222 points, ~56 m apart), so a fixed
-  12 m window lands inside a single straight segment. The interpolated "path" is then a couple
-  of straight chords meeting at a vertex, and the heading change across that vertex reads as a
-  curvature of 1/9 m^-1 -- a 9 m radius corner that does not exist. Scaling the window with the
-  point spacing averages over the vertex instead, which is what "how bent is this stretch of
-  road" actually means.
-  """
   n = max(len(distance) - 1, 1)
   spacing = float(distance[-1]) / n
   return float(np.clip(CURVATURE_POINTS_PER_WINDOW * spacing, CURVATURE_WINDOW, CURVATURE_WINDOW_MAX))
 
-
 def curvature_at(path: np.ndarray, distance: np.ndarray, progress: float,
                  window: float = CURVATURE_WINDOW) -> float:
-  """Signed curvature (1/m, positive = left turn) of a (longitude, latitude) path at a progress.
-
-  Two chords of `window` meters either side of `progress`; the heading change between them over
-  their average length is the curvature. The sign is flipped from bearing (clockwise) to the
-  openpilot convention, where positive curvature turns left.
-  """
   path = np.asarray(path, dtype=np.float64).reshape((-1, 2))
   if len(path) < 2 or distance[-1] <= 1e-6:
     return 0.0
 
-  # 端点附近必须**整体平移**窗口，不能对三个位置各自 clip：
-  # progress=0 时 clip 会让 lo == mid == 0，插值后 pts[0] == pts[1]，
-  # 于是 b1 = atan2(0, 0) = 0，把整段的方向角当成"转角"，曲率虚高一个数量级
-  # （实测起点算出 R=4 m、终点同样）。真实道路不会有 4 m 半径的弯。
   lo, mid, hi = progress - window, progress, progress + window
   if lo < distance[0]:
     shift = distance[0] - lo
@@ -91,7 +67,6 @@ def curvature_at(path: np.ndarray, distance: np.ndarray, progress: float,
   lo = max(lo, distance[0])
   hi = min(hi, distance[-1])
 
-  # 路线短于 2*window 时窗口无法张开，两点弦退化，直接判直路
   if (mid - lo) < 1e-3 or (hi - mid) < 1e-3:
     return 0.0
 
@@ -108,15 +83,8 @@ def curvature_at(path: np.ndarray, distance: np.ndarray, progress: float,
   delta = (b2 - b1 + np.pi) % (2 * np.pi) - np.pi
   return float(-delta / max(span / 2, 1e-3))
 
-
 def curvature_profile(path: np.ndarray, distance: np.ndarray, progresses: np.ndarray,
                       window: float | None = None) -> np.ndarray:
-  """curvature_at over an array of progresses, windowed to the geometry's own point spacing.
-
-  Curvature is clipped to +-1/MIN_RADIUS_FOR_CAP: real roads have no corner tighter than
-  ~25 m (a U-turn), so anything above that is the polyline vertex artefact described in
-  curvature_window_for, not road shape.
-  """
   if window is None:
     window = curvature_window_for(distance)
   k = np.array([curvature_at(path, distance, float(p), window) for p in progresses], dtype=np.float64)
@@ -124,18 +92,14 @@ def curvature_profile(path: np.ndarray, distance: np.ndarray, progresses: np.nda
   np.clip(k, -lim, lim, out=k)
   return k
 
-
 def speed_cap_from_curvature(curvature: np.ndarray, a_lat_max: float) -> np.ndarray:
-  """Speed (m/s) that keeps lateral acceleration under a_lat_max, +inf on near-straight road."""
   k = np.abs(np.asarray(curvature, dtype=np.float64))
   cap = np.full(k.shape, np.inf, dtype=np.float64)
   bend = k > 1.0 / MIN_RADIUS
   cap[bend] = np.sqrt(a_lat_max / k[bend])
   return cap
 
-
 def maxspeed_to_mps(value) -> float | None:
-  """Mapbox maxspeed annotation entry -> m/s. Unknown/none -> None."""
   if isinstance(value, dict):
     if 'speed' not in value:
       return None
@@ -148,13 +112,7 @@ def maxspeed_to_mps(value) -> float | None:
     return float(value) / 3.6
   return None
 
-
 def speed_limit_series(geometry: np.ndarray, distance: np.ndarray, annotations) -> tuple[np.ndarray, np.ndarray] | None:
-  """(distance, m/s) series from Mapbox's per-segment maxspeed annotations.
-
-  The annotation array has one entry per segment of the route geometry. Unknown entries are
-  carried forward from the previous known value, so the series stays interpolatable.
-  """
   if not annotations or len(distance) < 2:
     return None
 
@@ -175,7 +133,6 @@ def speed_limit_series(geometry: np.ndarray, distance: np.ndarray, annotations) 
       values[i] = values[i - 1]
 
   return distance[:n], values
-
 
 class RouteTracker:
   """Progress of the ego along a route, in meters, and the map pose at that progress."""

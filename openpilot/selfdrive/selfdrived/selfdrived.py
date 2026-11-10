@@ -53,125 +53,29 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
-# =================================================================================================
-# [LOC_TEMP_FIX_20261109] 检查并修正此前处理 "locationd Temporary Error" 的方法
-#
-# 此前的方法（chestnut 大模型适配时引入）：用 big_model_settling 在加载窗口内一次性抑制
-# commIssue / 定位类 / 硬件类共 8 类告警。实测有三个缺陷：
-#   1) 完全依赖 ChestnutLoading 参数。参数未写（offroad、未插 eGPU、modeld 未起）时
-#      big_model_settling 恒 False，抑制整体失效。11-02 已发现，最新 rlog 仍复现。
-#   2) ChestnutLoading 若卡在 True（加载失败/超时未清），big_model_settling 会永久为 True，
-#      8 类告警被无限期屏蔽，真实硬件/定位故障无声。
-#   3) 加载窗口外的 inputsOK 单帧毛刺完全没处理。locationd 里
-#      inputs_valid = sm.all_valid() and critical_service_inputs_valid，任一服务单帧 invalid
-#      即 inputsOK=False；selfdrived 立刻 add locationdTemporaryError(NO_ENTRY + SOFT_DISABLE)。
-#      最新 rlog：一段 1200 帧里仅 1~2 帧 False，就产生 1~3 次告警并可导致瞬时软退出。
-#
-# 修正（保留原方法"加载期不误报"的效果，补齐上述缺陷）：
-#   * big_model_settling 加硬上限（默认 120s，与 BIG_MODEL_TIMEOUT 对齐），warmup 分支要求
-#     big_model_ready_t 确实被写过，杜绝永久屏蔽。
-#   * locationdTemporaryError 改为 inputsOK 需连续无效 >= LocTempDebounceSec(默认 0.5s) 才上报，
-#     单帧毛刺不再阻止 engage / 触发软退出。该逻辑不依赖任何参数，所有场景都生效。
-#   * 安全兜底：连续无效 >= LocTempHardSec(默认 10s) 时，即使仍在加载窗口也照常上报，
-#     避免真定位故障被窗口吞掉。
-# 热配参数（/data/ford_params/ 纯文本，缺失即用默认值，1Hz 节流读取）：
-#   LocTempDebounceSec       0.0~5.0    默认 0.5
-#   LocTempHardSec           3.0~60.0   默认 10.0
-#   BigModelSettlingMaxSec   30~300     默认 120.0
-# =================================================================================================
 _PARAM_DIR = "/data/ford_params"
 LOC_TEMP_DEBOUNCE_SEC = 0.5
 LOC_TEMP_HARD_SEC = 10.0
 BIG_MODEL_SETTLING_MAX_SEC = 120.0
 
-# =================================================================================================
-# [MODEL_LAG_FIX_20261109] 检查并修正此前处理 "Driving Model Lagging / N% frames dropped" 的方法
-#
-# 历史方法（git 历史 368ce473a6，标记 [CHX_LAG_TOLERANCE 20261017]）：
-#   chestnut 大模型走 eGPU(USB3) 时推理 71.5ms/帧（upload 40.4ms 是隧道瓶颈），
-#   超 20Hz 的 50ms 预算，稳定掉帧约 34%；上游 1% 阈值会永久触发 modeldLagging
-#   （NO_ENTRY + SOFT_DISABLE），ACC 无法接合。当时把 `> 1` 放宽到 `> 50`。
-#   该方法在后续 staging 更新中被冲掉，现所有分支又变回 `> 1 and not big_model_settling`。
-#
-# 实测（2026-11-09 今早 route 0000009b，分辨率已降到 1344x760 后）：
-#   modelV2.big 全程 True，modelExecutionTime 约 36.5ms（在 50ms 预算内），
-#   大部分段 frameDropPerc=0；仅段 1 有 2.5% 峰值 / 均值 0.5%，
-#   但 18.8% 的帧 >1%，硬触发了 31 次 modeldLagging。用户反馈提示约 12%。
-#   frameDropPerc 是 10s 一阶滤波的 frames_dropped/(1+frames_dropped)：
-#   12% 约等于 17.6Hz 的降级推理，每帧仍是完整推理，不是模型失效。
-#
-# 原方法 / 现状的问题：
-#   1) 单一 1% 阈值对大模型过严，降级运行也被判为故障并挡住 engage。
-#   2) 历史 50% 硬编码又过松：模型掉一半帧还继续开，且对小模型同样放宽，安全风险。
-#   3) big_model_settling 只覆盖加载窗口；行驶中的偶发掉帧完全不设防（参数未写时恒 False）。
-#   4) 单帧尖峰即报，没有持续时间判断。
-#
-# 修正：区分大小模型 + 去抖 + 硬兜底，全部阈值热配：
-#   * 大模型(big=True) 用 ModelLagBigPerc(默认 25%，覆盖实测 12% 并留 2x 余量)；
-#     小模型保持上游严格阈值 ModelLagSmallPerc(默认 1%)。
-#   * 超阈值需持续 ModelLagDebounceSec(默认 2s) 才上报，滤掉单帧尖峰。
-#   * 掉帧 >= ModelLagHardPerc(默认 60%) 视为模型近乎不工作，立即上报且不受加载窗口抑制。
-# 热配（/data/ford_params/，1Hz 节流，缺失即用默认值）：
-#   ModelLagBigPerc      1~80    默认 25.0
-#   ModelLagSmallPerc    0~20    默认 1.0
-#   ModelLagHardPerc     20~100  默认 60.0
-#   ModelLagDebounceSec  0~10    默认 2.0
-# =================================================================================================
 MODEL_LAG_BIG_PERC = 25.0
 MODEL_LAG_SMALL_PERC = 1.0
 MODEL_LAG_HARD_PERC = 60.0
 MODEL_LAG_DEBOUNCE_SEC = 2.0
 
-# =================================================================================================
-# [COMM_ISSUE_FIX_20261109] "Communication Issue Between Processes" 误报修复
-#
-# 实测（2026-11-09 route 0000009c / 0000009d，rlog 逐帧对齐）：
-#   commIssue 出现时 managerState.processes 全部 shouldBeRunning=running，
-#   memoryUsagePercent 60%、frameDropPerc < 5.2%，没有任何进程崩溃或资源异常。
-#   cloudlog 明细里 not_alive/not_freq_ok 恒为 ['alertDebug','lateralManeuverPlan']
-#   （这两个已在 ignore 列表，只是明细遍历原始 dict 时的噪音，并非触发者）；
-#   真正的触发者是 invalid 列表中的 5 个学习参数服务：
-#     extrinsicsCalibration / driverMonitoringState / vehicleParameters /
-#     lateralDelay / lateralTorqueParameters
-#
-# 根因：calibrationd -> paramsd/torqued/lagd -> dmonitoringd 这条学习链路，
-#   每个进程都用 `msg.valid = sm.all_checks()` 作为自己输出消息的 Event.valid。
-#   任一上游输入单帧抖动，整条链会在同一时刻连锁发出 Event.valid=False。
-#   SubMaster.update_msgs() 里 `self.valid[s] = msg.valid`，于是 selfdrived 的
-#   all_checks() 把这些"内容尚未收敛"误判为"进程间通信中断"，
-#   触发 commIssue（NO_ENTRY + SOFT_DISABLE），行车中直接打断 ACC。
-#   逐帧证据：这 5 个服务 Event.valid=False 的帧仅占 0.8%~3.4%，
-#   其时间戳与 commIssue 时间窗完全重合；无告警的段则 100% 为 True。
-#   注意 lateralTorqueParameters 的**结构体内部** valid 全程 False，
-#   那是 torqued 学习器自身状态，与 SubMaster 使用的 Event.valid 无关。
-#
-# 修正（只放宽"内容 valid"，绝不放宽通信活性）：
-#   * 仅把这 5 个服务加入 ignore_valid；ignore_alive 与 ignore_avg_freq 保持原样。
-#     进程崩溃 / 停止发布 / 频率异常仍会照常触发 commIssue。
-#   * 启动期(从未收到过第一帧)同样豁免，避免点火后必然误报。
-#   * 硬兜底：已 seen 的服务若连续 invalid >= CommIssueLearnerHardSec(默认 5s)，
-#     临时撤掉豁免，真实的学习链路故障仍会报警，不会永久屏蔽。
-#   * cloudlog 明细改为只列真正参与 all_checks() 判定的服务，避免误导排查。
-# 热配（/data/ford_params/，1Hz 节流，缺失即用默认值）：
-#   CommIssueIgnoreLearnerValid  0/1    默认 1（写 0 可一键回退到上游行为）
-#   CommIssueLearnerHardSec     0~30   默认 5.0
-# =================================================================================================
 COMM_ISSUE_LEARNER_SERVICES = (
   'extrinsicsCalibration', 'driverMonitoringState', 'vehicleParameters',
   'lateralDelay', 'lateralTorqueParameters',
 )
 COMM_ISSUE_LEARNER_HARD_SEC = 5.0
 
-
 def _ford_num(key: str, default: float, lo: float, hi: float) -> float:
-  """Read a hot-reloadable numeric param from /data/ford_params, fall back to default."""
   try:
     with open(f"{_PARAM_DIR}/{key}") as f:
       v = float(f.read().strip())
     return min(hi, max(lo, v))
   except Exception:
     return default
-
 
 class SelfdriveD:
   def __init__(self, CP=None, CP_SP=None):
@@ -204,7 +108,6 @@ class SelfdriveD:
     self.big_model_active = False
     self.big_model_failed = False
     self.big_model_ready_t = 0.
-    # [LOC_TEMP_FIX_20261109] 加载窗口起点 + inputsOK 去抖状态
     self.big_model_loading_t = 0.
     self.loc_inputs_bad_t = 0.
     self.loc_reported = False
@@ -212,14 +115,12 @@ class SelfdriveD:
     self.loc_debounce_sec = LOC_TEMP_DEBOUNCE_SEC
     self.loc_hard_sec = LOC_TEMP_HARD_SEC
     self.settling_max_sec = BIG_MODEL_SETTLING_MAX_SEC
-    # [MODEL_LAG_FIX_20261109] 掉帧率超阈值计时与热配值
     self.model_lag_over_t = 0.
     self.model_lag_reported = False
     self.model_lag_big_perc = MODEL_LAG_BIG_PERC
     self.model_lag_small_perc = MODEL_LAG_SMALL_PERC
     self.model_lag_hard_perc = MODEL_LAG_HARD_PERC
     self.model_lag_debounce_sec = MODEL_LAG_DEBOUNCE_SEC
-    # [COMM_ISSUE_FIX_20261109] 学习参数 valid 豁免状态与热配值
     self.comm_learner_ignore = True
     self.comm_learner_hard_sec = COMM_ISSUE_LEARNER_HARD_SEC
     self.comm_learner_bad_t = 0.
@@ -241,7 +142,6 @@ class SelfdriveD:
     if REPLAY:
       # no vipc in replay will make them ignored anyways
       ignore += ['narrowRoadCameraState', 'wideRoadCameraState']
-    # [COMM_ISSUE_FIX_20261109] 学习参数服务只忽略"内容 valid"，alive / avg_freq 仍严格检查
     ignore_valid = ignore + list(COMM_ISSUE_LEARNER_SERVICES)
     self.sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'extrinsicsCalibration',
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'deviceMotion', 'lateralDelay',
@@ -332,7 +232,7 @@ class SelfdriveD:
 
     loading = self.params.get_bool("ChestnutLoading")
     if loading and not self.big_model_loading:
-      self.big_model_loading_t = time.monotonic()  # [LOC_TEMP_FIX_20261109] 窗口起点, 用于硬上限
+      self.big_model_loading_t = time.monotonic()
     if self.big_model_loading and not loading:
       self.big_model_ready_t = time.monotonic()
       self.events_sp.add(custom.OnroadEventSP.EventName.bigModelReady)
@@ -574,7 +474,6 @@ class SelfdriveD:
     warmup_sec = 5.
     now = time.monotonic()
 
-    # [LOC_TEMP_FIX_20261109] 热配参数 1Hz 节流读取, 不增加 100Hz 主循环的文件 IO
     if now - self.loc_cfg_t >= 1.0:
       self.loc_cfg_t = now
       self.loc_debounce_sec = _ford_num("LocTempDebounceSec", LOC_TEMP_DEBOUNCE_SEC, 0.0, 5.0)
@@ -584,19 +483,14 @@ class SelfdriveD:
       self.model_lag_small_perc = _ford_num("ModelLagSmallPerc", MODEL_LAG_SMALL_PERC, 0.0, 20.0)
       self.model_lag_hard_perc = _ford_num("ModelLagHardPerc", MODEL_LAG_HARD_PERC, 20.0, 100.0)
       self.model_lag_debounce_sec = _ford_num("ModelLagDebounceSec", MODEL_LAG_DEBOUNCE_SEC, 0.0, 10.0)
-      # [COMM_ISSUE_FIX_20261109]
       self.comm_learner_ignore = _ford_num("CommIssueIgnoreLearnerValid", 1.0, 0.0, 1.0) >= 0.5
       self.comm_learner_hard_sec = _ford_num("CommIssueLearnerHardSec", COMM_ISSUE_LEARNER_HARD_SEC, 0.0, 30.0)
 
-    # 原方法在这里是 "self.big_model_loading or now < ready_t + 5s": 无上限, 参数卡 True 会永久屏蔽。
-    # 现在两段都要求时间戳确实被写过, 且 loading 段有硬上限。
     loading_settling = (self.big_model_loading and self.big_model_loading_t > 0. and
                         (now - self.big_model_loading_t) < self.settling_max_sec)
     warmup_settling = self.big_model_ready_t > 0. and now < self.big_model_ready_t + warmup_sec
     big_model_settling = loading_settling or warmup_settling
 
-    # inputsOK 连续无效计时。特意放在加载窗口之外累积: 窗口一结束就能立即反映真实状态,
-    # 不会被 5s warmup 再拖一轮。seen=False 视为未收到消息(沿用上游语义, 不算定位故障)。
     dm_seen = self.sm.seen['deviceMotion']
     inputs_ok = (not dm_seen) or bool(self.sm['deviceMotion'].inputsOK)
     if not inputs_ok:
@@ -609,9 +503,6 @@ class SelfdriveD:
     loc_inputs_bad = loc_bad_dur >= self.loc_debounce_sec
     loc_inputs_hard = loc_bad_dur >= max(self.loc_hard_sec, self.loc_debounce_sec)
 
-    # [COMM_ISSUE_FIX_20261109] 学习链路的 Event.valid 瞬时抖动不是通信故障。
-    # 只豁免"已收到过消息但内容未收敛"的短暂窗口；持续 invalid 超硬阈值则撤掉豁免，
-    # 真实的学习链路故障仍能触发 commIssue。alive / freq_ok 检查始终不豁免。
     learner_bad = any(self.sm.seen.get(s, False) and not self.sm.valid.get(s, True)
                       for s in COMM_ISSUE_LEARNER_SERVICES)
     if learner_bad:
@@ -629,7 +520,7 @@ class SelfdriveD:
       elif _svc in self.sm.ignore_valid:
         self.sm.ignore_valid.remove(_svc)
 
-    if not self.sm.all_checks() and no_system_errors and not big_model_settling:  # the load holds modelV2 and friends back on purpose
+    if not self.sm.all_checks() and no_system_errors and not big_model_settling:
       if not self.sm.all_alive():
         self.events.add(EventName.commIssue)
       elif not self.sm.all_freq_ok():
@@ -637,7 +528,6 @@ class SelfdriveD:
       else:
         self.events.add(EventName.commIssue)
 
-      # 只列真正参与 all_checks() 判定的服务，避免把已在 ignore 中的项当故障记录
       logs = {
         'invalid': [s for s, valid in self.sm.valid.items()
                     if not valid and s not in self.sm.ignore_valid],
@@ -653,10 +543,7 @@ class SelfdriveD:
     else:
       self.logged_comm_issue = None
 
-    # [LOC_TEMP_FIX_20261109] 加载窗口仍抑制预期内的定位抖动, 但连续无效超过硬阈值时
-    # 必须放行 —— 真定位故障不能被大模型加载窗口吞掉。
     if not self.CP.notCar and (not big_model_settling or loc_inputs_hard):
-      # the defaults of a message that was never received are not a localizer failure
       if dm_seen and not self.sm['deviceMotion'].posenetOK:
         self.events.add(EventName.posenetInvalid)
       if dm_seen and loc_inputs_bad:
@@ -713,7 +600,6 @@ class SelfdriveD:
 
     # TODO: fix simulator
     if not SIMULATION or REPLAY:
-      # [MODEL_LAG_FIX_20261109] 大模型降级推理不等于模型失效, 详见文件头注释
       mv = self.sm['modelV2']
       drop = float(mv.frameDropPerc)
       is_big = bool(mv.big)
@@ -729,7 +615,6 @@ class SelfdriveD:
       lag_dur = (now - self.model_lag_over_t) if self.model_lag_over_t > 0. else 0.
       sustained = lag_dur >= self.model_lag_debounce_sec
 
-      # 硬超限立即上报且不受加载窗口抑制; 其余需持续超阈值, 滤掉单帧尖峰
       if hard or (over and sustained and not big_model_settling):
         self.events.add(EventName.modeldLagging)
         if not self.model_lag_reported:

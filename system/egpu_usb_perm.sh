@@ -1,24 +1,14 @@
 #!/bin/bash
-# [port-egpu-usb] chestnut(ASM2464) USB 节点权限守护。
-#
-# devtmpfs 以 0600 root:root 建节点，udev 要读完描述符才放宽成 0664。
-# eGPU 与车机同时上电时 ASM2464 描述符响应慢，这个窗口可达数十秒；
-# modeld 以 comma 身份 libusb_open -> EACCES。comma 在 root 组，
-# 所以这里抢在 udev 之前把节点 chmod 666。
-#
-# 由 launch_env.sh 以 setsid 拉起，单实例运行，日志 /data/egpu_usb_perm.log
 set -u
 
 SELF="$(readlink -f "$0")"
 PIDFILE=/data/egpu_usb_perm.pid
 LOG=/data/egpu_usb_perm.log
 
-# 自提权
 if [ "$(id -u)" -ne 0 ]; then
   exec sudo -n "$SELF" "$@"
 fi
 
-# 单实例锁
 if [ -f "$PIDFILE" ]; then
   OLD=$(cat "$PIDFILE" 2>/dev/null || echo 0)
   if [ -n "$OLD" ] && [ "$OLD" != "$$" ] && kill -0 "$OLD" 2>/dev/null; then

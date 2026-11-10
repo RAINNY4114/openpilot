@@ -60,37 +60,19 @@ class Chestnut:
     return self.mismatch and self.attempts >= self.MAX_ATTEMPTS and self.thread is not None and not self.thread.is_alive() and not self.flashed
 
   def flash(self) -> None:
-    # [flash-lock] 双保险：第三方底座绝不自动刷官方固件。即使 update() 短路被
-    # 意外回退，这里也无条件拒绝，杜绝任何自动刷写路径。
     cloudlog.warning("chestnut flash SKIPPED: third-party dock protection (flash disabled)")
     self.flashed = False
     return
 
   def update(self, offroad: bool, usb_state: list[dict]) -> None:
-    # [port-egpu-usb] 底座是第三方 ASM2464：product 串永远不会等于 comma 的
-    # 官方版本号（实测 custom ed4e39b7-CLEAN）。原来这里会在 offroad 时把官方固件
-    # 写进第三方底座（2026-10-26 14:26 实际发生：returncode=0、镜像校验通过），
-    # 刷完底座就不再枚举。而且判据带 include_bootloader=True，ROM 模式
-    # (174c:2464) 也会被判成 mismatch 再刷一次，恢复时会被反复打断。
-    # 官方固件只适用于官方底座：这里一律不自动刷，需要时手动跑
-    #   sudo python3 openpilot/system/hardware/chestnut/flash.py <target-hash>
     self.mismatch = False
     self.flashed = False
     return
 
 
-# [CHX_OFFROAD_PREP_20261101] 熄火期间把 chestnut 提前拉到 USB3 的共享状态。
-# 主循环每帧写 _CHX_IGNITION['on']，预热线程据此判断是否该干活。
 _CHX_IGNITION = {'on': False}
 
-
 def _chestnut_offroad_prep(end_event) -> None:
-  """熄火时若 chestnut 不在 USB3，提前调 chestnut_usb_node_ready 修好。
-
-  设备本来就在 USB3 时，chestnut_usb_node_ready() 会在第一次轮询就返回 True
-  （实测 0.09s），不产生任何副作用。只有真的停在 12Mbps 才会触发 0xF3 上电
-  和 USB reset。
-  """
   last_try = 0.0
   while not end_event.is_set():
     end_event.wait(10.0)
@@ -297,7 +279,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
       # Set ignition based on any panda connected
       onroad_conditions["ignition"] = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
-      _CHX_IGNITION['on'] = onroad_conditions['ignition']  # [CHX_OFFROAD_PREP_20261101]
+      _CHX_IGNITION['on'] = onroad_conditions['ignition']
 
       pandaState = pandaStates[0]
 
@@ -409,7 +391,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     # - TIZI, or
     # - TICI and channel_type is "tici"
     build_metadata = get_build_metadata()
-    is_unsupported_combo = False  # [port-egpu-usb] 去 tici 限制
+    is_unsupported_combo = False
     startup_conditions["not_tici"] = not is_unsupported_combo
     onroad_conditions["not_tici"] = not is_unsupported_combo
     set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
@@ -567,8 +549,8 @@ def main():
 
   if COMMA_HARDWARE:
     threads.append(threading.Thread(target=touch_thread, args=(end_event,)))
-    threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event, _CHX_IGNITION)))  # [CHX_USB_EXCLUSIVE_20261101]
-    threads.append(threading.Thread(target=_chestnut_offroad_prep, args=(end_event,), daemon=True))  # [CHX_OFFROAD_PREP_20261101]
+    threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event, _CHX_IGNITION)))
+    threads.append(threading.Thread(target=_chestnut_offroad_prep, args=(end_event,), daemon=True))
 
   for t in threads:
     t.start()

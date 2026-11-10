@@ -12,7 +12,6 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
-# [NAV_LONG] 导航纵向：限速 / 弯道前减速 / 到达停车
 from openpilot.selfdrive.controls.lib.nav_speed_planner import NavSpeedPlanner
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
@@ -21,7 +20,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 
 J_CRUISE_VALS = [2.2, 1.6, 1.1, 0.8, 0.60, 0.42, 0.34, 0.28, 0.22, 0.025]
 J_CRUISE_BP = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
-A_CRUISE_MIN = -1.2  # [BSD_20261108] was -0.5, increased for faster decel
+A_CRUISE_MIN = -1.2
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 
@@ -33,28 +32,21 @@ def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt):
   return target_accel
 
 
-# [BSD_20261108] Limit longitudinal acceleration in turns (cpv9-inspired)
-# When lateral acceleration is high, reduce max longitudinal accel to maintain stability
-TURN_ACCEL_LIMIT = 2.0   # m/s^2 lateral accel threshold
-MAX_ACCEL_IN_TURN = 1.0  # m/s^2 max longitudinal accel when in turn
-
+TURN_ACCEL_LIMIT = 2.0
+MAX_ACCEL_IN_TURN = 1.0
 
 def limit_accel_in_turns(v_ego, steer_angle, steer_ratio, wheel_base, accel):
-  """Reduce longitudinal acceleration when going through a curve."""
   if v_ego < 5.0:
     return accel
-  # Estimate lateral acceleration from steer angle
   steer_rad = steer_angle * (3.14159 / 180) / steer_ratio
   if abs(steer_rad) < 0.001:
     return accel
   curvature = steer_rad / wheel_base
   lat_accel = v_ego * v_ego * abs(curvature)
   if lat_accel > TURN_ACCEL_LIMIT:
-    # Scale down longitudinal accel proportionally
     factor = max(0.0, 1.0 - (lat_accel - TURN_ACCEL_LIMIT) / TURN_ACCEL_LIMIT)
     return min(accel, MAX_ACCEL_IN_TURN * factor)
   return accel
-
 
 class LongitudinalPlanner(LongitudinalPlannerSP):
   def __init__(self, CP, CP_SP, init_v=0.0, init_a=0.0, dt=DT_MDL):
@@ -64,7 +56,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.fcw = False
     self.dt = dt
     self.accel_boost = AccelBoost()
-    # [NAV_LONG] 默认配置缺失 -> enabled=false -> 恒输出 0，纵向行为与原生一致
     self.nav_speed = NavSpeedPlanner(dt=dt)
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -89,22 +80,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if sm['controlsState'].forceDecel:
       v_cruise = 0.0
 
-    # ------------------------------------------------------------------
-    # [NAV_LONG] 导航纵向：法定限速 / 弯道前减速 / 到达停车。
-    #
-    # 两道输出，作用点不同：
-    #   1. v_cruise_cap：压 `v_cruise` 的上限（只往下压，绝不抬升）。
-    #      走的是既有的 cruise 候选通道，与 SCC / SLA 同一范式。
-    #   2. a_target(<=0)：作为第 4 个候选进入下面的 candidates 取 min。
-    #      cruise 通道的减速度被 A_CRUISE_MIN(-0.5) 限住，弯道/终点需要的
-    #      -1.5 ~ -2.0 只能靠独立候选给，否则 30 m/s 降到 15 m/s 要 675 m。
-    #
-    # 安全边界：
-    #   - a_target 恒 <= 0；正的加速度需求一律输出 0（加速永远归原链路）。
-    #   - 默认 enabled=false，此时两个输出都是 0/None，纵向行为与原生一致。
-    #   - 剖面过期(>2.5s)/无效/异常 -> 输出 0，立即释放。
-    #   - 取 min 之后仍受 ACCEL_MIN/ACCEL_MAX 与 PID accel limits 约束。
-    # ------------------------------------------------------------------
     nav_a, nav_stop = 0.0, False
     try:
       nav_a, nav_cap = self.nav_speed.update(v_ego, sm['navProfile'], sm['amapNavi'],
@@ -170,20 +145,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
 
-    # [NAV_LONG] 导航候选。source 沿用 cruise：cereal 的 LongitudinalPlanSource
-    # 没有 nav 值，新增枚举要动 capnp + UI 映射，收益不抵风险；导航自身状态
-    # 由 /data/media/0/nav_speed.log 与 navProfile 观察。
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop),
                   (output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e)]
-    # [NAV_LONG_FIX] 导航候选只在「确实要求减速/停车」时入列。
-    #
-    # nav_speed.update() 在 disabled / observe_only / long_inactive / v_low 时返回 0.0。
-    # 若把这个 0 无条件放进 min()，它会压掉所有正的加速需求 —— 因为 min 取最小，
-    # 0 永远小于 a_cruise 的 +1.5。表现为「设定速度上不去、必须人工踩油门」。
-    #
-    # nav 的本意是「只加减速、从不抬升速度」，所以没有减速需求时它就该完全缺席，
-    # 而不是以 0 的身份参与竞争。nav_stop 单独保留，避免临近终点时丢停车意图。
     if nav_a < -1e-3 or nav_stop:
       candidates.append((float(nav_a), LongitudinalPlanSource.cruise, nav_stop))
 

@@ -93,7 +93,6 @@ class USB3:
 
 class CustomASM24Controller:
   def _wait_link_up(self, timeout: float, interval: float = 0.1) -> int:
-    # [EGPU_LINK_LOADING 20261027] —— 轮询等待 PCIe 链路训练完成，而不是只读一次。
     t0 = time.monotonic()
     ltssm = self.read(0xB450, 1)[0]
     while ltssm != 0x78 and time.monotonic() - t0 < timeout:
@@ -105,8 +104,6 @@ class CustomASM24Controller:
     self.usb = usb
 
     # Custom firmware now boots with PCIe off. Power it on before probing the link.
-    # [EGPU_LINK_LOADING 20261027] —— 见 chx2025/openpilot egpubak0917
-    # 原实现上电后立刻复读，必然读到中间态(0x01/0x00)，导致 eGPU 永远起不来。
     ltssm = self.read(0xB450, 1)[0]
     did_cycle = False
     if ltssm != 0x78:
@@ -120,7 +117,6 @@ class CustomASM24Controller:
         ltssm = self._wait_link_up(15.0)
         did_cycle = True
     if ltssm != 0x78: raise RuntimeError(f"PCIe link not up (LTSSM=0x{ltssm:02X}), custom firmware not ready")
-    # 链路刚训练完就访问 GPU MMIO 会 bulk IN 超时，需要等 GPU 就绪。
     settle = 3.0 if did_cycle else 0.5
     if DEBUG >= 1: print(f"[usb] LTSSM=0x78, settling {settle}s before MMIO access", flush=True)
     time.sleep(settle)

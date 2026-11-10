@@ -7,7 +7,6 @@ from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.ford.mads import MadsCarState
 
-
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
@@ -33,9 +32,6 @@ class CarState(CarStateBase, MadsCarState):
     ret = structs.CarState()
     ret_sp = structs.CarStateSP()
 
-    # Occasionally on startup, the ABS module recalibrates the steering pinion offset,
-    # so we need to block engagement.
-    # The vehicle usually recovers out of this state within a minute of normal driving.
     self.vehicle_sensors_valid = cp.vl["ParkAid_Data"]["ExtSteeringAngleReq2"] < 32766
 
     # car speed
@@ -89,7 +85,6 @@ class CarState(CarStateBase, MadsCarState):
         or cp_cam.vl["ACCDATA"]["CmbbDeny_B_Actl"] == 1
       )
     
-    # gear
     if self.CP.transmissionType == TransmissionType.automatic:
       if (cp.vl["TransGearData"]["GearLvrPos_D_Actl"] in (3, 4, 5)):
         ret.gearShifter = GearShifter.drive
@@ -144,19 +139,6 @@ class CarState(CarStateBase, MadsCarState):
         cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
       )
 
-      # ------------------------------------------------------------------
-      # [AO_SAFETY_TIGHTEN]
-      #
-      # Publish the full Ford cross-traffic / blind-spot payload so the
-      # automatic-overtake helper can require a real rear gap instead of a
-      # single boolean.
-      #
-      #   CtaAlrtLeft2_D_Stat : 0 Off, 1 Zone1(near) .. 4 Zone4(far)
-      #   CtaSnsLeft_D_Stat   : 0 Clear, 1 Blocked, 2 Failure, 3 Invalid
-      #   SodDetctLeft_D_Stat : 0 Clear, 1 Alert, 2 Flash, 3 Fault, 4 Blocked
-      #
-      # Packed as  left*100 + right   (0..499) into a single integer Param.
-      # ------------------------------------------------------------------
       try:
         import os as _ao_os
 
@@ -177,14 +159,10 @@ class CarState(CarStateBase, MadsCarState):
         _zone_val = _l_zone * 100 + _r_zone
         _fault_val = _l_fault * 10 + _r_fault
 
-        # Write only on change: this runs at CAN rate (100 Hz), so an
-        # unconditional write would hammer the param files.
         _cache = getattr(self, "_ao_bsm_cache", None)
         if _cache != (_zone_val, _fault_val):
           self._ao_bsm_cache = (_zone_val, _fault_val)
 
-          # This fork's libparams_c.so does not know custom keys, so publish
-          # through the same file channel modeld already reads.
           for _k, _v in (
             ("AOBsmZone", "%d" % _zone_val),
             ("AOBsmFault", "%d" % _fault_val),

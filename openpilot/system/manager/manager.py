@@ -22,9 +22,6 @@ from openpilot.common.hardware.hw import Paths
 
 from openpilot.sunnypilot.system.params_migration import run_migration
 
-# [CHX_CACHE] tinygrad JIT 缓存必须落到持久可写的 /data。
-# /home 是 100M tmpfs overlay（重启清空），/ 是只读 ext4；
-# 默认 ~/.cache 会导致每次开机重编译大模型(实测 18.3s)，且可能撑爆 100M。
 os.environ.setdefault('XDG_CACHE_HOME', '/data/.cache')
 
 

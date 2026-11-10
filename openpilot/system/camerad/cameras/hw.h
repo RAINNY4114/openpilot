@@ -27,8 +27,6 @@ struct CameraConfig {
   bool vignetting_correction;
   SpectraOutputType output_type;
   bool staggered_sof;  // SOF is staggered (half-period offset) from other cameras
-  // [ife-resize] IFE 输出尺寸。0 表示跟随传感器全分辨率（默认行为）。
-  // 非 0 时由 IFE 的定标器做硬件降采样，用来压低 MIPI/USB 带宽。
   uint32_t out_width;
   uint32_t out_height;
 };

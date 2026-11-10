@@ -1,172 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Auto Overtake Helper
-====================
-
-Ford / Lincoln automatic overtaking decision layer.
-
-Architecture
-------------
-
-OEM Delphi radar
-        |
-        v
-    leadOne
-        |
-        v
-AutoOvertakeHelper
-        |
-        v
-Lane safety gate
-        |
-        v
-DesireHelper / existing lane-change pipeline
-
-
-IMPORTANT SAFETY ARCHITECTURE
-=============================
-
-OEM radar is the ONLY source that determines:
-
-    "Do we need to overtake?"
-
-MR76 and side WiFi LiDAR are NOT overtaking triggers.
-
-They are SAFETY VETO sensors.
-
-Therefore:
-
-    OEM lead
-        ->
-    overtaking need
-        ->
-    safety validation
-        ->
-    lane-change request
-
-
-MR76
-----
-
-MR76 is AUXILIARY ONLY.
-
-MR76 NEVER:
-
-    - creates RadarPoint
-    - enters radarTracks
-    - creates Track
-    - becomes leadOne
-    - becomes leadTwo
-    - modifies radarState
-    - modifies aTarget
-    - modifies shouldStop
-    - modifies longitudinalPlan
-    - commands brake
-    - commands throttle
-    - commands steering
-    - sends CAN actuator commands
-
-MR76 is used only for:
-
-    - left/right lane occupancy
-    - rear/side traffic detection
-    - automatic-overtake safety veto
-    - emergency-avoidance auxiliary information
-
-
-SIDE WIFI LiDAR
----------------
-
-Left/right WiFi LiDAR is also AUXILIARY ONLY.
-
-LiDAR can:
-
-    - detect lane occupancy
-    - detect side obstacles
-    - veto automatic overtaking
-
-LiDAR cannot:
-
-    - create longitudinal targets
-    - replace OEM radar lead
-    - command braking
-    - command throttle
-    - directly command steering
-
-
-SAFETY VETO PRINCIPLE
-=====================
-
-For automatic overtaking:
-
-    MR76 obstacle
-        ->
-    corresponding lane BLOCKED
-
-    LiDAR obstacle
-        ->
-    corresponding lane BLOCKED
-
-    BSM obstacle
-        ->
-    corresponding lane BLOCKED
-
-    stale / unavailable required sensor
-        ->
-    corresponding lane BLOCKED
-
-There is NO "sensor voting" that can override another sensor.
-
-Example:
-
-    MR76 says clear
-    LiDAR says obstacle
-
-Result:
-
-    BLOCKED
-
-
-    MR76 says obstacle
-    LiDAR says clear
-
-Result:
-
-    BLOCKED
-
-
-    MR76 stale
-    LiDAR clear
-
-Result:
-
-    BLOCKED
-
-
-Only when ALL required safety gates pass:
-
-    OEM base lane safety
-    AND MR76
-    AND LiDAR
-    AND BSM
-
-may an automatic lane-change request be generated.
-
-
-IMPORTANT
-=========
-
-This module does not guarantee collision avoidance.
-
-It is a decision-layer safety gate.
-
-Final vehicle control remains under the existing
-openpilot / DesireHelper / lateral control architecture.
-Driver supervision remains required.
-"""
-
 import os
 import json
 import time
@@ -174,129 +8,23 @@ import time
 from openpilot.cereal import log
 from openpilot.common.constants import CV
 
-
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
-
-# ============================================================================
-# Parameters
-# ============================================================================
-
-# ============================================================================
-# [AO_MIN_SPEED_CRUISE_HOOKUP] 速度门槛与巡航速度挂钩（第三轮实车改进）
-#
-# ---------------------------------------------------------------- 缺陷事实 --
-# 原实现把速度门槛硬编码成 90 km/h：
-#
-#     OVERTAKE_MIN_SPEED        = 90.0 * KPH_TO_MS
-#     OVERTAKE_MIN_CRUISE_SPEED = 90.0 * KPH_TO_MS
-#
-# route 00000045（15953 帧含 radarState）实测漏斗：
-#
-#     has_lead            12302
-#     d_in_band(25~80m)    1191
-#       条件1 closing>=4.0     257
-#       条件2 vc-vlead>=3km/h 1100
-#       条件3 headway<=2.8s    210
-#       条件4 v>=90km/h          0   <-- ★ 满足数为 0
-#       >>> ALL_OK               0
-#
-#   该 route 实测 v_ego p50=10.88 m/s (39 km/h)、v_cruise p50=15.00 m/s
-#   (54 km/h) —— 典型市区/城郊路况，**从未达到 90 km/h**。
-#   于是自动超车在此路况下**永不触发**：AO 全程只在 idle/preparing 之间
-#   抖动，一次真正的超车都没有执行。这与"逻辑混乱"的用户反馈一致。
-#
-# ---------------------------------------------------------------- 修订方案 --
-# 门槛改为与巡航设定挂钩，并在两端设边界：
-#
-#     v_min(v_cruise) = clamp(v_cruise - OVERTAKE_SPEED_DELTA,
-#                             FLOOR,  CAP)
-#
-#   CAP   = 90 km/h  保持原高速安全底线（高速行为与修订前完全一致）
-#   FLOOR = 60 km/h  市区/城郊安全底线，避免低速乱变道
-#
-# 语义：
-#   * v_cruise <= FLOOR+delta 时，门槛 = FLOOR（60 km/h）——低速有下限保护
-#   * v_cruise 中速时，门槛 = v_cruise - 3km/h —— 只要巡航目标是"明显高于前车"
-#     就已具备超车物理前提
-#   * v_cruise >= 93 km/h 时，门槛 = CAP（90 km/h）——高速严格程度不变
-#
-# 注意：本改动**不放宽**任何与安全距离相关的判据
-# （closing / headway / lead 距离带 / 后车盲区 / 车道线置信度）全部保持不变。
-# 仅调整"什么车速下才允许考虑超车"这一个准入条件。
-# ============================================================================
-
-# [AO_MIN_SPEED_CRUISE_HOOKUP] 门槛上限：高速维持原 90 km/h 行为
 OVERTAKE_MIN_SPEED_CAP_MS = 90.0 * CV.KPH_TO_MS
 
-# [AO_MIN_SPEED_CRUISE_HOOKUP] 门槛下限：市区/城郊 60 km/h 安全底线
 OVERTAKE_MIN_SPEED_FLOOR_MS = 60.0 * CV.KPH_TO_MS
 
-# 兼容别名：旧名指向"上限"，任何遗留引用都退化为原高速行为（fail safe）
 OVERTAKE_MIN_SPEED = OVERTAKE_MIN_SPEED_CAP_MS
 OVERTAKE_MIN_CRUISE_SPEED = OVERTAKE_MIN_SPEED_CAP_MS
 
-# Cruise target must be meaningfully above OEM lead speed.
-#
-# [AO_DC_SPEED_MARGIN] 3.0 -> 1.0 km/h（D-C 阈值收紧，2026-10-16）
-#
-# ---------------------------------------------------------------- 数据依据 --
-# 用 /data/media/0/auto_overtake.log 里 6 次真实 mode=preparing 记录反推
-# （v 单位 km/h，v_min = clamp(vc - delta, 60, 90)）：
-#
-#   时刻        v      vc    vc-v    v_min(d=3)  v_min(d=1)   结果
-#   04:42:54   91.4  100.0    8.6       90.0        90.0     两者都过
-#   04:47:55   94.3  100.0    5.7       90.0        90.0     两者都过
-#   23:51:29   89.4   85.0   -4.4       82.0        84.0     两者都过
-#   02:53:27   96.1  100.0    3.9       90.0        90.0     两者都过
-#   02:53:31   93.3  100.0    6.7       90.0        90.0     两者都过
-#   08:23:52   63.3   66.0    2.7       63.0        65.0     d=3 勉强过 / d=1 拦下
-#
-# 关键：因为 CAP = 90 km/h 封顶，delta 只对 v_cruise < 90 + delta 的城郊场景
-# 有影响。4 次高速触发（v_cruise = 100）的 v_min 恒为 90，**完全不受 delta
-# 影响**。所以把 delta 从 3 收到 1，只拦下"速度门槛只高出 0.3 km/h"的那次
-# 边缘触发，不损失任何一次真实高速超车。
-#
-# 为什么不取 delta = 0（即文档 §6.3 写的 v_ego >= v_cruise）：ACC 跟车时
-# ego 会稳定在设定值下方 1~2 km/h（实测 6 次触发的 vc-v 为 8.6/5.7/-4.4/
-# 3.9/6.7/2.7），delta = 0 会把 v_cruise 落在 [60,90) 区间的正常跟车场景
-# 全部拦死。留 1 km/h 容差既拦得住边缘触发，又不吃 ACC 的正常下冲。
 OVERTAKE_SPEED_DELTA = 1.0 * CV.KPH_TO_MS
 
-# ----------------------------------------------------------------------------
-# [AO_PARAM_TIGHTEN] 门槛参数小幅收紧（"两者都做"的第二半）
-#
-# ---------------------------------------------------------------- 数据依据 --
-# route 43（1Hz，v>=90km/h 共 1245 帧）实测分布：
-#   headway   p25=1.88s  p50=2.38s  p75=3.19s
-#   closing   p10=18.56   p50=19.78  (m/s)
-#   前车距离   p25=50.0m   p50=66.3m  p75=86.8m
-#
-# ---------------------------------------------------------------- 收紧原则 --
-# 该 route 上基线门槛已否决 65.1% 的帧，且 AO 全程只 preparing 2 帧，
-# 故**不做激进收紧**（那会显著降低可用性却无安全收益）。
-# 只在"边界明显偏松、且收紧后不影响真实超车场景"的位置各收一档：
-#
-#   closing 3.0 -> 4.0 m/s   数据 p10=18.6，实际永不触发；纯安全冗余
-#   headway 3.0 -> 2.8 s     3.0s 已是"3 秒跟车"，再松无意义
-#   lead_max 90 -> 80 m      108km/h 下 90m 即 3.0s 车距，作为"超车目标"
-#                            过远；80m 仍覆盖数据 p50=66m 的真实场景
-# ----------------------------------------------------------------------------
-
-# Minimum actual closing speed before normal overtaking is considered.
 OVERTAKE_MIN_CLOSING_SPEED = 1.0
 
-# Maximum headway to OEM lead for overtaking consideration.
 OVERTAKE_HEADWAY_MAX_S = 5.0
 
-# OEM lead condition must remain stable.
 OVERTAKE_LEAD_STABLE_SEC = 0.50
-
-
-# ============================================================================
-# Lane-change timing
-# ============================================================================
 
 PREPARE_BEFORE_LC_SEC = 1.00
 
@@ -308,239 +36,53 @@ RETURN_MIN_TIME_AFTER_OUT_SEC = 5.0
 
 OVERTAKE_COOLDOWN_SEC = 25.0
 
-
-# ============================================================================
-# Rear / side traffic safety
-# ============================================================================
-
 REAR_DIST_TH = 20.0
 
 REAR_CLOSING_SPEED_TH = 8.0
 
 REAR_TTC_TH = 3.0
 
-
-# ============================================================================
-# [AO_SAFETY_TIGHTEN] Absolute gates
-# ============================================================================
-
-# Lead must be inside this band for an automatic overtake to be considered.
-# Too close  -> do not start a lane change right on top of the lead.
-# Too far    -> the lead is irrelevant; a change now is not an "overtake".
 OVERTAKE_LEAD_MIN_DIST = 25.0
 
-# [AO_PARAM_TIGHTEN] 90 -> 80 m（见文件头部 OVERTAKE_MIN_CLOSING_SPEED 处说明）
 OVERTAKE_LEAD_MAX_DIST = 80.0
 
-
-# ============================================================================
-# [AO_LANE_GAIN_GATE] 目标车道收益硬门（Plan A）
-# ============================================================================
-#
-# ---------------------------------------------------------------- 缺陷事实 --
-# 2026-10-15 16:23(北京) 实车触发一次"无意义变道"：本车在最左道，右侧车道
-# 与本车道同样拥堵，AO 仍然请求向右变道（route 0000002c--b4b7ad53f6 第 38 段，
-# rlog modelV2.meta 变道请求真实下发 4.30s）。
-#
-# 根因：AO 的"是否需要超车"只看**本车道** leadOne；_lane_score() 只用
-# **目标车道后车**距离/速度 + 静态偏好；_choose_best_lane() 只看"安全"。
-# 全程没有任何一步问过：
-#
-#     目标车道是不是真的比本车道更空 / 更快？
-#
-# ---------------------------------------------------------------- 修法 -----
-# 在"安全门"之后、状态机之前，再加一道**收益门**：
-#
-#     信息不可得                        -> 不允许（fail-closed）
-#     目标车道前车存在且证明不了更快更远 -> 不允许
-#     目标车道前车不存在（确认更空）     -> 允许
-#
-# 注意语义与安全门**相反**：_mr76_lane_safe() 等在 available=None 时
-# **放行**（安全门 fail-open：宁可不动也不误锁）；收益门必须 fail-closed，
-# 否则"拿不到信息"就等于"没有这道门"。
-# ============================================================================
-
-# 收益门总开关的模块默认值。接线侧可用 require_lane_gain 覆盖。
 AO_GAIN_GATE_DEFAULT = True
 
-# 目标车道前车比本车道前车至少快多少才算"有收益"。
 AO_GAIN_MIN_DV_MS = 5.0 * CV.KPH_TO_MS
 
-# 或者：目标车道前车比本车道前车至少远多少米也算"有收益"。
 AO_GAIN_MIN_DIST_MARGIN_M = 20.0
-
-
-# ============================================================================
-# [AO_DC_LEAD_JUMP] 前车距离跳变抑制（D-C 阈值收紧）
-# ============================================================================
-#
-# 缺陷：radarState.leadOne 会在不同物理目标之间切换（原前车消失后另一个
-# 航迹被提升为 leadOne，或雷达航迹重关联），单周期 lead_d 可以跳几十米。
-# 这种跳变会凭空造出"正在快速接近前车"的假象，让 need_overtake 误触发。
-#
-# 判据：一个控制周期内 |Δlead_d| 超过 AO_LEAD_JUMP_MAX_M 即判为跳变。
-# 20 Hz 下真实接近 4 m/s 也只走 0.2 m/帧，15 m/帧 不可能是真运动。
-# 跳变后强制静默 AO_LEAD_SETTLE_SEC，等前车距离重新稳定。
-# ============================================================================
 
 AO_LEAD_JUMP_MAX_M = 15.0
 
-# Δt 超过此值说明中间丢帧/挂起，不再当作"单周期跳变"判定。
 AO_LEAD_JUMP_MAX_DT_SEC = 0.50
 
-# 跳变后的静默期。
 AO_LEAD_SETTLE_SEC = 0.50
-
-# ----------------------------------------------------------------------------
-# Hard rear-gap gate.
-#
-# The caller supplies a *zone level* for the target lane:
-#
-#     0  no vehicle approaching from behind        -> clear
-#     1  vehicle in zone 4 (far)                   -> clear
-#     2  vehicle in zone 3                         -> clear
-#     3  vehicle in zone 2 (getting close)         -> BLOCKED
-#     4  vehicle in zone 1 (near)                  -> BLOCKED
-#
-# A separate health flag marks a faulty / blocked rear sensor, which is
-# also treated as BLOCKED (fail closed).
-# ----------------------------------------------------------------------------
 
 AO_REAR_ZONE_MAX_OK = 2
 
 AO_REAR_ZONE_BLOCK = 3
 
-# When no rear-zone information is available at all, automatic overtaking is
-# refused (fail closed).  Set False only for bench testing.
-#
-# NOTE: carstate.py publishes AOBsmZone whenever enableBsm is set.  If this
-# build turns out not to publish it, automatic overtaking would be fully
-# disabled.  Default is therefore False: with no zone data the helper falls
-# back to the BSM boolean veto plus the (now much stricter) speed / headway /
-# closing-speed gates, which already fix every reported defect.
 AO_REQUIRE_REAR_ZONE = False
 
-
-# ============================================================================
-# [AO_LANE_CONF_GATE] 目标车道线置信度硬门（本轮核心安全加固）
-#
-# 缺陷背景（route 43 实测，auto_overtake.log）：
-#   接线侧（modeld.py:812-813）的判定是
-#
-#       left_ok  = (not left_edge)  and lp_left  >= ao_cfg["lane_prob_min"]
-#       right_ok = (not right_edge) and lp_right >= ao_cfg["lane_prob_min"]
-#
-#   而设备上 AutoOvertakeLaneProbMin 参数被设成了 **0.0**，于是
-#   "lp >= 0.0" 恒真 -> 车道线置信度筛选**完全失效**，
-#   left_ok/right_ok 退化成"只要没检测到路沿就算可用"。
-#
-#   实测（v>=65km/h 共 5012 帧）：
-#     lok=1 且 lp0 < 0.1  : 256 帧
-#     rok=1 且 lp3 < 0.1  : 217 帧
-#     lok=1&rok=1 且 lp0<0.3&lp3<0.3 : 149 帧  ← 两侧车道线都不可信仍判可用
-#   典型：10:32:14 v=97.8 lok=1 rok=1 lp0=0.0 lp3=0.0
-#
-#   而 laneLines / roadEdges 在 modelV2 里只有 t/x/y/z，**没有实线/虚线类型**，
-#   所以唯一可靠的"目标车道是否真的存在且可信"信号就是车道线概率。
-#
-# 修复：在 AO 内部**再设一道硬门**，不依赖可被误设的参数。
-#   参数是"用户偏好"，此处是"安全底线"，两者取较严者。
-# ============================================================================
-
-# ----------------------------------------------------------------------------
-# ★★★ 重要修正（第二轮实测发现）★★★
-#
-# 进一步分析 lp0 / lp3 的**联合分布**后发现：
-#
-#     corr(lp0, lp3) = -0.6833        ← 强负相关！
-#
-#   右线良好(lp3>=0.5)的 2601 帧中，97.2% 左线 lp0 < 0.3
-#   左线良好(lp0>=0.5)的  834 帧中，91.0% 右线 lp3 < 0.3
-#
-# 即：**同一时刻通常只有一条车道线被模型明确分到 laneLines 槽位**，
-# 另一侧的槽位为空、概率塌到 0。这不是"那侧没有车道线"，而是
-# modelV2 车道线槽位分配（slot assignment）的固有特性。
-#
-# 因此**不能**要求"两侧都必须高置信度"——那会在 90% 以上的时间把
-# 自动超车彻底锁死。正确的判据是：
-#
-#   (a) 要变过去的那一侧，置信度必须达标；
-#   (b) 或者另一侧高度可信、可作为几何佐证（说明本车稳稳压在两条线之间）；
-#   (c) 两侧同时丢失 -> 视为路口/实线/标线不可用，禁止变道。
-#
-# 于是本模块的硬门改为**非对称 + 双线丢失**判定，见 _lane_conf_ok()。
-# ----------------------------------------------------------------------------
-
-# 目标车道线概率的绝对下限。低于此值视为"该侧车道不存在/不可信"。
 AO_LANE_PROB_HARD_MIN = 0.30
 
-# 用于"对侧佐证"的高置信度门。对侧概率高于此值时，
-# 认为本车被稳定约束在两条线之间，本侧的低置信度可以由几何佐证弥补。
 AO_LANE_PROB_WITNESS = 0.55
 
-# 若接线侧显式传入了更严格的下限（lane_prob_min），取其较大者。
-# 传入 0 或 None 时回落到本硬门。
 AO_LANE_PROB_USE_PARAM = True
 
-
-# ----------------------------------------------------------------------------
-# [AO_LANE_CONF_STICKY] 车道线置信度的短时记忆。
-#
-# 单帧的概率抖动不应立刻把一条本来可信的车道判死，但**持续**的低置信度
-# 必须立即否决。这里对"存活样本"做窗口内全票通过判定；窗口内若无有效样本，
-# 则回落到"最近一次已知判定"（见 _lane_conf_ok 的 fail-open-last 逻辑）。
-# ----------------------------------------------------------------------------
 AO_LANE_CONF_STICKY_SEC = 0.30
-
-
-# ============================================================================
-# [AO_JUNCTION_GATE] 路口 / 红绿灯前禁止自动变道（本车无法识别实线，
-#                   故以"接近路口"作为禁止区间）
-#
-# 判定来源（两路结合，任一命中即禁止）：
-#
-#   1) 车道线断段启发式（立即可用）
-#      接近路口 / 实线段起点时，模型的车道线概率会出现**骤降或丢失**。
-#      判据：本侧车道线概率低于 AO_JUNCTION_LANE_PROB，
-#            或该侧车道线在窗口内断续（概率方差大）。
-#
-#   2) 地图路口信号（预留接口）
-#      当前 Custom.AmapNavi 只有 leftBlind/rightBlind，**没有路口信息**。
-#      这里预留读取 sm['amapNavi'] 的接口：一旦 capnp 增加
-#      "intersectionDist"（或类似字段），无需再改本文件即可生效。
-#
-# 禁止区间 = 路口前 AO_JUNCTION_BAN_DIST_M 米。
-# ============================================================================
 
 AO_JUNCTION_BAN_DIST_M = 15.0
 
-# 车道线断段判据：概率低于此值视为"断段"。
-# route 43 实测（v>=65，两侧同时低于此值共 428 帧，占 8.5%）——
-# 这些帧里 AO 原判定仍常给出 lok=1&rok=1，是最危险的一类样本。
 AO_JUNCTION_LANE_PROB = 0.30
 
-# 断段需持续多久才认定为路口/实线区（避免单帧抖动误禁）。
-# 0.60s @ 100km/h = 16.7m，与 AO_JUNCTION_BAN_DIST_M=15m 的时间尺度一致。
 AO_JUNCTION_CONFIRM_SEC = 0.60
 
-# 断段判定所需的**最少连续低置信样本数**。
-# 1Hz 校准日志下不足以直接反映 20Hz 控制环；控制环按 20Hz 计，
-# 0.60s 窗口内需要 >= 6 个样本才算"持续丢失"。
 AO_JUNCTION_MIN_SAMPLES = 6
-
-
-# ============================================================================
-# [AO_CONF_LOG] 置信度/路口专用落盘日志（供后续校准阈值）
-# ============================================================================
 
 AO_CONF_LOG_PATH = "/data/media/0/ao_conf.log"
 AO_CONF_LOG_MAX_BYTES = 2_000_000
 AO_CONF_LOG_PERIOD_SEC = 0.5
-
-
-# ============================================================================
-# Passed-lead logic
-# ============================================================================
 
 PASSED_LEAD_DIST = 35.0
 
@@ -550,19 +92,9 @@ PASSED_LEAD_STABLE_SEC = 0.50
 
 LEAD_LOST_STABLE_SEC = 0.50
 
-
-# ============================================================================
-# Sensor freshness
-# ============================================================================
-
 MR76_MAX_AGE_SEC = 0.25
 
 LIDAR_MAX_AGE_SEC = 0.25
-
-
-# ============================================================================
-# Safety veto persistence
-# ============================================================================
 
 """
 Once a target lane has been rejected because of a safety sensor,
@@ -583,43 +115,11 @@ from creating rapid oscillation.
 
 SAFETY_VETO_HOLD_SEC = 1.50
 
-
-# ============================================================================
-# Lane preference
-# ============================================================================
-
 LANE_PREF_AUTO = 0
 LANE_PREF_KEEP_LEFT = 1
 LANE_PREF_KEEP_RIGHT = 2
 
-
-# ============================================================================
-# Utility
-# ============================================================================
-
 def _overtake_min_speed(v_cruise):
-    """[AO_MIN_SPEED_CRUISE_HOOKUP] 与巡航速度挂钩的超车准入速度门槛。
-
-    Returns the minimum ego speed (m/s) required before a NORMAL automatic
-    overtake may be considered.
-
-        v_min = clamp(v_cruise - OVERTAKE_SPEED_DELTA, FLOOR, CAP)
-
-    Rationale
-    ---------
-    A fixed 90 km/h floor made normal overtaking unreachable on suburban /
-    urban roads where the cruise target itself is only ~54 km/h.  Tying the
-    floor to the cruise target keeps the safety intent ("only overtake when
-    the cruise target is meaningfully above the lead") while staying
-    reachable at lower speeds.
-
-    Safety
-    ------
-    * FLOOR (60 km/h) prevents low-speed casual lane changes.
-    * CAP (90 km/h) preserves the previous strict behaviour on the highway.
-    * A missing / non-positive v_cruise yields FLOOR (fail-closed toward the
-      conservative floor, never toward permissiveness at speed).
-    """
     v_cruise = _safe_float(v_cruise)
 
     if v_cruise is None or v_cruise <= 0.0:
@@ -635,7 +135,6 @@ def _overtake_min_speed(v_cruise):
 
     return hooked
 
-
 def _safe_float(value):
     try:
         value = float(value)
@@ -647,13 +146,11 @@ def _safe_float(value):
 
     return value
 
-
 def _safe_bool(value):
     if value is None:
         return None
 
     return bool(value)
-
 
 def _sensor_fresh(
     available,
@@ -661,11 +158,6 @@ def _sensor_fresh(
     age,
     max_age,
 ):
-    """
-    Explicit sensor-health gate.
-
-    Missing / invalid / stale is NOT interpreted as safe.
-    """
 
     if not bool(available):
         return False
@@ -686,21 +178,10 @@ def _sensor_fresh(
 
     return age <= max_age
 
-
 def compute_ttc(
     distance,
     closing_speed,
 ):
-    """
-    distance:
-        meters
-
-    closing_speed:
-        positive means rear target is approaching ego.
-
-    Returns:
-        TTC seconds or None.
-    """
 
     distance = _safe_float(distance)
     closing_speed = _safe_float(closing_speed)
@@ -715,11 +196,6 @@ def compute_ttc(
         return None
 
     return distance / closing_speed
-
-
-# ============================================================================
-# Helper
-# ============================================================================
 
 class AutoOvertakeHelper:
 
@@ -748,10 +224,6 @@ class AutoOvertakeHelper:
 
         self._lead_lost_since = None
 
-        # --------------------------------------------------------------
-        # [AO_DC_LEAD_JUMP] 前车距离跳变抑制
-        # --------------------------------------------------------------
-
         self._lead_hist_t = None
         self._lead_jump_until = 0.0
         self._lead_jump_count = 0
@@ -765,45 +237,26 @@ class AutoOvertakeHelper:
 
         self._last_overtake_time = 0.0
 
-        # --------------------------------------------------------------
-        # [AO_LANE_CONF_GATE] lane-line confidence hard gate
-        # --------------------------------------------------------------
-
         self._lane_conf_hist = {
             "left": [],
             "right": [],
         }
 
-        # Latest raw probability per side (for witness / diagnostics).
         self._lane_conf_raw = {
             "left": None,
             "right": None,
         }
 
-        # Effective "opposite-side witness" threshold (refreshed each cycle).
         self._lane_conf_witness = AO_LANE_PROB_WITNESS
 
-        # Latest caller preference (lane_prob_min), refreshed each cycle.
         self._lane_prob_min_current = None
-
-        # --------------------------------------------------------------
-        # [AO_JUNCTION_GATE] junction / red-light zone
-        # --------------------------------------------------------------
 
         self._junction_since = None
         self._junction_source = None
         self._junction_samples = 0
         self._last_junction_ban = False
 
-        # --------------------------------------------------------------
-        # [AO_CONF_LOG] calibration log throttle
-        # --------------------------------------------------------------
-
         self._conf_log_t = -1e9
-
-        # --------------------------------------------------------------
-        # Safety veto state
-        # --------------------------------------------------------------
 
         self._left_veto_until = 0.0
         self._right_veto_until = 0.0
@@ -814,61 +267,23 @@ class AutoOvertakeHelper:
         self._last_veto_direction = LaneChangeDirection.none
         self._last_veto_reason = ""
 
-        # --------------------------------------------------------------
-        # [AO_LANE_GAIN_GATE] 目标车道收益门状态
-        # --------------------------------------------------------------
-
-        # 本周期两侧的收益判定结果（供 preparing 阶段复验）。
         self._gain_ok_left = False
         self._gain_ok_right = False
 
         self._gain_reason_left = "gain_unavailable"
         self._gain_reason_right = "gain_unavailable"
 
-        # 最近一次因收益门被拦下的方向 / 原因（诊断用）。
         self._last_gain_block_dir = LaneChangeDirection.none
         self._last_gain_reason = "gain_unavailable"
 
-    # ==================================================================
-    # Reset
-    # ==================================================================
-
     def reset(self):
         self.__init__()
-
-    # ==================================================================
-    # [AO_DB_NO_FREEZE] speed-gate abort
-    # ==================================================================
 
     def _speed_gate_abort(
         self,
         now,
         lc_state,
     ):
-        """速度门命中时的收尾。核心原则：绝不留下"等一个永不到来的事件"。
-
-        ---------------------------------------------------------------- 缺陷 --
-        实测（2026-10-15 08:23:52 UTC = 北京 16:23）：ACC 于 08:23:55 脱开
-        （v_cruise -> 0），速度门命中；原实现只对 idle/preparing 做 reset，
-        对 changing_out / waiting_return / changing_back 直接 return ——
-        状态机**原地冻结 441 s**（08:23:53 -> 08:31:14），期间 _last_reason
-        不更新、_observed_out_lc 残留 True。ACC 于 08:31:15 恢复后，残留状态
-        让 AO 把"已经结束的变道"当成"刚完成"，错误进入 waiting_return。
-
-        ------------------------------------------------------------- 新语义 --
-        1. DesireHelper 正在执行这次变道（_observed_out_lc /
-           _observed_return_lc 为真且 lc_state != off）
-           -> AO 立刻停止发起新请求，但等变道自然结束再收尾，
-              不在变道中途把状态机打散。
-              （DesireHelper 进入 laneChangeStarting 之后就不再依赖 AO 的
-               请求，所以这里返回 none 不会中断已经开始的那次变道。）
-        2. 其余所有情况 -> 立即 reset 收尾；若之前确实在一次超车流程里，
-           额外加 OVERTAKE_COOLDOWN_SEC 冷却，避免速度恢复后立刻重发。
-        """
-
-        # --------------------------------------------------------------
-        # 1) 变道已经真正开始：等它结束。不冻结，也不打断。
-        # --------------------------------------------------------------
 
         if (
             (
@@ -883,10 +298,6 @@ class AutoOvertakeHelper:
             self._last_reason = "speed_gate_hold_lc"
 
             return
-
-        # --------------------------------------------------------------
-        # 2) 其余情况一律收尾。
-        # --------------------------------------------------------------
 
         in_maneuver = self._mode in (
             "changing_out",
@@ -904,10 +315,6 @@ class AutoOvertakeHelper:
             )
 
             self._last_reason = "speed_gate_abort"
-
-    # ==================================================================
-    # Utility
-    # ==================================================================
 
     @staticmethod
     def _stable_ok(
@@ -938,21 +345,12 @@ class AutoOvertakeHelper:
 
         return LaneChangeDirection.none
 
-    # ==================================================================
-    # Safety veto
-    # ==================================================================
-
     def _set_lane_veto(
         self,
         side,
         reason,
         now,
     ):
-        """
-        Latch a lane safety veto.
-
-        A veto is deliberately stronger than lane scoring.
-        """
 
         until = now + SAFETY_VETO_HOLD_SEC
 
@@ -996,24 +394,11 @@ class AutoOvertakeHelper:
         self._last_veto_reason = reason
         self._last_reason = reason
 
-    # ==================================================================
-    # Rear safety
-    # ==================================================================
-
     @staticmethod
     def _rear_lane_blocked(
         distance,
         closing_speed,
     ):
-        """
-        Conservative rear/side traffic veto.
-
-        This is an additional safety gate.
-
-        It is NOT the only MR76 obstacle test.
-
-        A valid explicit MR76 obstacle flag is handled separately.
-        """
 
         distance = _safe_float(distance)
 
@@ -1052,10 +437,6 @@ class AutoOvertakeHelper:
 
         return False
 
-    # ==================================================================
-    # [AO_SAFETY_TIGHTEN] Rear approach-zone gate
-    # ==================================================================
-
     def _rear_zone_gate(
         self,
         *,
@@ -1064,24 +445,6 @@ class AutoOvertakeHelper:
         rear_sensor_fault,
         now,
     ):
-        """
-        Hard rear-gap gate for automatic overtaking.
-
-        rear_zone
-            0..4 zone level of the nearest vehicle approaching from behind
-            in the target lane (0 = none/far, 4 = nearest).
-            None  -> information unavailable.
-
-        rear_sensor_fault
-            True when the OEM rear sensor reports fault / blockage.
-            A faulty sensor is fail-closed.
-
-        Returns True when entry is allowed.
-        """
-
-        # ----------------------------------------------------------
-        # Sensor health first: fail closed
-        # ----------------------------------------------------------
 
         if bool(rear_sensor_fault):
             self._set_lane_veto(
@@ -1126,35 +489,15 @@ class AutoOvertakeHelper:
 
         return True
 
-    # ==================================================================
-    # Explicit obstacle interpretation
-    # ==================================================================
-
     @staticmethod
     def _explicit_obstacle_present(
         obstacle,
     ):
-        """
-        Interpret an explicit sensor obstacle indication.
-
-        None:
-            caller did not provide an explicit obstacle state.
-
-        False:
-            sensor explicitly says no obstacle.
-
-        True:
-            immediate safety veto.
-        """
 
         if obstacle is None:
             return None
 
         return bool(obstacle)
-
-    # ==================================================================
-    # MR76 safety
-    # ==================================================================
 
     def _mr76_lane_safe(
         self,
@@ -1169,36 +512,7 @@ class AutoOvertakeHelper:
         require_aux_sensors,
         now,
     ):
-        """
-        MR76 lane safety.
 
-        Priority:
-
-            unavailable/stale
-                ->
-            explicit obstacle
-                ->
-            rear target safety
-                ->
-            safe
-
-        Important:
-
-        An explicit MR76 obstacle is an unconditional veto.
-
-        It does NOT matter whether:
-
-            distance > 20m
-            closing speed is low
-            TTC is large
-
-        if the caller says an object occupies the target lane,
-        automatic overtaking is blocked.
-        """
-
-        # [AO_AUX_NO_DATA_PASS] available is None = 该侧 MR76 未接入。
-        # 未接入不是"不安全"，只是"无法用此传感器收紧"。此时放行，
-        # 其余判据（车道线置信度 / BSM / 距离带 / headway）仍然生效。
         if available is None:
             return True
 
@@ -1238,10 +552,6 @@ class AutoOvertakeHelper:
         if not mr76_ok:
             return True
 
-        # --------------------------------------------------------------
-        # Legacy rear target safety
-        # --------------------------------------------------------------
-
         if (
             rear_dist is not None
             or
@@ -1263,10 +573,6 @@ class AutoOvertakeHelper:
 
         return True
 
-    # ==================================================================
-    # LiDAR safety
-    # ==================================================================
-
     def _lidar_lane_safe(
         self,
         *,
@@ -1279,18 +585,7 @@ class AutoOvertakeHelper:
         require_aux_sensors,
         now,
     ):
-        """
-        WiFi LiDAR lane safety.
 
-        LiDAR obstacle has unconditional veto priority.
-
-        Missing / stale LiDAR is unsafe when auxiliary sensors
-        are required for automatic overtaking.
-        """
-
-        # [AO_AUX_NO_DATA_PASS] lidar_available is None = 该侧 LiDAR 未接入。
-        # 本车 LiDAR 尚未接入，必须放行，否则自动超车被永久锁死。
-        # 一旦将来接入（available=True），下面的严格判定立即生效。
         if lidar_available is None:
             return True
 
@@ -1311,10 +606,6 @@ class AutoOvertakeHelper:
 
             return False
 
-        # --------------------------------------------------------------
-        # Explicit obstacle flag
-        # --------------------------------------------------------------
-
         explicit_obstacle = (
             self._explicit_obstacle_present(
                 lidar_obstacle
@@ -1331,10 +622,6 @@ class AutoOvertakeHelper:
 
             return False
 
-        # --------------------------------------------------------------
-        # Existing lidar_free interface
-        # --------------------------------------------------------------
-
         if lidar_ok:
 
             if lidar_free is not True:
@@ -1349,10 +636,6 @@ class AutoOvertakeHelper:
 
         return True
 
-    # ==================================================================
-    # BSM safety
-    # ==================================================================
-
     def _bsm_lane_safe(
         self,
         *,
@@ -1361,11 +644,6 @@ class AutoOvertakeHelper:
         bsm_blocked,
         now,
     ):
-        """
-        BSM is another independent safety veto.
-
-        BSM is never used to generate an overtaking request.
-        """
 
         if not bool(bsm_available):
             self._set_lane_veto(
@@ -1388,24 +666,10 @@ class AutoOvertakeHelper:
 
         return True
 
-    # ==================================================================
-    # [AO_LANE_CONF_GATE] Lane-line confidence hard gate
-    # ==================================================================
-
     def _lane_conf_threshold(
         self,
         lane_prob_min,
     ):
-        """Hard minimum lane-line probability.
-
-        Takes the stricter of:
-          - the module safety floor  AO_LANE_PROB_HARD_MIN
-          - the caller preference   lane_prob_min (if usable)
-
-        A caller preference of 0 / None is IGNORED: it is exactly the
-        misconfiguration that disabled the filter on this car
-        (AutoOvertakeLaneProbMin was set to 0.0).
-        """
 
         threshold = AO_LANE_PROB_HARD_MIN
 
@@ -1430,14 +694,6 @@ class AutoOvertakeHelper:
         left_lane_prob,
         right_lane_prob,
     ):
-        """Maintain a short sticky window of lane-line confidence.
-
-        A single low-probability frame must not instantly kill a lane,
-        but a *sustained* low reading must.  We store the raw probability
-        per sample and judge later (see _lane_conf_ok), because the verdict
-        for one side also depends on the *other* side's reading
-        (they are strongly anti-correlated on this car).
-        """
 
         threshold = self._lane_conf_threshold(
             self._lane_prob_min_current
@@ -1503,20 +759,6 @@ class AutoOvertakeHelper:
         self,
         side,
     ):
-        """Asymmetric lane-line confidence verdict for one side.
-
-        Because lp_left and lp_right are strongly ANTI-correlated on this
-        car (corr = -0.68), demanding both sides be confident would lock
-        out overtaking >90% of the time.  The correct test is:
-
-          1. The target side is confident enough on its own; OR
-          2. The opposite side is *highly* confident (witness), which
-             proves the car is well-contained between two lines, so a
-             weak reading on the target side is a slot-assignment
-             artefact rather than a missing lane.
-
-        Fail-closed when we have no usable sample at all.
-        """
 
         hist = self._lane_conf_hist[
             side
@@ -1529,7 +771,6 @@ class AutoOvertakeHelper:
             "left"
         )
 
-        # --- 1) direct evidence on this side -------------------------
         seen = False
         all_ok = True
 
@@ -1551,7 +792,6 @@ class AutoOvertakeHelper:
 
             return True
 
-        # --- 2) witness from the opposite side -----------------------
         raw_other = self._lane_conf_raw.get(
             other
         )
@@ -1570,14 +810,12 @@ class AutoOvertakeHelper:
 
             return True
 
-        # --- 3) fail closed -----------------------------------------
         return False
 
     def _lane_conf_raw_of(
         self,
         side,
     ):
-        """Latest raw probability seen for a side (diagnostics)."""
 
         return self._lane_conf_raw.get(
             side
@@ -1587,7 +825,6 @@ class AutoOvertakeHelper:
         self,
         side,
     ):
-        """Human-readable veto reason for the confidence gate."""
 
         return (
             "left_lane_conf_low"
@@ -1596,10 +833,6 @@ class AutoOvertakeHelper:
             "right_lane_conf_low"
         )
 
-    # ==================================================================
-    # [AO_JUNCTION_GATE] Junction / stop-line zone
-    # ==================================================================
-
     def _update_junction_guess(
         self,
         now,
@@ -1607,14 +840,6 @@ class AutoOvertakeHelper:
         right_lane_prob,
         junction_dist,
     ):
-        """Heuristic junction detection from lane-line dropout.
-
-        Near an intersection / the start of a solid-line section the
-        model typically loses the lane lines: probabilities collapse or
-        become intermittent.  We require the dropout to persist for
-        AO_JUNCTION_CONFIRM_SEC before declaring a junction zone, so a
-        single noisy frame cannot ban overtaking.
-        """
 
         lp_left = _safe_float(
             left_lane_prob
@@ -1624,9 +849,6 @@ class AutoOvertakeHelper:
             right_lane_prob
         )
 
-        # Both sides must be weak for this to look like a junction.
-        # (A single weak side is far more likely to be a shadow / worn
-        #  paint on one line only.)
         left_weak = (
             lp_left is not None
             and
@@ -1639,7 +861,6 @@ class AutoOvertakeHelper:
             lp_right < AO_JUNCTION_LANE_PROB
         )
 
-        # Explicit map signal outranks the heuristic.
         d = _safe_float(
             junction_dist
         )
@@ -1650,7 +871,6 @@ class AutoOvertakeHelper:
             d <= AO_JUNCTION_BAN_DIST_M
         ):
 
-            # Map says we are inside the ban zone: latch it.
             if self._junction_since is None:
 
                 self._junction_since = now
@@ -1669,7 +889,6 @@ class AutoOvertakeHelper:
 
             self._junction_samples += 1
 
-            # Only promote to an active ban once it has persisted.
             if (
                 self._junction_source
                 != "map"
@@ -1678,7 +897,6 @@ class AutoOvertakeHelper:
 
             return
 
-        # Lane lines look healthy again -> clear the latch.
         self._junction_since = None
 
         self._junction_source = None
@@ -1690,9 +908,7 @@ class AutoOvertakeHelper:
         now,
         junction_dist,
     ):
-        """True when automatic lane changes must be forbidden."""
 
-        # Map source: authoritative whenever inside the ban distance.
         d = _safe_float(
             junction_dist
         )
@@ -1705,8 +921,6 @@ class AutoOvertakeHelper:
 
             return True
 
-        # Heuristic source: require the dropout to have persisted in
-        # BOTH wall-clock time and sample count.
         if self._junction_since is None:
 
             return False
@@ -1722,10 +936,6 @@ class AutoOvertakeHelper:
             self._junction_samples
             >= AO_JUNCTION_MIN_SAMPLES
         )
-
-    # ==================================================================
-    # Lane sensor safety
-    # ==================================================================
 
     def _lane_sensor_safe(
         self,
@@ -1748,7 +958,6 @@ class AutoOvertakeHelper:
         bsm_blocked,
         bsm_available,
 
-        # [AO_SAFETY_TIGHTEN] rear approach-zone inputs
         rear_zone=None,
         rear_sensor_fault=None,
 
@@ -1758,25 +967,6 @@ class AutoOvertakeHelper:
 
         now,
     ):
-        """
-        Final safety gate.
-
-        ALL safety sources must pass.
-
-            base lane
-                AND
-            MR76
-                AND
-            LiDAR
-                AND
-            BSM
-
-        No sensor is allowed to override another sensor.
-        """
-
-        # --------------------------------------------------------------
-        # Existing openpilot / lane-model safety
-        # --------------------------------------------------------------
 
         if not bool(base_lane_ok):
 
@@ -1788,23 +978,12 @@ class AutoOvertakeHelper:
 
             return False
 
-        # --------------------------------------------------------------
-        # Existing latched safety veto
-        # --------------------------------------------------------------
-
         if self._lane_vetoed(
             side,
             now,
         ):
 
             return False
-
-        # --------------------------------------------------------------
-        # [AO_SAFETY_TIGHTEN] rear approach-zone gate
-        #
-        # Runs before every other auxiliary gate so an insufficient rear
-        # gap always blocks, whatever the MR76 / LiDAR plumbing does.
-        # --------------------------------------------------------------
 
         if not self._rear_zone_gate(
             side=side,
@@ -1813,10 +992,6 @@ class AutoOvertakeHelper:
             now=now,
         ):
             return False
-
-        # --------------------------------------------------------------
-        # MR76
-        # --------------------------------------------------------------
 
         if not self._mr76_lane_safe(
             side=side,
@@ -1835,10 +1010,6 @@ class AutoOvertakeHelper:
         ):
             return False
 
-        # --------------------------------------------------------------
-        # LiDAR
-        # --------------------------------------------------------------
-
         if not self._lidar_lane_safe(
             side=side,
 
@@ -1854,10 +1025,6 @@ class AutoOvertakeHelper:
         ):
             return False
 
-        # --------------------------------------------------------------
-        # BSM
-        # --------------------------------------------------------------
-
         if not self._bsm_lane_safe(
             side=side,
             bsm_available=bsm_available,
@@ -1868,10 +1035,6 @@ class AutoOvertakeHelper:
 
         return True
 
-    # ==================================================================
-    # Lane scoring
-    # ==================================================================
-
     @staticmethod
     def _lane_score(
         *,
@@ -1881,11 +1044,6 @@ class AutoOvertakeHelper:
         lane_preference,
         is_highway,
     ):
-        """
-        Safety is completed BEFORE this function.
-
-        Scoring can only select between lanes that are already safe.
-        """
 
         score = 0.0
 
@@ -1937,10 +1095,6 @@ class AutoOvertakeHelper:
 
         return score
 
-    # ==================================================================
-    # [AO_LANE_GAIN_GATE] Target-lane benefit gate (Plan A)
-    # ==================================================================
-
     @staticmethod
     def _lane_gain_ok(
         *,
@@ -1950,43 +1104,14 @@ class AutoOvertakeHelper:
         ego_lead_d,
         ego_lead_v,
     ):
-        """目标车道是否比本车道更有"超车收益"。
-
-        Returns (ok, reason)。三态 fail-closed：
-
-            target_present is None  -> (False, "gain_unavailable")
-            target_present is False -> (True,  "gain_clear")
-            target_present is True  -> 需要证据，否则 (False, "gain_no_benefit")
-
-        本函数只回答"值不值得换过去"，不做任何安全判定；安全已在上游
-        _lane_sensor_safe() 完成。
-        """
-
-        # --------------------------------------------------------------
-        # 1) 信息不可得：不允许。
-        #
-        #    与安全门的 available=None -> 放行 语义相反。
-        # --------------------------------------------------------------
 
         if target_present is None:
 
             return False, "gain_unavailable"
 
-        # --------------------------------------------------------------
-        # 2) 明确知道目标车道前方没有车 = 真正的"更空"。
-        # --------------------------------------------------------------
-
         if not bool(target_present):
 
             return True, "gain_clear"
-
-        # --------------------------------------------------------------
-        # 3) 目标车道前方有车：必须证明它比本车道前车"更值得跟"。
-        #
-        #    (a) 明显更远  -> 有收益
-        #    (b) 明显更快  -> 有收益
-        #    否则          -> 无收益，不允许（含"只知有车、不知速度"）
-        # --------------------------------------------------------------
 
         _d = _safe_float(
             target_d
@@ -2030,10 +1155,6 @@ class AutoOvertakeHelper:
 
         return False, "gain_no_benefit"
 
-    # ==================================================================
-    # Choose best lane
-    # ==================================================================
-
     def _choose_best_lane(
         self,
         *,
@@ -2074,10 +1195,6 @@ class AutoOvertakeHelper:
 
         return LaneChangeDirection.none
 
-    # ==================================================================
-    # OEM lead / overtaking need
-    # ==================================================================
-
     def _update_need_overtake(
         self,
         *,
@@ -2088,17 +1205,6 @@ class AutoOvertakeHelper:
         v_ego,
         v_cruise,
     ):
-        """
-        OEM lead is the ONLY normal overtaking trigger.
-
-        MR76 and LiDAR are deliberately absent from this function.
-        """
-
-        # --------------------------------------------------------------
-        # [AO_DC_LEAD_JUMP] 前车距离刚发生跳变 -> 静默，不产生超车意图。
-        #
-        # 放在最前面：跳变期间连"前车是不是同一个目标"都不可信。
-        # --------------------------------------------------------------
 
         if now < self._lead_jump_until:
 
@@ -2155,21 +1261,6 @@ class AutoOvertakeHelper:
             v_lead
         )
 
-        # ==============================================================
-        # [AO_SAFETY_TIGHTEN] Physical need gate.
-        #
-        # Measured defect: with cruise = 100 km/h and a lead at 74 km/h the
-        # old predicate
-        #       (v_cruise - v_lead) >= OVERTAKE_SPEED_DELTA
-        # is true even when ego is NOT closing on the lead (closing speed
-        # measured negative in the field log).  The overtake was therefore
-        # requested while the relative speed was zero or negative.
-        #
-        # The gate below requires a *sustained physical* closing speed
-        # (ego minus lead), a sane lead distance band, and the absolute
-        # 90 km/h floor.
-        # ==============================================================
-
         ego_closing = (
             v_ego
             -
@@ -2208,9 +1299,6 @@ class AutoOvertakeHelper:
 
             and
 
-            # [AO_MIN_SPEED_CRUISE_HOOKUP] 原为硬编码 OVERTAKE_MIN_SPEED
-            # (90 km/h)，导致低速路况永不触发。改为与巡航挂钩，见
-            # _overtake_min_speed()。
             v_ego
             >= _overtake_min_speed(v_cruise)
         )
@@ -2229,10 +1317,6 @@ class AutoOvertakeHelper:
             -
             self._need_since
         ) >= OVERTAKE_LEAD_STABLE_SEC
-
-    # ==================================================================
-    # Lead history
-    # ==================================================================
 
     def _update_lead_history(
         self,
@@ -2268,13 +1352,6 @@ class AutoOvertakeHelper:
             self._lead_hist_t = now
 
             return
-
-        # --------------------------------------------------------------
-        # [AO_DC_LEAD_JUMP] 单周期距离跳变检测。
-        #
-        # 只在 Δt 合理（没丢帧）时才判跳变；跳变后强制静默
-        # AO_LEAD_SETTLE_SEC，避免"雷达目标切换"被当成"正在快速接近"。
-        # --------------------------------------------------------------
 
         _dt = (
             None
@@ -2314,10 +1391,6 @@ class AutoOvertakeHelper:
 
         self._lead_last_distance = lead_d
 
-    # ==================================================================
-    # Passed lead
-    # ==================================================================
-
     def _lead_passed(
         self,
         *,
@@ -2327,9 +1400,6 @@ class AutoOvertakeHelper:
         v_ego,
         v_lead,
     ):
-        """
-        Passing requires spatial evidence or stable lead disappearance.
-        """
 
         lead_d = _safe_float(
             lead_d
@@ -2342,10 +1412,6 @@ class AutoOvertakeHelper:
         v_lead = _safe_float(
             v_lead
         )
-
-        # --------------------------------------------------------------
-        # Stable lead disappearance
-        # --------------------------------------------------------------
 
         if not lead_present:
 
@@ -2360,10 +1426,6 @@ class AutoOvertakeHelper:
                 >= LEAD_LOST_STABLE_SEC
             ):
                 return True
-
-        # --------------------------------------------------------------
-        # Spatial pass
-        # --------------------------------------------------------------
 
         if (
             lead_d is not None
@@ -2380,10 +1442,6 @@ class AutoOvertakeHelper:
             >= PASSED_LEAD_STABLE_SEC
         ):
             return True
-
-        # --------------------------------------------------------------
-        # Speed advantage requires spatial confirmation
-        # --------------------------------------------------------------
 
         if (
             lead_d is not None
@@ -2407,10 +1465,6 @@ class AutoOvertakeHelper:
                 return True
 
         return False
-
-    # ==================================================================
-    # Main update
-    # ==================================================================
 
     def update(
         self,
@@ -2439,19 +1493,12 @@ class AutoOvertakeHelper:
         left_bsm=False,
         right_bsm=False,
 
-        # --------------------------------------------------------------
-        # [AO_SAFETY_TIGHTEN] rear approach zones (0..4, 0 = clear)
-        # --------------------------------------------------------------
         left_rear_zone=None,
         right_rear_zone=None,
         rear_sensor_fault=None,
 
         lane_preference=LANE_PREF_AUTO,
         min_cruise_speed=None,
-
-        # --------------------------------------------------------------
-        # MR76 explicit state
-        # --------------------------------------------------------------
 
         mr76_left_available=None,
         mr76_right_available=None,
@@ -2462,26 +1509,8 @@ class AutoOvertakeHelper:
         mr76_left_age=None,
         mr76_right_age=None,
 
-        # --------------------------------------------------------------
-        # IMPORTANT:
-        #
-        # Explicit obstacle flags.
-        #
-        # True means:
-        #
-        #     obstacle detected in corresponding lane
-        #
-        # and therefore automatic overtaking is FORBIDDEN.
-        #
-        # None means caller did not provide explicit occupancy.
-        # --------------------------------------------------------------
-
         mr76_left_obstacle=None,
         mr76_right_obstacle=None,
-
-        # --------------------------------------------------------------
-        # WiFi LiDAR state
-        # --------------------------------------------------------------
 
         left_lidar_available=None,
         right_lidar_available=None,
@@ -2492,74 +1521,15 @@ class AutoOvertakeHelper:
         left_lidar_age=None,
         right_lidar_age=None,
 
-        # --------------------------------------------------------------
-        # Explicit LiDAR obstacle flags.
-        #
-        # True:
-        #     obstacle detected
-        #
-        # False:
-        #     explicitly clear
-        #
-        # None:
-        #     not provided
-        # --------------------------------------------------------------
-
         left_lidar_obstacle=None,
         right_lidar_obstacle=None,
-
-        # --------------------------------------------------------------
-        # [AO_LANE_CONF_GATE] 目标车道线概率（0..1）。
-        #
-        # 接线侧必须传入 modelV2.laneLineProbs[0] / [3]。
-        # None 表示未提供 -> 该硬门不生效（保持向后兼容）。
-        # --------------------------------------------------------------
 
         left_lane_prob=None,
         right_lane_prob=None,
 
-        # 接线侧原本的 lane_prob_min（用户偏好）。AO 会与本模块的
-        # 安全硬门 AO_LANE_PROB_HARD_MIN 取较严者。
         lane_prob_min=None,
 
-        # --------------------------------------------------------------
-        # [AO_JUNCTION_GATE] 路口距离（米）。
-        #
-        # 来自地图数据。当前 Custom.AmapNavi 尚无此字段，接线侧传 None
-        # 即可；一旦地图侧提供，直接传入即生效（无需改本文件）。
-        #
-        # 语义：距最近路口（红绿灯/交叉口）的距离，None = 未知。
-        # --------------------------------------------------------------
-
         junction_dist=None,
-
-        # --------------------------------------------------------------
-        # Integration policy
-        #
-        # [AO_AUX_SENSOR_STRICT] 注意：接线侧曾把本参数显式传成 False，
-        # 从而绕过了 MR76 / LiDAR 的传感器健康门（见 _mr76_lane_safe /
-        # _lidar_lane_safe 里的 `if require_aux_sensors and not ...`），
-        # 变道安全性退化为"仅靠 BSM 布尔量"。本轮接线侧已改回 True。
-        #
-        # 若本参数确需为 False（例如台架无传感器），必须显式传入；
-        # 内部默认保持 True（fail closed）。
-        # --------------------------------------------------------------
-
-        # --------------------------------------------------------------
-        # [AO_LANE_GAIN_GATE] 目标车道收益门输入（Plan A）。
-        #
-        # 左/右各一组，由接线侧填入：
-        #
-        #   present = True   目标车道前方有车
-        #   present = False  确认目标车道前方无车（真正的"更空"）
-        #   present = None   信息不可得 -> 收益门 fail-closed 拒绝
-        #
-        # d / v 为可选增强：若能拿到目标车道前车的距离/速度，则
-        # "明显更远"或"明显更快"也可放行；拿不到就传 None。
-        #
-        # 注意：与 mr76_*_available 的默认语义**相反** —— 这里
-        # 默认 None = 拒绝，不是放行。
-        # --------------------------------------------------------------
 
         left_target_lead_present=None,
         right_target_lead_present=None,
@@ -2570,7 +1540,6 @@ class AutoOvertakeHelper:
         left_target_lead_v=None,
         right_target_lead_v=None,
 
-        # 收益门总开关（fail-closed 默认开启）。
         require_lane_gain=AO_GAIN_GATE_DEFAULT,
 
         require_aux_sensors=True,
@@ -2580,8 +1549,6 @@ class AutoOvertakeHelper:
 
         request = LaneChangeDirection.none
 
-        # [AO_LANE_CONF_GATE] remember this cycle's caller preference so
-        # the confidence hard gate can take the stricter threshold.
         self._lane_prob_min_current = lane_prob_min
 
         v_ego = _safe_float(
@@ -2604,10 +1571,6 @@ class AutoOvertakeHelper:
 
             return request
 
-        # ==============================================================
-        # Manual driver control
-        # ==============================================================
-
         if manual_blinker:
 
             self.reset()
@@ -2615,10 +1578,6 @@ class AutoOvertakeHelper:
             self._last_lc_state = lc_state
 
             return request
-
-        # ==============================================================
-        # Enable gate
-        # ==============================================================
 
         if not enabled:
 
@@ -2628,10 +1587,6 @@ class AutoOvertakeHelper:
 
             return request
 
-        # ==============================================================
-        # BSM integration
-        # ==============================================================
-
         if not bsm_available:
 
             self.reset()
@@ -2640,8 +1595,6 @@ class AutoOvertakeHelper:
 
             return request
 
-        # [AO_MIN_SPEED_CRUISE_HOOKUP] 巡航门槛默认值同样与 v_cruise 挂钩，
-        # 否则"v_cruise >= 90km/h"这一条在城郊路况下仍会恒假。
         _ao_default_min_cruise = _overtake_min_speed(v_cruise)
 
         min_cruise_speed = (
@@ -2657,13 +1610,6 @@ class AutoOvertakeHelper:
                 _ao_default_min_cruise
             )
 
-        # ==============================================================
-        # Speed gate
-        # ==============================================================
-
-        # [AO_MIN_SPEED_CRUISE_HOOKUP] 速度门改为与巡航挂钩的动态门槛。
-        # 原 v_ego < OVERTAKE_MIN_SPEED (90 km/h) 在城郊路况下恒真，
-        # 直接 reset()，使后续所有逻辑（含车道选择/确认）永不执行。
         _ao_v_min = _overtake_min_speed(v_cruise)
 
         if (
@@ -2671,14 +1617,6 @@ class AutoOvertakeHelper:
             or
             v_cruise < min_cruise_speed
         ):
-
-            # ----------------------------------------------------------
-            # [AO_DB_NO_FREEZE] 早退分支绝不允许冻结状态机。
-            #
-            # 原实现在这里只对 idle/preparing 做 reset，其余模式直接
-            # return —— 实测导致状态机原地冻结 441 s。改为一律走
-            # _speed_gate_abort() 收尾，详见该方法说明。
-            # ----------------------------------------------------------
 
             self._speed_gate_abort(
                 now,
@@ -2688,22 +1626,6 @@ class AutoOvertakeHelper:
             self._last_lc_state = lc_state
 
             return request
-
-        # ==============================================================
-        # Sensor availability compatibility
-        # ==============================================================
-
-        # ==============================================================
-        # [AO_AUX_NO_DATA_PASS] 辅助传感器 "未接入" 与 "已接入但异常" 必须区分。
-        #
-        # 原实现把"三路输入全 None"强制推导成 False，于是
-        # _sensor_fresh(False, ...) = False，在 require_aux_sensors=True 下
-        # 直接 veto -> 两侧车道恒不安全 -> 自动超车 100% 不触发。
-        #
-        # 新语义：
-        #   三路输入全 None -> 保持 None（= 该传感器未接入）-> 门放行
-        #   只要有任一路输入 -> 推导为 True（= 已接入）-> 严格判定
-        # ==============================================================
 
         if mr76_left_available is None:
 
@@ -2753,10 +1675,6 @@ class AutoOvertakeHelper:
             if _lidar_right_any:
                 right_lidar_available = True
 
-        # ==============================================================
-        # Base lane safety
-        # ==============================================================
-
         left_base = bool(
             left_ok
         )
@@ -2764,15 +1682,6 @@ class AutoOvertakeHelper:
         right_base = bool(
             right_ok
         )
-
-        # ==============================================================
-        # [AO_LANE_CONF_GATE] 目标车道线置信度硬门
-        #
-        # 见文件头部 AO_LANE_PROB_HARD_MIN 处的说明。核心：
-        #   接线侧 lp >= lane_prob_min 在 lane_prob_min=0 时恒真，
-        #   导致车道线置信度为 0 也判可用。
-        # 本处再设一道不可被参数绕过硬门，并与参数取较严者。
-        # ==============================================================
 
         self._update_lane_conf(
             now,
@@ -2796,17 +1705,6 @@ class AutoOvertakeHelper:
 
             right_base = False
 
-        # ==============================================================
-        # [AO_JUNCTION_GATE] 路口 / 红绿灯前禁止自动变道
-        #
-        # 车无法识别实线，且模型不输出线型，故以"接近路口"作为
-        # 禁止变道的保守区间（默认路口前 15m）。
-        #
-        # 两路来源，任一命中即禁止：
-        #   (a) 地图给出的 junction_dist <= AO_JUNCTION_BAN_DIST_M
-        #   (b) 车道线断段启发式（见 _update_junction_guess）
-        # ==============================================================
-
         self._update_junction_guess(
             now,
             left_lane_prob,
@@ -2828,10 +1726,6 @@ class AutoOvertakeHelper:
         self._last_junction_ban = bool(
             junction_ban
         )
-
-        # ==============================================================
-        # Calculate current lane safety
-        # ==============================================================
 
         left_safe = self._lane_sensor_safe(
             side="left",
@@ -2893,19 +1787,6 @@ class AutoOvertakeHelper:
             now=now,
         )
 
-        # ==============================================================
-        # IMPORTANT:
-        #
-        # Explicit obstacle gets absolute veto priority.
-        #
-        # This additional check makes the intended semantics obvious:
-        #
-        #     MR76 obstacle -> no lane
-        #     LiDAR obstacle -> no lane
-        #
-        # even if another sensor says clear.
-        # ==============================================================
-
         if mr76_left_obstacle is True:
 
             left_safe = False
@@ -2946,10 +1827,6 @@ class AutoOvertakeHelper:
                 now,
             )
 
-        # ==============================================================
-        # Stable lane safety
-        # ==============================================================
-
         (
             self._left_ok_since,
             left_stable,
@@ -2970,19 +1847,11 @@ class AutoOvertakeHelper:
             CLEAR_LANE_STABLE_SEC,
         )
 
-        # ==============================================================
-        # OEM lead history
-        # ==============================================================
-
         self._update_lead_history(
             now,
             bool(lead_present),
             lead_d,
         )
-
-        # ==============================================================
-        # OEM lead = ONLY overtaking trigger
-        # ==============================================================
 
         need_overtake = self._update_need_overtake(
             now=now,
@@ -2999,10 +1868,6 @@ class AutoOvertakeHelper:
 
             v_cruise=v_cruise,
         )
-
-        # ==============================================================
-        # Lane scoring
-        # ==============================================================
 
         is_highway = (
             v_ego >= 22.0
@@ -3042,10 +1907,6 @@ class AutoOvertakeHelper:
             ),
         )
 
-        # ==============================================================
-        # Explicit preference only after safety
-        # ==============================================================
-
         if (
             lane_preference
             ==
@@ -3077,18 +1938,6 @@ class AutoOvertakeHelper:
                 best_dir = (
                     LaneChangeDirection.none
                 )
-
-        # ==============================================================
-        # [AO_LANE_GAIN_GATE] 目标车道收益硬门（Plan A）
-        #
-        # 到这里 left_stable / right_stable 已经把"安全"问完了，best_dir
-        # 是"所有安全车道里评分最高的那个"。但"安全"不等于"有收益"：
-        # 目标车道可能同样堵。
-        #
-        # 本门只回答一个问题：换过去到底值不值？
-        # 只做**否决** —— 它可以把 best_dir 打回 none，永远不会凭空造出
-        # 一个变道方向。
-        # ==============================================================
 
         (
             self._gain_ok_left,
@@ -3135,10 +1984,6 @@ class AutoOvertakeHelper:
         else:
 
             self._last_gain_block_dir = LaneChangeDirection.none
-
-        # ==============================================================
-        # No safe lane
-        # ==============================================================
 
         if (
             need_overtake
@@ -3196,10 +2041,6 @@ class AutoOvertakeHelper:
                 "no_safe_lane"
             )
 
-        # ==============================================================
-        # State machine
-        # ==============================================================
-
         if self._mode == "idle":
 
             if (
@@ -3222,15 +2063,7 @@ class AutoOvertakeHelper:
                     "overtake_prepare"
                 )
 
-        # ==============================================================
-        # PREPARING
-        # ==============================================================
-
         elif self._mode == "preparing":
-
-            # ----------------------------------------------------------
-            # Revalidate safety every control cycle.
-            # ----------------------------------------------------------
 
             current_safe = (
                 left_stable
@@ -3241,13 +2074,6 @@ class AutoOvertakeHelper:
                 else
                 right_stable
             )
-
-            # ----------------------------------------------------------
-            # [AO_LANE_GAIN_GATE] 收益门同样每周期复验。
-            #
-            # 安全门复验了，收益门也必须复验：目标车道一旦变得同样
-            # 拥堵，必须在真正下发变道请求之前放弃。
-            # ----------------------------------------------------------
 
             current_gain_ok = (
                 self._gain_ok_left
@@ -3325,10 +2151,6 @@ class AutoOvertakeHelper:
                 self._prepare_since
             ) >= PREPARE_BEFORE_LC_SEC:
 
-                # ------------------------------------------------------
-                # FINAL SAFETY CHECK BEFORE REQUEST
-                # ------------------------------------------------------
-
                 final_safe = (
                     left_stable
                     if
@@ -3370,18 +2192,7 @@ class AutoOvertakeHelper:
                         "overtake_request"
                     )
 
-        # ==============================================================
-        # CHANGING OUT
-        # ==============================================================
-
         elif self._mode == "changing_out":
-
-            # ----------------------------------------------------------
-            # Direction remains locked.
-            #
-            # Before DesireHelper actually starts the LC, continue
-            # applying the safety veto.
-            # ----------------------------------------------------------
 
             if (
                 lc_state
@@ -3444,15 +2255,6 @@ class AutoOvertakeHelper:
                             self._out_dir
                         )
 
-            # ----------------------------------------------------------
-            # Once DesireHelper has actually started the maneuver,
-            # do not issue an opposite-direction command from this
-            # helper.
-            #
-            # Emergency avoidance remains the responsibility of the
-            # dedicated AutoAvoidance layer.
-            # ----------------------------------------------------------
-
             if (
                 self._observed_out_lc
                 and
@@ -3476,10 +2278,6 @@ class AutoOvertakeHelper:
                 self._last_reason = (
                     "overtake_completed"
                 )
-
-        # ==============================================================
-        # WAITING RETURN
-        # ==============================================================
 
         elif self._mode == "waiting_return":
 
@@ -3628,10 +2426,6 @@ class AutoOvertakeHelper:
                         "return_request"
                     )
 
-        # ==============================================================
-        # CHANGING BACK
-        # ==============================================================
-
         elif self._mode == "changing_back":
 
             if (
@@ -3684,10 +2478,6 @@ class AutoOvertakeHelper:
 
         self._last_lc_state = lc_state
 
-        # ==============================================================
-        # [AO_CONF_LOG] calibration log (throttled, best-effort)
-        # ==============================================================
-
         self._write_conf_log(
             now,
 
@@ -3700,10 +2490,6 @@ class AutoOvertakeHelper:
         )
 
         return request
-
-    # ==================================================================
-    # Debug
-    # ==================================================================
 
     def get_state(self):
 
@@ -3750,10 +2536,6 @@ class AutoOvertakeHelper:
             "last_reason":
                 self._last_reason,
 
-            # ----------------------------------------------------------
-            # Safety veto diagnostics
-            # ----------------------------------------------------------
-
             "left_veto_active":
                 now < self._left_veto_until,
 
@@ -3777,10 +2559,6 @@ class AutoOvertakeHelper:
 
             "last_veto_reason":
                 self._last_veto_reason,
-
-            # ----------------------------------------------------------
-            # [AO_LANE_CONF_GATE] / [AO_JUNCTION_GATE] diagnostics
-            # ----------------------------------------------------------
 
             "lane_conf_L":
                 self._lane_conf_ok("left"),
@@ -3817,10 +2595,6 @@ class AutoOvertakeHelper:
             "junction_since":
                 self._junction_since,
 
-            # ----------------------------------------------------------
-            # [AO_LANE_GAIN_GATE] diagnostics
-            # ----------------------------------------------------------
-
             "gain_ok_L":
                 self._gain_ok_left,
 
@@ -3839,10 +2613,6 @@ class AutoOvertakeHelper:
             "last_gain_block_dir":
                 self._last_gain_block_dir,
 
-            # ----------------------------------------------------------
-            # [AO_DC_LEAD_JUMP] diagnostics
-            # ----------------------------------------------------------
-
             "lead_jump_count":
                 self._lead_jump_count,
 
@@ -3857,7 +2627,6 @@ class AutoOvertakeHelper:
         self,
         side,
     ):
-        """Latest raw lane-line probability observed for diagnostics."""
 
         hist = self._lane_conf_hist[
             side
@@ -3873,10 +2642,6 @@ class AutoOvertakeHelper:
 
         return None
 
-    # ==================================================================
-    # [AO_CONF_LOG] calibration log
-    # ==================================================================
-
     def _write_conf_log(
         self,
         now,
@@ -3887,11 +2652,6 @@ class AutoOvertakeHelper:
         speed_mps=None,
         mode=None,
     ):
-        """Append one calibration record to AO_CONF_LOG_PATH.
-
-        Throttled to AO_CONF_LOG_PERIOD_SEC.  Best-effort: any I/O
-        failure is swallowed so the control loop is never disturbed.
-        """
 
         if (
             now

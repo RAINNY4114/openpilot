@@ -33,9 +33,6 @@ class ChestnutStatus:
              model_loading: bool, model_active: bool | None, state, set_alert) -> None:
     detected = [d for d in usb_state if is_chestnut_usb_id(d["vendorId"], d["productId"], include_bootloader=True)]
     devices = [d for d in detected if is_chestnut_usb_id(d["vendorId"], d["productId"])]
-    # [port-egpu-usb] 第三方 ASM2464 底座的 product 串永远不等于 comma 官方串，
-    # 按固件串判会让 usb_seen 恒 False -> usb_failed 永不置位 -> 底座掉线漏报。
-    # 与 helpers.chestnut_present() 保持同一判据：只看 VID/PID 命中数量。
     firmware_ok = len(devices) == 1
 
     if self.offroad and not offroad:
@@ -61,7 +58,6 @@ class ChestnutStatus:
       self.usb_failed = False
 
     if not offroad and state is not None:
-      # [port-egpu-usb] 三方底座无 INA231 供电遥测，不因 supplyVoltage/supplyFault 误报供电断开
       powered = True
       power_lost = False
       if self.model_attempted and power_lost and not self.power_lost:

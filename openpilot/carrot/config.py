@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
-"""
-统一的参数管理模块
-
-新版 SunnyPilot / openpilot Carrot 兼容版。
-
-功能：
-1. 优先使用 openpilot.common.params.Params
-2. Params 中不存在的自定义参数使用 nav_params.json
-3. 支持 bool / int / float / raw string 参数
-4. 保留原有 UnifiedParams API
-5. 不再依赖旧版 common.params_pyx / UnknownKeyName
-6. Carrot 位于：
-   /data/openpilot/openpilot/carrot/
-"""
 
 import json
 import os
 
 from openpilot.common.params import Params
 
-
 class UnifiedParams:
-    """统一的参数管理类，同时处理系统参数和 Carrot 自定义参数"""
 
     _instance = None
     _initialized = False
@@ -33,15 +17,12 @@ class UnifiedParams:
         return cls._instance
 
     def __init__(self, nav_json_file=None):
-        """初始化统一参数管理器"""
 
         if self._initialized:
             return
 
         self.system_params = Params()
 
-        # Carrot 已经移动到 openpilot/carrot/
-        # 因此 nav_params.json 默认就在当前目录
         if nav_json_file is None:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             nav_json_file = os.path.join(current_dir, "nav_params.json")
@@ -54,27 +35,13 @@ class UnifiedParams:
 
         self._initialized = True
 
-    # ----------------------------------------------------------------------
-    # System Params / JSON 参数同步
-    # ----------------------------------------------------------------------
-
     def _match_system_param(self):
-        """
-        检查 nav_data 中的参数是否同时存在于系统 Params。
-
-        如果系统 Params 可以读取，则优先使用系统 Params 的值。
-
-        注意：
-        不同版本 Params 对未知 key 的行为可能不同，因此这里
-        故意使用宽松异常处理，避免 Carrot 因一个未知参数而退出。
-        """
 
         for key in list(self.nav_data.keys()):
             try:
                 value = self.nav_data[key]
                 sys_val = None
 
-                # bool 必须优先判断，因为 bool 是 int 的子类
                 if isinstance(value, bool):
                     sys_val = self.system_params.get_bool(key)
 
@@ -91,17 +58,9 @@ class UnifiedParams:
                     self.nav_data[key] = sys_val
 
             except Exception:
-                # 系统 Params 中不存在该 key：
-                # 保留 nav_params.json 中的自定义参数
                 pass
 
     def _save_system_param(self):
-        """
-        尝试将 nav_data 中的参数写入系统 Params。
-
-        如果系统 Params 不支持对应 key，则忽略，
-        该参数继续由 nav_params.json 管理。
-        """
 
         for key, value in list(self.nav_data.items()):
             try:
@@ -131,15 +90,9 @@ class UnifiedParams:
                     )
 
             except Exception:
-                # 未知 key 或新版 Params API 不支持时忽略
                 pass
 
-    # ----------------------------------------------------------------------
-    # JSON
-    # ----------------------------------------------------------------------
-
     def _load_nav_params(self):
-        """加载 Carrot 自定义参数"""
 
         try:
 
@@ -152,7 +105,6 @@ class UnifiedParams:
                 ) as f:
                     self.nav_data = json.load(f)
 
-                # JSON 必须是 dict
                 if not isinstance(self.nav_data, dict):
                     raise ValueError(
                         "nav_params.json root object must be a dictionary"
@@ -193,7 +145,6 @@ class UnifiedParams:
             self._match_system_param()
 
     def _save_nav_data(self):
-        """保存 Carrot 自定义参数到 nav_params.json"""
 
         try:
 
@@ -205,7 +156,6 @@ class UnifiedParams:
                     exist_ok=True,
                 )
 
-            # 临时文件写入，避免写文件过程中断导致 JSON 损坏
             temp_file = self.nav_json_file + ".tmp"
 
             with open(
@@ -240,12 +190,7 @@ class UnifiedParams:
             except Exception:
                 pass
 
-    # ----------------------------------------------------------------------
-    # 默认 Carrot 参数
-    # ----------------------------------------------------------------------
-
     def _get_default_nav_data(self):
-        """获取默认 Carrot 导航参数"""
 
         return {
             "AutoTurnDistOffset": 0,
@@ -315,20 +260,7 @@ class UnifiedParams:
             "NewLaneWidthDiff": 8,
         }
 
-    # ----------------------------------------------------------------------
-    # GET
-    # ----------------------------------------------------------------------
-
     def get_bool(self, key, default=False):
-        """
-        获取布尔参数。
-
-        优先：
-            system Params
-
-        fallback：
-            nav_params.json
-        """
 
         try:
 
@@ -369,12 +301,6 @@ class UnifiedParams:
         return default
 
     def get_int(self, key, default=0):
-        """
-        获取整数参数。
-
-        优先 system Params，
-        不存在时 fallback 到 nav_params.json。
-        """
 
         try:
 
@@ -400,12 +326,6 @@ class UnifiedParams:
         return default
 
     def get_float(self, key, default=0.0):
-        """
-        获取浮点参数。
-
-        优先 system Params，
-        不存在时 fallback 到 nav_params.json。
-        """
 
         try:
 
@@ -431,12 +351,6 @@ class UnifiedParams:
         return default
 
     def get(self, key, default=None, encoding="utf-8"):
-        """
-        获取原始参数。
-
-        优先从系统 Params 获取。
-        如果系统 Params 中不存在，则从 nav_data 获取。
-        """
 
         try:
 
@@ -468,12 +382,7 @@ class UnifiedParams:
 
         return default
 
-    # ----------------------------------------------------------------------
-    # PUT
-    # ----------------------------------------------------------------------
-
     def put_bool(self, key, value):
-        """设置布尔参数"""
 
         bool_value = bool(value)
 
@@ -488,15 +397,11 @@ class UnifiedParams:
 
         except Exception:
 
-            # 系统 Params 不认识该 key
-            # → 使用 Carrot JSON 参数
             self.nav_data[key] = int(bool_value)
             json_need_save = True
 
         else:
 
-            # 如果该参数原本存在于 nav_data，
-            # 同步更新 JSON
             if key in self.nav_data:
 
                 self.nav_data[key] = int(bool_value)
@@ -507,7 +412,6 @@ class UnifiedParams:
             self._save_nav_data()
 
     def put_int(self, key, value):
-        """设置整数参数"""
 
         try:
             int_value = int(value)
@@ -540,7 +444,6 @@ class UnifiedParams:
             self._save_nav_data()
 
     def put_float(self, key, value):
-        """设置浮点参数"""
 
         try:
             float_value = float(value)
@@ -573,12 +476,6 @@ class UnifiedParams:
             self._save_nav_data()
 
     def put(self, key, dat):
-        """
-        设置原始参数。
-
-        系统 Params 支持时优先写系统 Params；
-        否则写入 Carrot nav_params.json。
-        """
 
         json_need_save = False
 
@@ -604,10 +501,5 @@ class UnifiedParams:
         if json_need_save:
 
             self._save_nav_data()
-
-
-# --------------------------------------------------------------------------
-# 全局实例
-# --------------------------------------------------------------------------
 
 unified_params = UnifiedParams()

@@ -23,12 +23,6 @@ def main():
   cloudlog.info("plannerd got CarParamsSP")
 
   gps_location_service = get_gps_location_service(params)
-  # [NAV_LONG] navProfile 只有 NavigationEnabled=1 时才有发布者；amapNavi 是
-  # 0 Hz 的按需服务（外部导航桥写入）。两者都必须 ignore_*，否则会让
-  # sm.all_checks() 恒假、driverAssistance 一直 invalid。
-  # [FIX_RADARTRACKS_20261105] radarState may be invalid when Ford radar_interface
-  # returns None (no OEM radar CAN data). radard still publishes radarState but
-  # with valid=False. Ignore radarState in alive/valid checks so plannerd works.
   ignore_services = ["liveMapDataSP", "carStateSP", "selfdriveStateSP", gps_location_service,
                      "navProfile", "amapNavi", "radarState"]
 

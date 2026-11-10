@@ -12,15 +12,12 @@ from openpilot.common.filter_simple import FirstOrderFilter
 
 
 class BlindSpotIndicators:
-  # [BSD_20261108] Zone-based color levels (cpv9-inspired)
-  # Zone 1-2: far (yellow), Zone 3: near (orange), Zone 4: danger (red)
-  # Also checks radarState.leadLeft/leadRight for side radar targets
   ZONE_COLORS = {
-    0: rl.Color(255, 255, 255, 255),   # white (default)
-    1: rl.Color(255, 255, 100, 255),   # pale yellow (far)
-    2: rl.Color(255, 220, 80, 255),    # yellow (far)
-    3: rl.Color(255, 165, 0, 255),     # orange (near)
-    4: rl.Color(255, 60, 60, 255),     # red (danger)
+    0: rl.Color(255, 255, 255, 255),
+    1: rl.Color(255, 255, 100, 255),
+    2: rl.Color(255, 220, 80, 255),
+    3: rl.Color(255, 165, 0, 255),
+    4: rl.Color(255, 60, 60, 255),
   }
 
   def __init__(self):
@@ -35,7 +32,6 @@ class BlindSpotIndicators:
     self._right_side_radar = False
 
   def _read_bsm_zone(self):
-    """Read Ford BSM Zone from AOBsmZone param file."""
     import os
     left_zone, right_zone = 0, 0
     try:
@@ -56,17 +52,14 @@ class BlindSpotIndicators:
     sm = ui_state.sm
     CS = sm['carState']
 
-    # [BSD_20261108] Read BSM zone levels
     self._left_zone, self._right_zone = self._read_bsm_zone()
 
-    # Also check radarState side leads
     self._left_side_radar = False
     self._right_side_radar = False
     try:
       rs = sm['radarState']
       if rs.leadLeft.present:
         self._left_side_radar = True
-        # If no BSM zone but side radar detects close target, set zone 3
         if self._left_zone == 0 and float(rs.leadLeft.dRel) < 5.0:
           self._left_zone = 3
       if rs.leadRight.present:
@@ -76,7 +69,6 @@ class BlindSpotIndicators:
     except Exception:
       pass
 
-    # Use boolean blindspot as fallback (zone 3 if no zone data)
     left_detected = CS.leftBlindspot or self._left_side_radar
     right_detected = CS.rightBlindspot or self._right_side_radar
     if left_detected and self._left_zone == 0:

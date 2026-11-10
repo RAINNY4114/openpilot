@@ -34,12 +34,10 @@ def drop_realtime() -> None:
 
 
 def _available_cores() -> list[int]:
-  """Return the list of CPUs this process is actually allowed to run on."""
   try:
     return sorted(os.sched_getaffinity(0))
   except (AttributeError, OSError):
     return list(range(os.cpu_count() or 1))
-
 
 def set_core_affinity(cores: list[int]) -> None:
   if sys.platform != 'linux' or PC:
@@ -47,10 +45,6 @@ def set_core_affinity(cores: list[int]) -> None:
   avail = _available_cores()
   if not avail:
     return
-  # Some devices only have a subset of the CPUs online (e.g. CPU 4-7 offline on a
-  # 4-core TIZI). Upstream hardcodes core ids 4/5/7, which would make
-  # os.sched_setaffinity() fail with EINVAL and crash the whole process.
-  # Map the requested cores onto the available ones instead of dying.
   wanted = [c for c in cores if c in avail]
   if not wanted:
     wanted = avail

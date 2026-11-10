@@ -230,24 +230,18 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       rl.draw_texture_ex(txt_icon, rl.Vector2(arrow_x, arrow_y), 0.0, 1.0, color)
 
   def _render_vienna(self, rect, val, sub, color, has_limit, alpha=1.0):
-    # [TESLA_SPEED_LIMIT_20261104] Tesla-style speed limit sign:
-    # Larger red outer ring, white circle, bold prominent number.
-    # Sign is scaled up ~15% and ring is thicker for better visibility.
     center = rl.Vector2(rect.x + rect.width / 2, rect.y + rect.height / 2)
-    radius = (rect.width + 28) / 2  # Tesla: slightly larger than original
+    radius = (rect.width + 28) / 2
 
     white = rl.color_alpha(Colors.WHITE, alpha)
-    red = rl.color_alpha(rl.Color(220, 30, 30, 255), alpha)  # Tesla red
+    red = rl.color_alpha(rl.Color(220, 30, 30, 255), alpha)
     black = rl.color_alpha(Colors.BLACK, alpha)
     dark_grey = rl.color_alpha(Colors.DARK_GREY, alpha)
     text_color = rl.color_alpha(color, alpha)
 
-    # Tesla style: white circle with thick red ring
     rl.draw_circle_v(center, radius, white)
-    # Thicker ring (0.68 instead of 0.75) for more prominent red border
     rl.draw_ring(center, radius * 0.68, radius, 0, 360, 48, red)
 
-    # Tesla style: larger, more prominent speed number
     font_size = 78 if len(val) >= 3 else 92
     self._draw_text_centered(self.font_bold, val, font_size, center, text_color)
 

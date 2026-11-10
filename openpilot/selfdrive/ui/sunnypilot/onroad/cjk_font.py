@@ -73,45 +73,29 @@ import pyray as rl
 
 from openpilot.common.swaglog import cloudlog
 
-# 本文件在 <root>/selfdrive/ui/sunnypilot/onroad/，往上三级就是 selfdrive/
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ASSETS_FONTS = os.path.normpath(os.path.join(_HERE, "..", "..", "..", "assets", "fonts"))
 
-# 完整 CJK 字体候选，按顺序试。第一个是仓库自带的（ford 风格：字体随仓库走），
-# 第二个是系统字体 —— 万一 `git clean -fdx` 把仓库里那份冲掉。
 CJK_FONT_CANDIDATES = (
   os.path.join(_ASSETS_FONTS, "NotoSansSC-Regular.otf"),
   "/usr/share/fonts/NotoSansSC-Regular.otf",
 )
 
-# 兜底网：unifont 全 BMP 覆盖（58910 字形），而且它是 git tracked 的，
-# 是唯一能扛住 `git clean` 的候选。
 NET_FONT_CANDIDATES = (
   os.path.join(_ASSETS_FONTS, "unifont.otf"),
 )
 
-# 栅格化基准字号。实际绘制是 46*1.5=69 px，留一点余量让缩小时更锐利。
 CJK_FONT_BASE_SIZE = 128
 CJK_FONT_CACHE_MAX = 8
 
 _ASCII = set(range(32, 127))
-# key = 码点元组（排序后），保证同一串字无论出现顺序都命中同一份缓存
-# value = (font, 用的哪个字体文件)
 _fonts: dict[tuple[int, ...], tuple[rl.Font, str]] = {}
 
-
 def codepoints_for(text: str) -> tuple[int, ...]:
-  """text 用到的码点 + 整张 ASCII 表。
-
-  为什么要带整张 ASCII：道路名里可能有数字和标点（"2号路"、"G320"），
-  数字必须跟中文一起被栅格化，否则 2 会缺字。
-  """
   return tuple(sorted({ord(c) for c in text} | _ASCII))
-
 
 def cache_size() -> int:
   return len(_fonts)
-
 
 def clear_cache() -> None:
   for font, _ in _fonts.values():
@@ -120,7 +104,6 @@ def clear_cache() -> None:
     except Exception:
       pass
   _fonts.clear()
-
 
 def _evict_oldest() -> None:
   if not _fonts:
@@ -132,21 +115,12 @@ def _evict_oldest() -> None:
   except Exception:
     pass
 
-
 def _as_tuple(paths) -> tuple[str, ...]:
-  """把候选列表规整成 tuple。
-
-  防的是「单元素元组漏逗号」：写成 `("a.otf")` 就是 str，
-  `for p in paths` 会**逐字符**遍历，而 Windows 上 '\\' 恰好是存在的根路径
-  ⇒ 会拿根目录当字体文件去 load，行为荒谬且无报错。宁可在这里挡掉。
-  """
   if isinstance(paths, str):
     return (paths,)
   return tuple(paths)
 
-
 def _build(path: str, cps: tuple[int, ...]):
-  """按 cps 从 path 建一份字体；失败返回 None。"""
   if not os.path.exists(path):
     return None
   try:
@@ -157,7 +131,6 @@ def _build(path: str, cps: tuple[int, ...]):
     cloudlog.warning(f"[ROADNAME_CJK] load_font_ex failed for {path}: {e!r}")
     return None
 
-  # raylib 载入失败时 texture.id 会是 0，此时画出来是空白
   texture = getattr(font, "texture", None)
   if texture is None or getattr(texture, "id", 0) == 0:
     cloudlog.warning(f"[ROADNAME_CJK] empty texture for {path}")
@@ -170,22 +143,14 @@ def _build(path: str, cps: tuple[int, ...]):
     pass
   return font
 
-
 def _pick(cps: tuple[int, ...]):
-  """按梯子顺序取第一份**能加载**的字体，返回 (font, path)；全失败返回 None。
-
-  注意这里只判断「能不能加载」，不判断「覆盖不覆盖」—— 理由见模块 docstring
-  的「为什么不做运行时字形覆盖检测」。
-  """
   for path in _as_tuple(CJK_FONT_CANDIDATES) + _as_tuple(NET_FONT_CANDIDATES):
     font = _build(path, cps)
     if font is not None:
       return font, path
   return None
 
-
 def get_font(text: str):
-  """取（或构建）text 可用的字体。失败返回 None，调用方自行兜底。"""
   if not text:
     return None
 
@@ -203,49 +168,20 @@ def get_font(text: str):
   while len(_fonts) >= CJK_FONT_CACHE_MAX:
     _evict_oldest()
   _fonts[cps] = (font, path)
-  # 打**完整路径**而不是 basename：两个候选的文件名都叫 NotoSansSC-Regular.otf，
-  # 只打文件名就分不清用的是仓库自带那份还是系统那份。
   cloudlog.info(f"[ROADNAME_CJK] built font from {path} "
                 f"for {len(cps)} codepoints: {text!r}")
   return font
 
-
 def measure(font, text: str, px: float) -> rl.Vector2:
-  """测量。px 必须是**已乘过 FONT_SCALE 的实际像素大小**。"""
   return rl.measure_text_ex(font, text, px, 0)
 
-
 def draw(font, text: str, position, px: float, color) -> None:
-  """绘制。必须走未 patch 的原始实现，理由见模块 docstring 第 1 条。"""
   impl = getattr(rl, "_orig_draw_text_ex", None) or rl.draw_text_ex
   impl(font, text, position, px, 0, color)
 
-
-# 自检标志文件。刻意不用 Params：新增 param 键必须重编 libparams_c.so，
-# 否则会 UnknownKeyName 卡 comma logo（踩过）。一个文件就够。
 SELFCHECK_FLAG = "/data/roadname_font_selfcheck"
 
-
 def maybe_selfcheck(text: str = "恩波大道") -> bool | None:
-  """存在 SELFCHECK_FLAG 时，在真实 GL 上下文里试建一次字体并写日志。
-
-  用途：**不用上路**就能确认这台设备的 raylib 能加载完整 CJK 字体
-  （CFF/OTF 解析 + 纹理上传都在真实进程里跑一遍）。
-
-      touch /data/roadname_font_selfcheck && sudo systemctl restart comma
-      grep ROADNAME_CJK /data/log/swaglog.*   # 看 selfcheck ok
-      rm /data/roadname_font_selfcheck        # 下次开机不再自检
-
-  标志文件里**有内容**时，内容就当作要测的字符串（取第一行、最多 64 字符），
-  这样可以拿真实路名或任意串单独跑一遍，不用改代码：
-
-      printf '\\xe4\\xb6\\xb6' > /data/roadname_font_selfcheck   # 测 䶶 U+4DB6
-
-  ⚠️ 自检只能证明「字体加载成功」，**不能**证明「字形覆盖完整」—— 见模块
-  docstring 的「为什么不做运行时字形覆盖检测」。覆盖要用 fontTools 离线核。
-
-  返回 None 表示没触发；True/False 是自检结果。
-  """
   if not os.path.exists(SELFCHECK_FLAG):
     return None
   try:

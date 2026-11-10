@@ -71,10 +71,6 @@ DEVICE_CAMERAS: dict[tuple[str, str], DeviceCameraConfig] = {
 prods = itertools.product(('tici', 'tizi', 'mici'), (('ar0231', _ar_ox_config), ('ox03c10', _ar_ox_config), ('os04c10', _os_config)))
 DEVICE_CAMERAS.update({(d, c[0]): c[1] for d, c in prods})
 
-
-# [IFE_ROAD_RESIZE_20261102] 参考 onemiless/openpilot commit e0814246c918439f8d05d4518efaa649753e3f3b
-# camerad 的 WIDE_ROAD IFE 输出从 1928x1208 降到 1344x760（非均匀缩放），
-# 相机内参矩阵 K 的 fx 和 fy 必须独立缩放，否则模型 warp 会偏。
 @dataclass(frozen=True)
 class _IfeRoadCameraConfig(CameraConfig):
   vertical_focal_length: float
@@ -85,18 +81,13 @@ class _IfeRoadCameraConfig(CameraConfig):
     matrix[1, 1] = self.vertical_focal_length
     return matrix
 
-
 def _ife_road_camera(camera: CameraConfig) -> _IfeRoadCameraConfig:
-  # MNDS16 phase-init 是零，主点取新帧中心。
   return _IfeRoadCameraConfig(
     1344, 760,
-    camera.focal_length * 1344 / camera.width,       # fx
-    camera.focal_length * 760 / camera.height,        # fy
+    camera.focal_length * 1344 / camera.width,
+    camera.focal_length * 760 / camera.height,
   )
 
-
-# 环境变量 C3XL_IFE_ROAD_SIZE=1344x760 在 launch_env.sh 中 export，
-# 或者 camerad 的 hw.h 已经把 wide road 设成 1344x760 时，这里同步内参。
 if os.getenv('C3XL_IFE_ROAD_SIZE', '1344x760') == '1344x760':
   for device in ('tici', 'tizi', 'mici'):
     original = DEVICE_CAMERAS[(device, 'ox03c10')]

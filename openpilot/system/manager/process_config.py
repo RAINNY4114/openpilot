@@ -90,12 +90,6 @@ def use_sunnylink_uploader_shim(started, params, CP: car.CarParams) -> bool:
 _EGPU_CACHE = {"ts": 0.0, "ok": False}
 
 def egpu_ready() -> bool:
-  """[EGPU_AUTODETECT] chestnut(ASM2464) eGPU 是否在线。
-
-  tinygrad runner 依赖 eGPU 推理；eGPU 不在线时 modeld_tinygrad 会卡在
-  gate_wait_hw 然后退出，manager 报 Process Not Running，车无法居中/巡航。
-  这里 1s 缓存探测结果，供 is_tinygrad_model / is_stock_model 做互斥判定。
-  """
   now = time.monotonic()
   if now - _EGPU_CACHE["ts"] < 1.0:
     return _EGPU_CACHE["ok"]
@@ -109,17 +103,11 @@ def egpu_ready() -> bool:
   return ok
 
 def is_tinygrad_model(started, params, CP: car.CarParams) -> bool:
-  """Check if the active model runner is tinygrad (requires eGPU online)."""
   if get_active_model_runner(params, not started) != custom.ModelManagerSP.Runner.tinygrad:
     return False
   return egpu_ready()
 
 def is_stock_model(started, params, CP: car.CarParams) -> bool:
-  """Check if the active model runner is stock.
-
-  [EGPU_AUTODETECT] 配置为 tinygrad 但 eGPU 掉线时回落到内置 stock modeld，
-  保证没有 eGPU 也能正常居中巡航。
-  """
   runner = get_active_model_runner(params, not started)
   if runner == custom.ModelManagerSP.Runner.stock:
     return True
@@ -195,8 +183,6 @@ procs = [
   PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(livestream, notcar)),
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
   PythonProcess("amap_navi", "openpilot.carrot.amap_navi", always_run),
-  # [NAV_DEST_WEB] 手机上设目的地的小网页（http://192.168.0.106:8899）。
-  # 车机上没有目的地选择界面，说明见 /data/nav_web.py 顶部。
   PythonProcess("nav_web", "openpilot.carrot.nav_web", always_run),
 
   # sunnylink <3
@@ -237,9 +223,6 @@ if os.path.exists("../../third_party/copyparty/copyparty-sfx.py"):
   copyparty_args += ["-q"]
   procs += [NativeProcess("copyparty-sfx", "openpilot/third_party/copyparty", ["./copyparty-sfx.py", *copyparty_args], and_(only_offroad, use_copyparty))]
 
-# [MR76_WIRING] MR76 毫米波雷达解析守护进程
-# 默认不跑: 只有 /data/ford_params/Mr76Enabled 存在且非 0 才注册。
-# 未接 MR76 的用户完全不受影响(进程列表与原生一致)。
 try:
   if os.path.exists("/data/ford_params/Mr76Enabled"):
     with open("/data/ford_params/Mr76Enabled") as _mr76f:

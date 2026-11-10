@@ -1,31 +1,4 @@
 #!/usr/bin/env python3
-"""手机上设置导航目的地的小网页。
-
-背景
-----
-车机上**没有目的地选择界面**，openpilot 自己的说明是
-"Set a destination from comma connect"（`mici/layouts/settings/developer.py:87`），
-也就是只能靠手机 App 的 RPC。但那个入口依赖在线配对、而且要绕好几层。
-
-这个脚本在车机上起一个只做一件事的小 HTTP 服务：
-手机浏览器打开 → 在地图上点一下（或搜索）→ 点「设为目的地」→ 写 NavDestination。
-
-    http://<车机IP>:8899
-
-为什么用「地图上点一下」而不是搜索框为主
-----------------------------------------
-实测 Mapbox 对中文分词很差（「奥林匹克公园」会拆成单字、搜到悉尼），
-所以点击选点才是可靠路径；搜索框只是辅助（英文/拼音还行）。
-
-接口
-----
-    GET  /            页面
-    GET  /api/state   当前状态（目的地、NavigationEnabled、车辆位置）
-    POST /api/dest    {"lat":..,"lon":..}  设置目的地
-    POST /api/clear   清除目的地
-
-只接受中国范围内的经纬度，不做任何命令执行，纯参数读写。
-"""
 import json
 import os
 import socket
@@ -37,10 +10,8 @@ from openpilot.common.params import Params
 PORT = 8899
 TOKEN_PATH = "/data/ford_params/mapbox_token"
 
-# 中国大致范围，防止误点到国外（Mapbox 中文搜索会把「奥林匹克公园」搜到悉尼）
 CN_LAT = (3.0, 54.0)
 CN_LON = (73.0, 136.0)
-
 
 def read_token():
   try:
@@ -49,9 +20,7 @@ def read_token():
   except OSError:
     return os.environ.get("MAPBOX_TOKEN", "").strip()
 
-
 def car_position(p):
-  """车辆最后已知位置。没有就退回杭州（这台车的常驻区域）。"""
   raw = p.get("LastGPSPositionLLK")
   if raw:
     try:
@@ -63,7 +32,6 @@ def car_position(p):
       pass
   return 30.0697, 119.9506
 
-
 def state():
   p = Params()
   dest = p.get("NavDestination")
@@ -73,7 +41,6 @@ def state():
     "dest": dest if isinstance(dest, dict) else None,
     "car": {"lat": lat, "lon": lon},
   }
-
 
 PAGE = r"""<!doctype html>
 <html lang="zh-CN">
@@ -273,10 +240,9 @@ setInterval(refresh, 10000);
 </html>
 """
 
-
 class Handler(BaseHTTPRequestHandler):
   def log_message(self, fmt, *args):
-    pass  # 安静点，别刷屏
+    pass
 
   def _send(self, code, body, ctype="application/json; charset=utf-8"):
     data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -316,7 +282,6 @@ class Handler(BaseHTTPRequestHandler):
       if not (CN_LAT[0] <= lat <= CN_LAT[1] and CN_LON[0] <= lon <= CN_LON[1]):
         self._send(400, json.dumps({"ok": False, "error": "坐标不在中国范围内"}))
         return
-      # ★ block=True 必须：非阻塞写之后立刻回读会命中旧缓存
       Params().put("NavDestination", {"latitude": lat, "longitude": lon}, block=True)
       self._send(200, json.dumps({"ok": True, "lat": lat, "lon": lon}))
 
@@ -326,7 +291,6 @@ class Handler(BaseHTTPRequestHandler):
 
     else:
       self._send(404, json.dumps({"ok": False, "error": "not found"}))
-
 
 def local_ips():
   ips = []
@@ -346,10 +310,7 @@ def local_ips():
     pass
   return ips
 
-
 def main():
-  # 端口被占用时不要退出（否则 manager 会一直报 Process Not Running 并反复重启），
-  # 而是在进程内等一会儿再试。
   while True:
     try:
       srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
@@ -359,7 +320,6 @@ def main():
       time.sleep(5)
   print(f"[nav_web] 监听 0.0.0.0:{PORT}")
 
-  # 把访问地址落到文件里，方便 SSH 时直接查（网络变了地址也会变）
   ips = local_ips()
   host = socket.gethostname()
   lines = [f"http://{ip}:{PORT}" for ip in ips] + [f"http://{host}.local:{PORT}"]
@@ -372,7 +332,6 @@ def main():
     pass
 
   srv.serve_forever()
-
 
 if __name__ == "__main__":
   main()
