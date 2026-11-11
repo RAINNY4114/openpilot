@@ -6,10 +6,13 @@ See the LICENSE.md file in the root directory for more details.
 """
 import pyray as rl
 
+from openpilot.selfdrive.ui.sunnypilot.onroad import cjk_font
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import gui_app, FontWeight, FONT_SCALE
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
+
+FONT_SIZE = 46
 
 
 class RoadNameRenderer(Widget):
@@ -35,7 +38,24 @@ class RoadNameRenderer(Widget):
       return
 
     text = self.road_name
-    text_size = measure_text_cached(self.font_demi, text, 46)
+
+    px = FONT_SIZE * FONT_SCALE
+    cjk = cjk_font.get_font(text)
+
+    if cjk is not None:
+      def measure(t: str) -> rl.Vector2:
+        return cjk_font.measure(cjk, t, px)
+
+      def draw(t: str, origin: rl.Vector2) -> None:
+        cjk_font.draw(cjk, t, origin, px, rl.Color(255, 255, 255, 200))
+    else:
+      def measure(t: str) -> rl.Vector2:
+        return measure_text_cached(self.font_demi, t, FONT_SIZE)
+
+      def draw(t: str, origin: rl.Vector2) -> None:
+        rl.draw_text_ex(self.font_demi, t, origin, FONT_SIZE, 0, rl.Color(255, 255, 255, 200))
+
+    text_size = measure(text)
 
     padding = 40
     rect_width = max(200, min(text_size.x + padding, rect.width - 40))
@@ -48,9 +68,9 @@ class RoadNameRenderer(Widget):
     if text_size.x > max_text_width:
       while text_size.x > max_text_width and len(text) > 3:
         text = text[:-1]
-        text_size = measure_text_cached(self.font_demi, text + "...", 46)
+        text_size = measure(text + "...")
       text = text + "..."
 
-    sz = measure_text_cached(self.font_demi, text, 46)
+    sz = measure(text)
     origin = rl.Vector2(road_rect.x + road_rect.width / 2 - sz.x / 2, road_rect.y + road_rect.height / 2 - sz.y / 2)
-    rl.draw_text_ex(self.font_demi, text, origin, 46, 0, rl.Color(255, 255, 255, 200))
+    draw(text, origin)
