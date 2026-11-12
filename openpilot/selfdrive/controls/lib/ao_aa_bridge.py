@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import json
 import time
 from typing import NamedTuple
 
@@ -21,6 +22,11 @@ LOG_MAX_BYTES = 5_000_000
 
 SIDE_LEAD_DANGER_DIST = 5.0
 
+MR76_AUX_PATH = "/dev/shm/mr76_targets.json"
+MR76_AUX_STALE_SEC = 0.5
+MR76_SIDE_LAT_MIN = 0.8
+MR76_SIDE_DIST_MAX = 40.0
+
 AA_CONFIRM_DELAY_SEC = 0.5
 
 CONFIRM_DELAY_SEC_DEFAULT = 3.0
@@ -29,7 +35,7 @@ AO_CFG_DEFAULTS = {
   "enabled": 0,
   "lane_preference": LANE_PREF_AUTO,
   "confirm_delay_sec": CONFIRM_DELAY_SEC_DEFAULT,
-  "min_cruise_kph": 60.0,
+  "min_cruise_kph": 90.0,
   "lane_prob_min": 0.30,
   "require_lane_gain": 0,
 }
@@ -114,6 +120,34 @@ def read_cfg():
       pass
 
   return ao, aa
+
+def _read_mr76_aux():
+  """Read mr76d's shared target list for the AO safety gate.
+
+  Conservative rule: any qualifying side/rear target vetoes BOTH lanes.
+  MR76 lateral sign is installation-dependent (Mr76LatSign), so refusing
+  an overtake is safer than guessing the wrong side.
+  """
+  try:
+    with open(MR76_AUX_PATH) as f:
+      data = json.loads(f.read())
+    age = max(0.0, time.time() - float(data.get("t", 0.0)))
+    if age > MR76_AUX_STALE_SEC or not bool(data.get("fresh", False)):
+      return False, 0, None
+    blocked = False
+    for item in data.get("targets", [])[:32]:
+      try:
+        d = float(item[0])
+        y = float(item[1])
+      except (TypeError, ValueError, IndexError):
+        continue
+      if 0.5 < d < MR76_SIDE_DIST_MAX and abs(y) > MR76_SIDE_LAT_MIN:
+        blocked = True
+        break
+    return True, (11 if blocked else 0), age
+  except Exception:
+    return False, 0, None
+
 
 def effective_bsm(sm, cs):
   left = bool(cs.leftBlindspot)
@@ -240,19 +274,27 @@ class AoAaBridge:
 
     bits = decode_navi(sm)
     self.lidar.update(bits)
-    lidar_avail_l = True if self.lidar.left else None
-    lidar_avail_r = True if self.lidar.right else None
-    lidar_valid_l = True if self.lidar.left else None
-    lidar_valid_r = True if self.lidar.right else None
-    lidar_age_l = 0.0 if self.lidar.left else None
-    lidar_age_r = 0.0 if self.lidar.right else None
-    lidar_obs_l = bits.left_lidar_obstacle if self.lidar.left else None
-    lidar_obs_r = bits.right_lidar_obstacle if self.lidar.right else None
-    lidar_free_l = (not bits.left_lidar_obstacle) if self.lidar.left else None
-    lidar_free_r = (not bits.right_lidar_obstacle) if self.lidar.right else None
+    navi_online = bool(bits.seen)
+    lidar_avail_l = True if navi_online else None
+    lidar_avail_r = True if navi_online else None
+    lidar_valid_l = True if navi_online else None
+    lidar_valid_r = True if navi_online else None
+    lidar_age_l = 0.0 if navi_online else None
+    lidar_age_r = 0.0 if navi_online else None
+    lidar_obs_l = bool(bits.left_lidar_obstacle) if navi_online else None
+    lidar_obs_r = bool(bits.right_lidar_obstacle) if navi_online else None
+    lidar_free_l = (not bits.left_lidar_obstacle) if navi_online else None
+    lidar_free_r = (not bits.right_lidar_obstacle) if navi_online else None
 
-    mr76_fresh = _read_num("AOMr76Fresh", 0.0) != 0.0
-    mr76_lane = int(_read_num("AOMr76Lane", 0.0))
+    param_fresh = _read_num("AOMr76Fresh", 0.0) != 0.0
+    param_lane = int(_read_num("AOMr76Lane", 0.0))
+    aux_fresh, aux_lane, aux_age = _read_mr76_aux()
+    if param_fresh:
+      mr76_fresh, mr76_lane, mr76_age = True, param_lane, 0.0
+    elif aux_fresh:
+      mr76_fresh, mr76_lane, mr76_age = True, aux_lane, aux_age
+    else:
+      mr76_fresh, mr76_lane, mr76_age = False, 0, None
     mr76_gain_fresh = _read_num("AOMr76GainFresh", 0.0) != 0.0
     mr76_gain_lane = int(_read_num("AOMr76GainLane", 0.0))
 
@@ -261,7 +303,7 @@ class AoAaBridge:
                              lidar_avail_l, lidar_avail_r, lidar_valid_l, lidar_valid_r,
                              lidar_age_l, lidar_age_r, lidar_obs_l, lidar_obs_r,
                              lidar_free_l, lidar_free_r,
-                             mr76_fresh, mr76_lane, mr76_gain_fresh, mr76_gain_lane)
+                             mr76_fresh, mr76_lane, mr76_gain_fresh, mr76_gain_lane, mr76_age)
     aa_dir, brake = self._update_aa(sm, dh, v_ego, aa_cfg, left_ok, right_ok, is_rhd, bits,
                                     lidar_avail_l, lidar_avail_r, lidar_valid_l, lidar_valid_r,
                                     lidar_age_l, lidar_age_r, lidar_free_l, lidar_free_r,
@@ -282,7 +324,7 @@ class AoAaBridge:
                  lp_left, lp_right, bits,
                  l_avail, r_avail, l_valid, r_valid, l_age, r_age, l_obs, r_obs,
                  l_free, r_free,
-                 mr76_fresh, mr76_lane, mr76_gain_fresh, mr76_gain_lane):
+                 mr76_fresh, mr76_lane, mr76_gain_fresh, mr76_gain_lane, mr76_age):
     fields = {"en": int(bool(cfg["enabled"]))}
     if not cfg["enabled"]:
       self.ao.reset()
@@ -334,7 +376,7 @@ class AoAaBridge:
         right_ok=right_ok,
         is_rhd=bool(is_rhd),
         manual_blinker=bool(cs.leftBlinker or cs.rightBlinker),
-        bsm_available=True,
+        bsm_available=bool(sm.seen.get("carState", False)) and not bool(rf),
         left_bsm=cs_left_bsm_effective,
         right_bsm=cs_right_bsm_effective,
         left_rear_zone=lz,
@@ -346,12 +388,12 @@ class AoAaBridge:
         right_lane_prob=lp_right,
         lane_prob_min=float(cfg["lane_prob_min"]),
         junction_dist=None,
-        mr76_left_available=(True if mr76_fresh else None),
-        mr76_right_available=(True if mr76_fresh else None),
-        mr76_left_valid=(True if mr76_fresh else None),
-        mr76_right_valid=(True if mr76_fresh else None),
-        mr76_left_age=(0.0 if mr76_fresh else None),
-        mr76_right_age=(0.0 if mr76_fresh else None),
+        mr76_left_available=(True if mr76_fresh else False),
+        mr76_right_available=(True if mr76_fresh else False),
+        mr76_left_valid=(True if mr76_fresh else False),
+        mr76_right_valid=(True if mr76_fresh else False),
+        mr76_left_age=(mr76_age if mr76_fresh else None),
+        mr76_right_age=(mr76_age if mr76_fresh else None),
         mr76_left_obstacle=mr76_l_occ,
         mr76_right_obstacle=mr76_r_occ,
         left_target_lead_present=tgt_l,
@@ -387,6 +429,8 @@ class AoAaBridge:
         "gL": int(bool(st.get("gain_ok_L"))), "gR": int(bool(st.get("gain_ok_R"))),
         "gr": str(st.get("last_gain_reason") or "-"),
         "mrf": int(mr76_fresh), "mrl": int(mr76_lane),
+        "mra": round(mr76_age, 3) if mr76_age is not None else -1,
+        "nvs": int(bool(bits.seen)),
         "mgf": int(mr76_gain_fresh), "mgl": int(mr76_gain_lane),
         "nl": int(bits.left_lane) * 2 + int(bits.right_lane),
       })

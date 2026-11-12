@@ -13,7 +13,7 @@ LaneChangeDirection = log.LaneChangeDirection
 
 OVERTAKE_MIN_SPEED_CAP_MS = 90.0 * CV.KPH_TO_MS
 
-OVERTAKE_MIN_SPEED_FLOOR_MS = 60.0 * CV.KPH_TO_MS
+OVERTAKE_MIN_SPEED_FLOOR_MS = 90.0 * CV.KPH_TO_MS
 
 OVERTAKE_MIN_SPEED = OVERTAKE_MIN_SPEED_CAP_MS
 OVERTAKE_MIN_CRUISE_SPEED = OVERTAKE_MIN_SPEED_CAP_MS
@@ -514,6 +514,13 @@ class AutoOvertakeHelper:
     ):
 
         if available is None:
+            if require_aux_sensors:
+                self._set_lane_veto(
+                    side,
+                    "mr76_unavailable_or_stale",
+                    now,
+                )
+                return False
             return True
 
         mr76_ok = _sensor_fresh(
@@ -587,6 +594,13 @@ class AutoOvertakeHelper:
     ):
 
         if lidar_available is None:
+            if require_aux_sensors:
+                self._set_lane_veto(
+                    side,
+                    "lidar_unavailable_or_stale",
+                    now,
+                )
+                return False
             return True
 
         lidar_ok = _sensor_fresh(

@@ -39,6 +39,9 @@ BSM_VOICE_INTERVAL_PARAM = "dp_bsm_voice_interval_sec"
 BSM_VOICE_VOLUME_PARAM = "dp_bsm_voice_volume_pct"
 
 BSM_VOICE_PARAM_PERIOD = 1.0
+
+AO_ALERT_ENABLE_PARAM = "AOAlertEnabled"
+AO_MANEUVER_VOICE_MIN_INTERVAL_S = 2.0
 BSM_VOICE_DEFAULT_INTERVAL_S = 3.0
 BSM_VOICE_MIN_INTERVAL_S = 1.0
 BSM_VOICE_DEFAULT_VOLUME_PCT = 100
@@ -148,6 +151,10 @@ class Soundd(QuietMode):
     self.bsm_voice_prev_left = False
     self.bsm_voice_prev_right = False
 
+    self._ao_alert_enabled = True
+    self._ao_prev_lc_state = int(log.LaneChangeState.off)
+    self._ao_voice_next_allowed = 0.0
+
   def load_sounds(self):
     self.loaded_sounds: dict[int, np.ndarray] = {}
 
@@ -198,6 +205,7 @@ class Soundd(QuietMode):
       BSM_VOICE_MIN_INTERVAL_S,
       float(read_param_int(BSM_VOICE_INTERVAL_PARAM, int(BSM_VOICE_DEFAULT_INTERVAL_S))),
     )
+    self._ao_alert_enabled = read_param_int(AO_ALERT_ENABLE_PARAM, 1) != 0
     self.bsm_voice_volume = float(np.clip(
       read_param_int(BSM_VOICE_VOLUME_PARAM, BSM_VOICE_DEFAULT_VOLUME_PCT) / 100.0, 0.0, 1.0,
     ))
@@ -207,6 +215,40 @@ class Soundd(QuietMode):
         self.bsm_voice_playing = False
         self.bsm_voice_sound = None
         self.bsm_voice_frame = 0
+
+  def _update_ao_maneuver_voice(self, sm, now: float) -> None:
+    """Play a direction prompt at the auto-overtake *intent* stage.
+
+    Mirrors openpilot-lz@ford: modelV2.meta.laneChangeState off ->
+    preLaneChange, with no real blinker (auto lane changes inject a virtual
+    one via _AutoBlinkerProxy, so carState stays clean). Gives the driver
+    the full AutoOvertakeConfirmSec (3s) of lead time before steering.
+    """
+    if not self._ao_alert_enabled:
+      self._ao_prev_lc_state = int(log.LaneChangeState.off)
+      return
+    try:
+      if not sm.valid.get("modelV2", False) or not sm.alive.get("carState", False):
+        return
+      if not bool(getattr(sm["selfdriveState"], "enabled", False)):
+        self._ao_prev_lc_state = int(log.LaneChangeState.off)
+        return
+      meta = sm["modelV2"].meta
+      lc_state = int(getattr(meta, "laneChangeState", log.LaneChangeState.off))
+      lc_dir = int(getattr(meta, "laneChangeDirection", log.LaneChangeDirection.none))
+      cs = sm["carState"]
+      manual_blinker = bool(getattr(cs, "leftBlinker", False)) != bool(getattr(cs, "rightBlinker", False))
+      pre_started = (self._ao_prev_lc_state == int(log.LaneChangeState.off)
+                     and lc_state == int(log.LaneChangeState.preLaneChange))
+      if (pre_started and not manual_blinker
+          and lc_dir in (int(log.LaneChangeDirection.left), int(log.LaneChangeDirection.right))
+          and now >= self._ao_voice_next_allowed):
+        side = "left" if lc_dir == int(log.LaneChangeDirection.left) else "right"
+        if self._start_bsm_voice(side, now):
+          self._ao_voice_next_allowed = now + AO_MANEUVER_VOICE_MIN_INTERVAL_S
+      self._ao_prev_lc_state = lc_state
+    except Exception:
+      pass
 
   def _bsm_voice_can_start(self, now: float) -> bool:
     return (self.bsm_voice_enabled
@@ -370,7 +412,7 @@ class Soundd(QuietMode):
     import sounddevice as sd
     micd.patch_sounddevice(sd)
 
-    sm = messaging.SubMaster(['selfdriveState', 'selfdriveStateSP', 'soundPressure', 'carState'])
+    sm = messaging.SubMaster(['selfdriveState', 'selfdriveStateSP', 'soundPressure', 'carState', 'modelV2'])
 
     with self.get_stream(sd) as stream:
       rk = Ratekeeper(20)
@@ -385,6 +427,7 @@ class Soundd(QuietMode):
 
         self._refresh_bsm_voice_params(now)
         self.update_bsm_voice(sm['carState'] if sm.alive['carState'] else None, now)
+        self._update_ao_maneuver_voice(sm, now)
 
         if sm.updated['soundPressure']:
           if not self.bsm_voice_playing:
