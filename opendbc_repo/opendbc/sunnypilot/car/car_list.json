@@ -2821,10 +2821,10 @@
     "package": "All"
   },
   "Lincoln Nautilus 2018-21": {
-    "platform": "FORD_EXPLORER_MK6",
+    "platform": "LINCOLN_NAUTILUS",
     "make": "Lincoln",
     "brand": "ford",
-    "model": "Nautilutus",
+    "model": "Nautilus",
     "year": [
       "2018",
       "2019",
@@ -2834,7 +2834,7 @@
     "package": "Adaptive Cruise Control with Lane Centering"
    },
   "Lincoln Aviator 2020-24": {
-    "platform": "FORD_EXPLORER_MK6",
+    "platform": "LINCOLN_Aviator",
     "make": "Lincoln",
     "brand": "ford",
     "model": "Aviator",
