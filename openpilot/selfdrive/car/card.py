@@ -194,7 +194,14 @@ class Car:
     CS_SP = convert_to_capnp(CS_SP)
 
     # Update radar tracks from CAN
-    RD: structs.RadarDataT | None = self.RI.update(can_list)
+    # Ford's RadarInterface accepts an optional v_ego and uses it to suppress
+    # MRR scan-index false positives while the car is stopped / launching.
+    # Every other brand's RadarInterface.update() takes only can_packets, so
+    # the extra argument must be passed for ford only.
+    RD: structs.RadarDataT | None = (
+      self.RI.update(can_list, CS.vEgo) if self.CP.brand == "ford"
+      else self.RI.update(can_list)
+    )
 
     self.sm.update(0)
 

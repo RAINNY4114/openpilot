@@ -126,6 +126,7 @@ class Soundd(QuietMode):
 
     self.load_sounds()
     self.load_bsm_voice_sounds()
+    self.load_ao_maneuver_voice_sounds()
 
     self.current_alert = AudibleAlert.none
     self.current_volume = MIN_VOLUME
@@ -216,6 +217,38 @@ class Soundd(QuietMode):
         self.bsm_voice_sound = None
         self.bsm_voice_frame = 0
 
+  def load_ao_maneuver_voice_sounds(self) -> None:
+    # Direction prompts borrowed from openpilot-lz@ford. These are spoken
+    # "auto left/right lane change" cues and replace the on-screen 3s text.
+    self.ao_maneuver_voice_sounds: dict[str, np.ndarray] = {}
+    for side in ("left", "right"):
+      for filename in (f"{side}-side.wav", f"{side}.wav"):
+        path = SOUNDS_DIR + filename
+        try:
+          with wave.open(path, 'r') as wf:
+            data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / (2**16 / 2)
+          if data.size:
+            self.ao_maneuver_voice_sounds[side] = data
+            break
+        except Exception:
+          continue
+
+  def _start_ao_maneuver_voice(self, side: str, now: float) -> bool:
+    if not self._ao_alert_enabled:
+      return False
+    if (now < self.bsm_voice_next_allowed
+        or self.current_alert != AudibleAlert.none
+        or self.bsm_voice_playing):
+      return False
+    sound = self.ao_maneuver_voice_sounds.get(side)
+    if sound is None or sound.size == 0:
+      return False
+    self.bsm_voice_sound = sound
+    self.bsm_voice_frame = 0
+    self.bsm_voice_playing = True
+    self.bsm_voice_next_allowed = now + AO_MANEUVER_VOICE_MIN_INTERVAL_S
+    return True
+
   def _update_ao_maneuver_voice(self, sm, now: float) -> None:
     """Play a direction prompt at the auto-overtake *intent* stage.
 
@@ -244,7 +277,7 @@ class Soundd(QuietMode):
           and lc_dir in (int(log.LaneChangeDirection.left), int(log.LaneChangeDirection.right))
           and now >= self._ao_voice_next_allowed):
         side = "left" if lc_dir == int(log.LaneChangeDirection.left) else "right"
-        if self._start_bsm_voice(side, now):
+        if self._start_ao_maneuver_voice(side, now):
           self._ao_voice_next_allowed = now + AO_MANEUVER_VOICE_MIN_INTERVAL_S
       self._ao_prev_lc_state = lc_state
     except Exception:

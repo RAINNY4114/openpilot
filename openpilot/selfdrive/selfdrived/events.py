@@ -411,17 +411,15 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.preLaneChangeLeft: {
     ET.WARNING: Alert(
-      "自动超车，3 秒后启动",
-      "向左变道，打灯或踩刹车可取消",
-      AlertStatus.normal, AlertSize.small,
+      "", "",
+      AlertStatus.normal, AlertSize.none,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
   },
 
   EventName.preLaneChangeRight: {
     ET.WARNING: Alert(
-      "自动超车，3 秒后启动",
-      "向右变道，打灯或踩刹车可取消",
-      AlertStatus.normal, AlertSize.small,
+      "", "",
+      AlertStatus.normal, AlertSize.none,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
   },
 
@@ -865,16 +863,14 @@ if HARDWARE.get_device_type() == 'mici':
     },
     EventName.preLaneChangeLeft: {
       ET.WARNING: Alert(
-        "自动超车，3 秒后启动",
-        "向左变道，确认安全",
-        AlertStatus.normal, AlertSize.mid,
+        "", "",
+        AlertStatus.normal, AlertSize.none,
         Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
     },
     EventName.preLaneChangeRight: {
       ET.WARNING: Alert(
-        "自动超车，3 秒后启动",
-        "向右变道，确认安全",
-        AlertStatus.normal, AlertSize.mid,
+        "", "",
+        AlertStatus.normal, AlertSize.none,
         Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
     },
     EventName.laneChangeBlocked: {

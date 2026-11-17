@@ -49,7 +49,10 @@ DELPHI_ESR_RADAR_MSGS = list(range(0x500, 0x540))
 DELPHI_MRR_RADAR_START_ADDR = 0x120
 DELPHI_MRR_RADAR_HEADER_ADDR = 0x174
 
-MRR_SCAN_MIN_VEGO = 1.5
+# ~11 km/h. The MRR scan index is not cyclic while the car is stopped or
+# just launching, so the continuity check is meaningless below this speed.
+# Previously 1.5 m/s, which did not cover the whole launch phase.
+MRR_SCAN_MIN_VEGO = 3.0
 DELPHI_MRR_RADAR_MSG_COUNT = 64
 
 DELPHI_MRR_RADAR_RANGE_COVERAGE = {
@@ -1375,6 +1378,11 @@ class RadarInterface(RadarInterfaceBase):
       ret.errors.radarUnavailableTemporary = (
         True
       )
+
+      # Never latch. A single burst of out-of-order scan indices used to
+      # keep radarUnavailableTemporary True every frame for tens of seconds.
+      # Reset so recovery only requires fresh consecutive indices.
+      self.radar_unavailable_cnt = 0
 
       return True
 

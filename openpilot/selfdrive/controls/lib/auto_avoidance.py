@@ -1156,20 +1156,31 @@ class AutoAvoidanceHelper:
             self._urgent_frames >= int(avoid_urgent_confirm)
         )
 
+        # Emergency-only contract (2026-11-14): auto steering avoidance is
+        # allowed solely to avoid a rear-end collision or reduce its severity.
+        # A real forward target plus a confirmed URGENT/CRITICAL risk must be
+        # present. Driver lateral input alone is NOT an emergency.
+        _lead_for_gate = _safe_float(lead_dist)
+        front_target_present = (
+            bool(obstacle_in_path)
+            or (_lead_for_gate is not None and 0.0 < _lead_for_gate < 60.0)
+        )
         emergency_active = (
+            front_target_present
+            and
             (
-                risk == RISK_URGENT
-                and
-                urgent_confirmed
+                (
+                    risk == RISK_URGENT
+                    and
+                    urgent_confirmed
+                )
+                or
+                (
+                    risk == RISK_CRITICAL
+                    and
+                    critical_confirmed
+                )
             )
-            or
-            (
-                risk == RISK_CRITICAL
-                and
-                critical_confirmed
-            )
-            or
-            lateral_active_now
         )
 
         if risk == RISK_NORMAL:
@@ -1543,6 +1554,23 @@ class AutoAvoidanceHelper:
                 lane_offset = (
                     EMERGENCY_OFFSET
                 )
+
+        # Hard per-frame emergency gate. Never emit a lane-change request unless
+        # a confirmed imminent collision risk exists in THIS frame. This also
+        # kills the stale "avoiding" state that used to keep steering for
+        # seconds after the hazard disappeared (2026-11-14 logs: risk=0,
+        # od=-1 while dir=1 and emergency_lc_completed).
+        if lane_request != LaneChangeDirection.none and not emergency_active:
+            lane_request = LaneChangeDirection.none
+            self._out_dir = LaneChangeDirection.none
+            self._mode = "cooldown"
+            self._cooldown_until = now + AVOID_COOLDOWN_SEC
+            self._esc_abort_since = None
+            self._clear_since = None
+            self._observed_lane_change = False
+            self._last_reason = "emergency_gate_closed"
+            hazard = False
+            lane_offset = 0.0
 
         if not math.isfinite(float(brake_request)):
             brake_request = 0.0

@@ -383,7 +383,9 @@ class AoAaBridge:
         right_rear_zone=rz,
         rear_sensor_fault=rf,
         lane_preference=int(cfg["lane_preference"]),
-        min_cruise_speed=float(cfg["min_cruise_kph"]) * CV.KPH_TO_MS,
+        # Auto overtake is hard-limited to >= 90 km/h regardless of the
+        # writable AutoOvertakeMinCruiseKph param (2026-11-14 requirement).
+        min_cruise_speed=max(90.0, float(cfg["min_cruise_kph"])) * CV.KPH_TO_MS,
         left_lane_prob=lp_left,
         right_lane_prob=lp_right,
         lane_prob_min=float(cfg["lane_prob_min"]),
@@ -544,6 +546,11 @@ class AoAaBridge:
         "aml": int(bool(aa_mr76_l)), "amr": int(bool(aa_mr76_r)),
       })
       self.aa_log.write(_fmt(fields))
+
+      # Second line of defence: an AA direction must be backed by a real
+      # URGENT/CRITICAL risk in this frame, even if the helper state is stale.
+      if aa_dir != LaneChangeDirection.none and int(st.get("risk_level", 0)) < 2:
+        aa_dir = LaneChangeDirection.none
 
       brake = 0.0 if brake != brake else max(0.0, float(brake))
       self._publish_brake(brake)
