@@ -17,8 +17,15 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
+from openpilot.sunnypilot.selfdrive.controls.lib.smooth_stops import SmoothStops
+from openpilot.sunnypilot.selfdrive.controls.lib.increased_stop_distance import IncreasedStopDistance
+from openpilot.sunnypilot.selfdrive.controls.lib.lead_reaction import LeadReactionTuning
+from openpilot.sunnypilot.selfdrive.controls.lib.custom_longitudinal_tuning import CustomLongitudinalTuning
 
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
+
+LAUNCH_BLEND_SPEED = 8.0  # m/s, launch tau fades to stock above this
+STOCK_V_DESIRED_TAU = 2.0
 
 
 class LongitudinalPlannerSP:
@@ -31,6 +38,10 @@ class LongitudinalPlannerSP:
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
+    self.increased_stop_distance = IncreasedStopDistance()
+    self.custom_tuning = CustomLongitudinalTuning()
+    self.lead_reaction = LeadReactionTuning()
+    self.smooth_stops = SmoothStops()
     self.accel_boost_sp = AccelBoostSP()
     self.openpilot_longitudinal = CP.openpilotLongitudinalControl
 
@@ -72,7 +83,37 @@ class LongitudinalPlannerSP:
       self.accel_boost = self.accel_boost_sp if self.accel_boost_sp.enabled and self.openpilot_longitudinal else AccelBoost()
 
     self.events_sp.clear()
+    self.smooth_stops.update()
+    self.increased_stop_distance.update()
+    self.custom_tuning.update()
+    self.lead_reaction.update()
     self.e2e_alerts_helper.update(sm, self.events_sp)
+
+  def apply_smooth_stops(self, sm, v_ego, a_target):
+    plan_min_v = float(min(self.v_desired_trajectory)) if hasattr(self, "v_desired_trajectory") else 0.0
+    try:
+      lead = sm['radarState'].leadOne
+    except Exception:
+      lead = None
+    return self.smooth_stops.apply(a_target, v_ego, lead, plan_min_v)
+
+  def apply_e2e_stop_distance(self, sm, v_ego, a_target, should_stop):
+    if not self.is_e2e(sm):
+      return a_target, should_stop
+    return self.increased_stop_distance.adjust_e2e_stop(a_target, should_stop, v_ego, sm['modelV2'])
+
+  def is_e2e(self, sm):
+    # This fork's selfdriveState has no experimentalMode field. Guard the read so
+    # plannerd cannot crash onroad. Falling back to True is safe: the downstream
+    # IncreasedStopDistance.adjust_e2e_stop() is a no-op unless its param > 0.
+    sds = sm['selfdriveState']
+    if hasattr(sds, 'experimentalMode'):
+        return bool(sds.experimentalMode)
+    return True
+
+  def get_accel_limits(self, sm, v_ego, accel_limits):
+    personality = sm['selfdriveState'].personality
+    return [accel_limits[0], self.custom_tuning.get_max_accel(v_ego, accel_limits[1], personality)]
 
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     plan_sp_send = messaging.new_message('longitudinalPlanSP')

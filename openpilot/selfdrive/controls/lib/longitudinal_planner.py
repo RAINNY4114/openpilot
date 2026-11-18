@@ -18,6 +18,8 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 
+STOCK_V_DESIRED_TAU = 2.0  # stock v_desired filter time constant
+
 J_CRUISE_VALS = [2.2, 1.6, 1.1, 0.8, 0.60, 0.42, 0.34, 0.28, 0.22, 0.025]
 J_CRUISE_BP = [0.,  3,   5.,  7.,  11., 15.,  20.,  25.,  30.,  55.]
 A_CRUISE_MIN = -1.2
@@ -106,20 +108,28 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.a_cruise = self.output_a_target
 
     # Prevent divergence, smooth in current v_ego
+    # Lead Reaction / Launch Response: tighter v_desired tau near a stop
+    launch_tau = self.lead_reaction.get_launch_tau()
+    v_desired_tau = float(np.interp(v_ego, [0.0, 8.0], [launch_tau, STOCK_V_DESIRED_TAU]))
+    self.v_desired_filter.update_alpha(v_desired_tau)
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
+    accel_clip = self.get_accel_limits(sm, v_ego, [ACCEL_MIN, ACCEL_MAX])
 
     # Get new v_cruise and a_target from Smart Cruise Control and Speed Limit Assist
     v_cruise, self.output_a_target = LongitudinalPlannerSP.update_targets(self, sm, self.v_desired_filter.x, self.output_a_target, v_cruise)
 
-    self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
+    self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality,
+                         jerk_factor_multiplier=self.custom_tuning.get_decel_jerk_factor(sm['selfdriveState'].personality))
     if self.CP.openpilotLongitudinalControl:
       self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     else:
       self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
-    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
+    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality,
+                    t_follow=self.custom_tuning.get_t_follow(sm['selfdriveState'].personality),
+                    lead_reaction_factor=self.lead_reaction.get_lead_reaction_factor())
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
@@ -139,8 +149,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+    output_a_target_e2e, output_should_stop_e2e = self.apply_e2e_stop_distance(sm, v_ego, output_a_target_e2e, output_should_stop_e2e)
 
     self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.dt)
+    self.a_cruise = min(self.a_cruise, accel_clip[1])
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
@@ -153,7 +165,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
-    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    self.output_a_target = float(np.clip(self.apply_smooth_stops(sm, v_ego, output_a_target), accel_clip[0], accel_clip[1]))
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 

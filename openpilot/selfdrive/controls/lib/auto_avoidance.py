@@ -10,26 +10,34 @@ from openpilot.common.constants import CV
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
+# Brake fallback eligibility starts low; steering is separately gated at
+# AA_STEER_MIN_SPEED. Borrowed from carrot-wip: mitigation should not depend
+# on a lane change being available.
 AUTO_AVOID_MIN_SPEED = (
     25.0 * CV.KPH_TO_MS
 )
+AA_STEER_MIN_SPEED = (
+    60.0 * CV.KPH_TO_MS
+)
 
 TTC_WARNING = 5.0
-TTC_URGENT = 3.5
-TTC_CRITICAL = 2.0
+TTC_URGENT = 2.5
+TTC_CRITICAL = 1.2
 
 DIST_WARNING = 30.0
 DIST_URGENT = 20.0
-DIST_CRITICAL = 12.0
+DIST_CRITICAL = 8.0
 
 CLOSING_WARNING = 2.0
-CLOSING_URGENT = 4.0
-CLOSING_CRITICAL = 7.0
+CLOSING_URGENT = 6.0
+CLOSING_CRITICAL = 12.0
 
-TTC_CRITICAL_DIST_GUARD = 30.0
-TTC_URGENT_DIST_GUARD = 40.0
+TTC_CRITICAL_DIST_GUARD = 15.0
+TTC_URGENT_DIST_GUARD = 30.0
 
-CRITICAL_CONFIRM_FRAMES = 3
+# 20 modeld frames (~1 s at 20 Hz), was 3 frames (~0.15 s).
+CRITICAL_CONFIRM_FRAMES = 20
+AA_FRONT_TARGET_MAX_DIST = 40.0
 
 CLEAR_LANE_STABLE_SEC = 0.30
 
@@ -80,6 +88,10 @@ RISK_NORMAL = 0
 RISK_WARNING = 1
 RISK_URGENT = 2
 RISK_CRITICAL = 3
+
+# Steering avoidance is CRITICAL-only. URGENT may still be logged/braked,
+# but it must never request a lane change (2026-11-18 tightening).
+AA_LANE_CHANGE_RISK_MIN = RISK_CRITICAL
 
 def _safe_float(value):
     try:
@@ -219,6 +231,8 @@ class AutoAvoidanceHelper:
         self._urgent_frames = 0
 
         self._risk_level = RISK_NORMAL
+
+        self._emergency_active = False
 
         self._last_reason = "idle"
 
@@ -426,7 +440,10 @@ class AutoAvoidanceHelper:
             ):
                 return False
 
-        if mr76_obstacle is True:
+        # 2026-11-18: MR76 is fully excluded from AA when its aux gate is off.
+        # The bridge passes require_aux_sensors_mr76=False (lidar-only contract),
+        # so an MR76 obstacle bit must NOT veto an otherwise lidar-safe lane.
+        if require_aux_sensors_mr76 and mr76_obstacle is True:
             return False
 
         lidar_ok = _sensor_fresh(
@@ -1156,32 +1173,28 @@ class AutoAvoidanceHelper:
             self._urgent_frames >= int(avoid_urgent_confirm)
         )
 
-        # Emergency-only contract (2026-11-14): auto steering avoidance is
-        # allowed solely to avoid a rear-end collision or reduce its severity.
-        # A real forward target plus a confirmed URGENT/CRITICAL risk must be
-        # present. Driver lateral input alone is NOT an emergency.
+        # Emergency-only contract (2026-11-14, tightened 2026-11-18):
+        # auto steering avoidance is allowed solely to avoid a rear-end
+        # collision or reduce its severity. It now requires a REAL forward
+        # target that is actually closing, and a time-confirmed CRITICAL
+        # (not URGENT) risk. Driver lateral input alone is NOT an emergency.
         _lead_for_gate = _safe_float(lead_dist)
+        _lead_rel_gate = _safe_float(lead_rel_speed)
         front_target_present = (
             bool(obstacle_in_path)
-            or (_lead_for_gate is not None and 0.0 < _lead_for_gate < 60.0)
+            or (
+                _lead_for_gate is not None
+                and 0.0 < _lead_for_gate < AA_FRONT_TARGET_MAX_DIST
+                and _lead_rel_gate is not None
+                and (-_lead_rel_gate) >= CLOSING_CRITICAL
+            )
         )
         emergency_active = (
             front_target_present
-            and
-            (
-                (
-                    risk == RISK_URGENT
-                    and
-                    urgent_confirmed
-                )
-                or
-                (
-                    risk == RISK_CRITICAL
-                    and
-                    critical_confirmed
-                )
-            )
+            and risk >= AA_LANE_CHANGE_RISK_MIN
+            and critical_confirmed
         )
+        self._emergency_active = bool(emergency_active)
 
         if risk == RISK_NORMAL:
             self._last_reason = "normal"
@@ -1339,34 +1352,33 @@ class AutoAvoidanceHelper:
                                 )
                                 hazard = True
 
+                # Emergency-only contract: as soon as THIS frame has no
+                # confirmed imminent risk, drop the pending lane-change
+                # direction immediately. The old AVOID_ESC_ABORT_SEC grace
+                # window kept emitting a stale "dir=1" intent for up to 2 s
+                # after the hazard vanished (risk=0/1, why=normal), which read
+                # as unsafe/arbitrary lane-change intents. Final steering is
+                # still guarded by the per-frame gate below and the bridge.
                 if not emergency_active:
+                    self._mode = "cooldown"
 
-                    if self._esc_abort_since is None:
-                        self._esc_abort_since = now
+                    self._cooldown_until = (
+                        now + AVOID_COOLDOWN_SEC
+                    )
 
-                    elif (
-                        (now - self._esc_abort_since)
-                        >= AVOID_ESC_ABORT_SEC
-                    ):
-                        self._mode = "cooldown"
+                    self._esc_abort_since = None
 
-                        self._cooldown_until = (
-                            now + AVOID_COOLDOWN_SEC
-                        )
+                    self._out_dir = (
+                        LaneChangeDirection.none
+                    )
 
-                        self._esc_abort_since = None
+                    lane_request = (
+                        LaneChangeDirection.none
+                    )
 
-                        self._out_dir = (
-                            LaneChangeDirection.none
-                        )
-
-                        lane_request = (
-                            LaneChangeDirection.none
-                        )
-
-                        self._last_reason = (
-                            "escape_aborted_no_risk"
-                        )
+                    self._last_reason = (
+                        "escape_aborted_no_risk"
+                    )
 
                 else:
                     self._esc_abort_since = None
@@ -1555,6 +1567,14 @@ class AutoAvoidanceHelper:
                     EMERGENCY_OFFSET
                 )
 
+        # Brake mitigation remains available below this speed, but steering
+        # avoidance never does (2026-11-18 carrot-wip fallback contract).
+        if lane_request != LaneChangeDirection.none and v_ego < AA_STEER_MIN_SPEED:
+            lane_request = LaneChangeDirection.none
+            self._out_dir = LaneChangeDirection.none
+            self._last_reason = "steer_speed_low"
+            lane_offset = 0.0
+
         # Hard per-frame emergency gate. Never emit a lane-change request unless
         # a confirmed imminent collision risk exists in THIS frame. This also
         # kills the stale "avoiding" state that used to keep steering for
@@ -1594,6 +1614,7 @@ class AutoAvoidanceHelper:
             "active_since": self._active_since,
             "emergency_since": self._emergency_since,
             "risk_level": self._risk_level,
+            "emergency_active": self._emergency_active,
             "critical_frames": self._critical_frames,
             "left_ok_since": self._left_ok_since,
             "right_ok_since": self._right_ok_since,

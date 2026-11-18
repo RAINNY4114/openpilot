@@ -2,6 +2,7 @@
 
 import os
 import json
+import math
 import time
 from typing import NamedTuple
 
@@ -21,13 +22,35 @@ AA_LOG_PATH = "/data/media/0/auto_avoidance.log"
 LOG_MAX_BYTES = 5_000_000
 
 SIDE_LEAD_DANGER_DIST = 5.0
+# A side blind-spot target is dangerous when close, OR at moderate range but
+# closing fast (a fast-approaching target in the zone is unsafe even a bit
+# further out). Mirrors the device UI blind_spot_indicators definition.
+SIDE_LEAD_CLOSING_DIST = 9.0
+SIDE_LEAD_CLOSING_SPEED = 3.0  # m/s of |vRel| toward ego
 
 MR76_AUX_PATH = "/dev/shm/mr76_targets.json"
 MR76_AUX_STALE_SEC = 0.5
 MR76_SIDE_LAT_MIN = 0.8
 MR76_SIDE_DIST_MAX = 40.0
 
-AA_CONFIRM_DELAY_SEC = 0.5
+AA_CONFIRM_DELAY_SEC = 3.0
+AA_BRIDGE_STABLE_SEC = 1.0
+AA_LANE_CHANGE_MIN_KPH = 60.0
+
+# carrot-wip-style radar evidence: current geometry must agree with a short
+# measured history; no single-frame or extrapolated return can open the gate.
+RADAR_MAX_GAP_S = 0.15
+RADAR_MIN_SAMPLES = 3
+RADAR_MIN_CONFIRM_S = 0.35
+RADAR_PRED_D_ERR = 1.0
+RADAR_PRED_Y_ERR = 0.30
+RADAR_V_STEP_ERR = 1.5
+
+# carrot-wip-style confident ego lane for lateral avoidance.
+AA_LANE_PROB_MIN = 0.90
+AA_LANE_STD_MAX = 0.25
+AA_LANE_WIDTH_MIN = 2.5
+AA_LANE_WIDTH_MAX = 4.3
 
 CONFIRM_DELAY_SEC_DEFAULT = 3.0
 
@@ -150,17 +173,77 @@ def _read_mr76_aux():
 
 
 def effective_bsm(sm, cs):
+  """Blind-spot detection = OEM BSM (carState) + side radar targets.
+
+  This is the same definition used by the device's UI blind_spot_indicators:
+  an OEM blind-spot lamp OR a side radar target in the danger zone means the
+  side is occupied. A side target is dangerous when within
+  SIDE_LEAD_DANGER_DIST, or within SIDE_LEAD_CLOSING_DIST while closing fast.
+  Returns (left, right) occupancy booleans. These are combined with the left/
+  right lidar clearance in _update_aa so both sensors are checked together.
+  """
   left = bool(cs.leftBlindspot)
   right = bool(cs.rightBlindspot)
   try:
     rs = sm['radarState']
-    if rs.leadLeft.present and float(rs.leadLeft.dRel) < SIDE_LEAD_DANGER_DIST:
-      left = True
-    if rs.leadRight.present and float(rs.leadRight.dRel) < SIDE_LEAD_DANGER_DIST:
-      right = True
+    for present, drel, vrel, side in (
+      (rs.leadLeft.present, rs.leadLeft.dRel, rs.leadLeft.vRel, "left"),
+      (rs.leadRight.present, rs.leadRight.dRel, rs.leadRight.vRel, "right"),
+    ):
+      if not bool(present):
+        continue
+      try:
+        d = float(drel)
+        vr = float(vrel)
+      except (TypeError, ValueError):
+        continue
+      closing = -vr  # vRel < 0 means the target is closing toward ego
+      dangerous = (
+        0.0 <= d < SIDE_LEAD_DANGER_DIST
+        or (0.0 <= d < SIDE_LEAD_CLOSING_DIST and closing >= SIDE_LEAD_CLOSING_SPEED)
+      )
+      if dangerous:
+        if side == "left":
+          left = True
+        else:
+          right = True
   except Exception:
     pass
   return left, right
+
+class _RadarObstacleEvidence:
+  """Short-horizon in-path track confirmation, modeled on carrot-wip.
+
+  Returns only a target whose current range/side/relative speed agree with a
+  continuous measured history. No stale extrapolation, no single-point gate.
+  """
+  def __init__(self):
+    self._tracks = {}
+
+  def update(self, now, points):
+    tracks = {}
+    candidates = []
+    for tid, d, y, vr in points:
+      if not all(math.isfinite(float(v)) for v in (d, y, vr)):
+        continue
+      d, y, vr = float(d), float(y), float(vr)
+      old = self._tracks.get(tid)
+      dt = now - old[0] if old is not None else math.inf
+      continuous = bool(
+        old is not None and 0.0 < dt <= RADAR_MAX_GAP_S
+        and abs(d - old[1] - old[3] * dt) <= RADAR_PRED_D_ERR
+        and abs(y - old[2]) <= RADAR_PRED_Y_ERR
+        and abs(vr - old[3]) <= RADAR_V_STEP_ERR
+      )
+      since = old[4] if continuous else now
+      samples = old[5] + 1 if continuous else 1
+      tracks[tid] = (now, d, y, vr, since, samples)
+      if samples >= RADAR_MIN_SAMPLES and (now - since) >= RADAR_MIN_CONFIRM_S:
+        candidates.append((d, y, vr, since, samples))
+    self._tracks = tracks
+    if len(candidates) != 1:
+      return None
+    return candidates[0]
 
 class _ThrottledLog:
   def __init__(self, path, period=1.0):
@@ -238,6 +321,7 @@ class AoAaBridge:
   def __init__(self):
     self.ao = AutoOvertakeHelper()
     self.aa = AutoAvoidanceHelper()
+    self.aa_radar = _RadarObstacleEvidence()
     self.lidar = LidarLatch()
     self.ao_log = _ThrottledLog(AO_LOG_PATH)
     self.aa_log = _ThrottledLog(AA_LOG_PATH)
@@ -245,6 +329,8 @@ class AoAaBridge:
     self._cfg_n = 0
     self._brake_pub = -1.0
     self._obs_hold = {"d": None, "y": None, "vr": None, "t": 0.0}
+    self._aa_candidate = LaneChangeDirection.none
+    self._aa_candidate_since = 0.0
     self._n = 0
 
   def _maybe_reload_cfg(self):
@@ -383,9 +469,10 @@ class AoAaBridge:
         right_rear_zone=rz,
         rear_sensor_fault=rf,
         lane_preference=int(cfg["lane_preference"]),
-        # Auto overtake is hard-limited to >= 90 km/h regardless of the
-        # writable AutoOvertakeMinCruiseKph param (2026-11-14 requirement).
-        min_cruise_speed=max(90.0, float(cfg["min_cruise_kph"])) * CV.KPH_TO_MS,
+        # Auto overtake min cruise speed is user-configurable via the Lincoln
+        # settings page (60/70/80/90/100 km/h). The old >= 90 km/h hard floor
+        # was removed on 2026-11-18 so every UI choice takes real effect.
+        min_cruise_speed=float(cfg["min_cruise_kph"]) * CV.KPH_TO_MS,
         left_lane_prob=lp_left,
         right_lane_prob=lp_right,
         lane_prob_min=float(cfg["lane_prob_min"]),
@@ -411,7 +498,12 @@ class AoAaBridge:
         right_lidar_obstacle=r_obs,
         left_lidar_free=l_free,
         right_lidar_free=r_free,
-        require_aux_sensors=True,
+        # AA-style contract (2026-11-18): side clearance is gated by lidar + BSM.
+        # MR76 is excluded from the hard gate (kept only as rear-traffic reference via
+        # rear_zone), so an MR76 obstacle/stale reading cannot veto an otherwise
+        # safe overtake. Lidar must be fresh+free; BSM must be available+clear.
+        require_aux_sensors_mr76=False,
+        require_aux_sensors_lidar=True,
       )
 
       st = self.ao.get_state()
@@ -462,45 +554,72 @@ class AoAaBridge:
       lead = sm['radarState'].leadOne if sm.seen.get("radarState", False) else None
       cs_left_bsm_effective, cs_right_bsm_effective = effective_bsm(sm, cs)
 
-      obs_d, obs_vr, obs_in_path = None, None, False
-      best = None
+      now = time.monotonic()
+
+      # carrot-wip-style confident ego lane: only a high-confidence, stable
+      # current lane may be used for lateral avoidance. No lane-change state,
+      # no extrapolation, no adjacent-lane borrowing.
+      lane_conf = False
+      try:
+        md = sm['modelV2']
+        probs = list(md.laneLineProbs)
+        stds = list(md.laneLineStds)
+        if len(probs) >= 3 and len(stds) >= 3:
+          lane_conf = all(
+            float(probs[i]) >= AA_LANE_PROB_MIN and 0.0 <= float(stds[i]) <= AA_LANE_STD_MAX
+            for i in (1, 2)
+          )
+          if lane_conf and len(md.laneLines) >= 3:
+            ly = list(md.laneLines[1].y)
+            ry = list(md.laneLines[2].y)
+            if ly and ry:
+              width = abs(float(ry[0]) - float(ly[0]))
+              lane_conf = AA_LANE_WIDTH_MIN <= width <= AA_LANE_WIDTH_MAX
+          if lane_conf and int(getattr(md.meta.laneChangeState, "raw", 0)) != 0:
+            lane_conf = False
+      except Exception:
+        lane_conf = False
+      aa_left_ok = bool(left_ok and lane_conf)
+      aa_right_ok = bool(right_ok and lane_conf)
+
+      radar_pts = []
       if sm.seen.get("radarTracks", False):
         for p in sm['radarTracks'].points:
           d = float(p.dRel)
           y = float(p.yRel)
           vr = float(p.vRel)
-          if d < 1.0 or d > 60.0:
-            continue
-          if abs(y) > 1.0:
-            continue
-          if best is None or d < best[0]:
-            best = (d, y, vr)
+          if 1.0 <= d <= 60.0 and abs(y) <= 1.0:
+            radar_pts.append((int(p.trackId), d, y, vr))
+      radar_evidence = self.aa_radar.update(now, radar_pts)
 
-      now = time.monotonic()
-      hold_s = float(cfg.get("obs_hold_sec", 0.0))
-      if best is not None:
-        self._obs_hold["d"] = best[0]
-        self._obs_hold["y"] = best[1]
-        self._obs_hold["vr"] = best[2]
+      obs_d, obs_vr, obs_in_path = None, None, False
+      if radar_evidence is not None:
+        obs_d, obs_vr, obs_in_path = radar_evidence[0], radar_evidence[2], True
+        self._obs_hold["d"] = obs_d
+        self._obs_hold["y"] = radar_evidence[1]
+        self._obs_hold["vr"] = obs_vr
         self._obs_hold["t"] = now
-        obs_d, obs_vr, obs_in_path = best[0], best[2], True
-      elif hold_s > 0.0 and self._obs_hold["d"] is not None and (now - self._obs_hold["t"]) <= hold_s:
-        obs_d = self._obs_hold["d"]
-        obs_vr = self._obs_hold["vr"]
-        obs_in_path = True
       else:
         self._clear_obs()
 
-      aa_mr76_l = bool((mr76_gain_lane // 10) % 10) if mr76_gain_fresh else None
-      aa_mr76_r = bool(mr76_gain_lane % 10) if mr76_gain_fresh else None
+      hold_s = float(cfg.get("obs_hold_sec", 0.0))
+
+      # 2026-11-18 user directive: AA lateral safety is LIDAR-ONLY.
+      #   - No MR76 rear-distance is added and MR76 never gates an AA steer.
+      #   - Side/rear clearance comes from the left/right lidar channels
+      #     decoded from amapNavi.leftBlind/rightBlind bit 0b0101.
+      #   - SAFE  -> steer avoidance;  UNSAFE -> brake fallback to reduce impact.
+      # The legacy MR76 gain-lane params are therefore NOT consumed by AA.
+      # (They remain in the signature only because update() still passes them
+      #  for AO; they are intentionally ignored here.)
 
       aa_dir, brake, _hazard, _off = self.aa.update(
         enabled=True,
         obstacle_in_path=obs_in_path,
         lc_state=dh.lane_change_state,
         v_ego=v_ego,
-        left_ok=left_ok,
-        right_ok=right_ok,
+        left_ok=aa_left_ok,
+        right_ok=aa_right_ok,
         is_rhd=bool(is_rhd),
         manual_blinker=bool(cs.leftBlinker or cs.rightBlinker),
         bsm_available=True,
@@ -518,9 +637,22 @@ class AoAaBridge:
         right_lidar_valid=r_valid,
         left_lidar_age=l_age,
         right_lidar_age=r_age,
+        # AA uses lidar as the ONLY side/rear clearance source. Split the aux
+        # switches so lidar is mandatory while MR76 is explicitly excluded.
+        # With require_aux_sensors_lidar=True, any stale/blocked/missing lidar
+        # side makes _escape_lane_safe() return False -> no steer -> brake.
+        rear_sensing_present=False,
+        mr76_left_available=False,
+        mr76_right_available=False,
+        mr76_left_valid=None,
+        mr76_right_valid=None,
+        mr76_left_age=None,
+        mr76_right_age=None,
         require_aux_sensors=False,
-        mr76_left_obstacle=aa_mr76_l,
-        mr76_right_obstacle=aa_mr76_r,
+        require_aux_sensors_mr76=False,
+        require_aux_sensors_lidar=True,
+        mr76_left_obstacle=None,
+        mr76_right_obstacle=None,
         avoid_stable_mode=str(cfg["stable_mode"]),
         avoid_stable_ratio=float(cfg["stable_ratio"]),
         avoid_stable_window_sec=float(cfg["stable_window_sec"]),
@@ -530,6 +662,37 @@ class AoAaBridge:
       )
 
       st = self.aa.get_state()
+
+      # Apply the risk gate BEFORE logging so the log never shows a
+      # misleading non-emergency "dir=1" intent. An AA direction must be
+      # backed by a real CRITICAL risk in THIS frame, even if the helper
+      # state is stale.
+      if aa_dir != LaneChangeDirection.none and int(st.get("risk_level", 0)) < 3:
+        aa_dir = LaneChangeDirection.none
+
+      # 2026-11-18: second, independent bridge gate. Even if the helper
+      # emits a direction, require its own emergency flag, a confirmed
+      # critical reason, sufficient speed, and a stable candidate for
+      # AA_BRIDGE_STABLE_SEC. This prevents short sub-1 s AA bursts from
+      # reaching DesireHelper between the 1 Hz log samples.
+      bridge_ok = (
+        aa_dir != LaneChangeDirection.none
+        and bool(st.get("emergency_active", False))
+        and str(st.get("mode")) == "avoiding"
+        and str(st.get("last_reason")) in ("critical_confirmed", "emergency_escape_request")
+        and v_ego * 3.6 >= AA_LANE_CHANGE_MIN_KPH
+      )
+      if bridge_ok:
+        if self._aa_candidate != aa_dir:
+          self._aa_candidate = aa_dir
+          self._aa_candidate_since = now
+        if (now - self._aa_candidate_since) < AA_BRIDGE_STABLE_SEC:
+          aa_dir = LaneChangeDirection.none
+      else:
+        self._aa_candidate = LaneChangeDirection.none
+        self._aa_candidate_since = 0.0
+        aa_dir = LaneChangeDirection.none
+
       fields.update({
         "dir": int(aa_dir), "mode": st["mode"], "why": st["last_reason"],
         "risk": int(st["risk_level"]),
@@ -538,19 +701,26 @@ class AoAaBridge:
         "v": round(v_ego * 3.6, 1),
         "sm": str(cfg["stable_mode"]),
         "oh": round(float(cfg.get("obs_hold_sec", 0.0)), 2),
+        "rev": int(radar_evidence is not None),
+        "lc": int(bool(lane_conf)),
         "brk": round(float(brake), 3),
         "bmax": round(float(cfg.get("brake_max", 0.0)), 2),
+        "egate": int(bool(st.get("emergency_active", False))),
+        "astb": round(now - self._aa_candidate_since, 2) if self._aa_candidate != LaneChangeDirection.none else 0.0,
+        "raux": 0,  # retired for AA: MR76 no longer gates steering
         "llid": int(bool(self.lidar.left)) * 2 + int(bits.left_lidar_obstacle),
         "rlid": int(bool(self.lidar.right)) * 2 + int(bits.right_lidar_obstacle),
-        "amf": int(mr76_gain_fresh),
-        "aml": int(bool(aa_mr76_l)), "amr": int(bool(aa_mr76_r)),
+        "lgate": 1,  # side/rear gate = lidar clearance + blind-spot (BSM) detection
+        "lfr": int(bool(l_free)) if l_free is not None else -1,
+        "rfr": int(bool(r_free)) if r_free is not None else -1,
+        # BSM (OEM + side radar) and lidar are checked TOGETHER per side:
+        # a side is clear only if lidar says free AND blind-spot is not occupied.
+        "lbsm": int(bool(cs_left_bsm_effective)),
+        "rbsm": int(bool(cs_right_bsm_effective)),
+        "lclr": int(bool(l_free) and not cs_left_bsm_effective) if l_free is not None else 0,
+        "rclr": int(bool(r_free) and not cs_right_bsm_effective) if r_free is not None else 0,
       })
       self.aa_log.write(_fmt(fields))
-
-      # Second line of defence: an AA direction must be backed by a real
-      # URGENT/CRITICAL risk in this frame, even if the helper state is stale.
-      if aa_dir != LaneChangeDirection.none and int(st.get("risk_level", 0)) < 2:
-        aa_dir = LaneChangeDirection.none
 
       brake = 0.0 if brake != brake else max(0.0, float(brake))
       self._publish_brake(brake)

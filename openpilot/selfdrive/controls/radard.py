@@ -9,6 +9,7 @@ from openpilot.cereal import messaging, log, custom
 from opendbc.car.structs import car
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
+from openpilot.sunnypilot.selfdrive.controls.lib.increased_stop_distance import IncreasedStopDistance
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
@@ -221,6 +222,7 @@ class RadarD:
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
+    self.increased_stop_distance = IncreasedStopDistance()
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)
@@ -232,6 +234,7 @@ class RadarD:
     self.ready = False
 
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
+    self.increased_stop_distance.update()
     self.ready = sm.seen['modelV2']
 
     if sm.recv_frame['carState'] != self.last_v_ego_frame:
@@ -278,10 +281,10 @@ class RadarD:
         else:
           self.lead_prob_filters[i].update(lead_prob)
 
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x,
-                                          self.CP, self.CP_SP, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
-                                          self.CP, self.CP_SP, low_speed_override=False)
+      self.radar_state.leadOne = self.increased_stop_distance.apply_lead(get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x,
+                                          self.CP, self.CP_SP, low_speed_override=True))
+      self.radar_state.leadTwo = self.increased_stop_distance.apply_lead(get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
+                                          self.CP, self.CP_SP, low_speed_override=False))
 
       self.radar_state.leadLeft = get_lead_side(self.v_ego, self.tracks, side="left")
       self.radar_state.leadRight = get_lead_side(self.v_ego, self.tracks, side="right")

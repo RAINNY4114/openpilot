@@ -51,6 +51,37 @@ VLAT_STABLE = 1.0
 
 RCS_FLOOR = -20.0
 
+# --- Experimental cone detection (ford-lincoln-ui-20261118) ---
+# Reuses the existing MR76 radar object stream: a low-RCS, stationary object
+# at the road side is classified as a traffic cone. No camera stream is opened.
+_CONE_PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
+_CONE_PARAM_KEY = "ConeDetectionEnabled"
+_CONE_REFRESH_SEC = 1.0
+_cone_state = {"ts": 0.0, "on": False}
+
+
+def _cone_detection_enabled():
+  now = time.monotonic()
+  if now - _cone_state["ts"] < _CONE_REFRESH_SEC:
+    return _cone_state["on"]
+  _cone_state["ts"] = now
+  on = False
+  for d in _CONE_PARAM_DIRS:
+    try:
+      with open(os.path.join(d, _CONE_PARAM_KEY)) as f:
+        on = f.read().strip() in ("1", "true", "True")
+      break
+    except Exception:
+      continue
+  _cone_state["on"] = on
+  return on
+
+
+# A cone is a small, low-reflectivity stationary target near the road edge.
+# RCS_FLOOR (-20) already filters weaker noise, so the usable band is [-20, -10].
+CONE_RCS_MAX = -10.0
+CONE_LAT_MIN = 0.8
+
 MIN_HITS = 3
 
 DYN_MOVING = 0
@@ -93,6 +124,12 @@ def classify(obj):
   if dyn == DYN_MOVING:
     return "motorcycle"
   if dyn in (DYN_STATIONARY, DYN_STOPPED):
+    # Experimental cone detection (opt-in via ConeDetectionEnabled).
+    # Low RCS + stationary + road-side => traffic cone; reuse radar only.
+    if (_cone_detection_enabled()
+        and obj.get("rcs", 0.0) <= CONE_RCS_MAX
+        and abs(obj.get("lat", 0.0)) > CONE_LAT_MIN):
+      return "cone"
     return "static"
   return "unknown"
 

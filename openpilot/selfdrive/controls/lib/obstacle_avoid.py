@@ -22,6 +22,7 @@ OBS_HALF_WIDTH = {
   "pedestrian": 0.25,
   "motorcycle": 0.35,
   "bicycle": 0.30,
+  "cone": 0.35,  # experimental cone detection (narrow, low-RCS road-side target)
   "parked": 0.90,
   "static": 0.60,
   "oncoming": 0.90,

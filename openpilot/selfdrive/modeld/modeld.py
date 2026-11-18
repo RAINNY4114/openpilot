@@ -6,8 +6,8 @@ import gc
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
-os.environ.setdefault('AM_POWER_LIMIT', '120')
-os.environ.pop('AM_PERF_LEVEL', None)
+os.environ.setdefault('AM_POWER_LIMIT', '100')
+os.environ.setdefault('AM_PERF_LEVEL', 'high')
 from tinygrad.device import Buffer, Device
 from tinygrad.dtype import DType, dtypes
 from tinygrad.engine.realize import lower_and_compile
@@ -50,7 +50,7 @@ SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
-BIG_MODEL_TIMEOUT = 20
+BIG_MODEL_TIMEOUT = 60
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -236,7 +236,7 @@ class ModelState(ModelStateBase):
 def main(demo=False):
   cloudlog.warning("modeld init")
 
-  CHESTNUT = chestnut_compiled() and chestnut_present()
+  CHESTNUT = chestnut_compiled() and (chestnut_present() or cable_connected())
   if CHESTNUT:
     from tinygrad.runtime.ops_amd import AMDDevice
     AMDDevice.wait_timeout_ms = 3000
@@ -308,7 +308,7 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay", "amapNavi"])
+                  "carControl", "controlsState", "lateralDelay"])
 
   publish_state = PublishState()
   params = Params()

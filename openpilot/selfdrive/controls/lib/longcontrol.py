@@ -4,6 +4,7 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.common.pid import PIDController
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.sunnypilot.selfdrive.controls.lib.smooth_stops import SmoothStopsLongControl
 
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
@@ -47,14 +48,19 @@ class LongControl:
     self.pid = PIDController(0.0, (CP.longitudinalTuning.kiBP, CP.longitudinalTuning.kiV),
                              rate=1 / DT_CTRL)
     self.last_output_accel = 0.0
+    self.smooth_stops = SmoothStopsLongControl()
 
   def reset(self):
     self.pid.reset()
 
   def update(self, active, CS, a_target, should_stop, accel_limits):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
+    self.smooth_stops.update()
     self.pid.neg_limit = accel_limits[0]
     self.pid.pos_limit = accel_limits[1]
+    if self.long_control_state != LongCtrlState.stopping:
+      # defer only the entry into stopping; once stopped the raw plan governs exits
+      should_stop = self.smooth_stops.defer_stopping(should_stop, CS.standstill, CS.vEgo)
 
     self.long_control_state = long_control_state_trans(self.CP_SP, active, self.long_control_state,
                                                        should_stop, CS.brakePressed,
@@ -75,6 +81,7 @@ class LongControl:
       error = a_target - CS.aEgo
       output_accel = self.pid.update(error, speed=CS.vEgo,
                                      feedforward=a_target)
+      output_accel = self.smooth_stops.smooth_pid_output(output_accel, CS.vEgo)
 
     self.last_output_accel = np.clip(output_accel, accel_limits[0], accel_limits[1])
     return self.last_output_accel

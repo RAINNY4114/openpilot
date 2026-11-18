@@ -509,12 +509,12 @@ class AutoOvertakeHelper:
         obstacle,
         rear_dist,
         rear_speed,
-        require_aux_sensors,
+        require_aux_sensors_mr76,
         now,
     ):
 
         if available is None:
-            if require_aux_sensors:
+            if require_aux_sensors_mr76:
                 self._set_lane_veto(
                     side,
                     "mr76_unavailable_or_stale",
@@ -530,7 +530,7 @@ class AutoOvertakeHelper:
             MR76_MAX_AGE_SEC,
         )
 
-        if require_aux_sensors and not mr76_ok:
+        if require_aux_sensors_mr76 and not mr76_ok:
 
             self._set_lane_veto(
                 side,
@@ -546,7 +546,7 @@ class AutoOvertakeHelper:
             )
         )
 
-        if explicit_obstacle is True:
+        if require_aux_sensors_mr76 and explicit_obstacle is True:
 
             self._set_lane_veto(
                 side,
@@ -589,12 +589,12 @@ class AutoOvertakeHelper:
         lidar_valid,
         lidar_age,
         lidar_obstacle,
-        require_aux_sensors,
+        require_aux_sensors_lidar,
         now,
     ):
 
         if lidar_available is None:
-            if require_aux_sensors:
+            if require_aux_sensors_lidar:
                 self._set_lane_veto(
                     side,
                     "lidar_unavailable_or_stale",
@@ -610,7 +610,7 @@ class AutoOvertakeHelper:
             LIDAR_MAX_AGE_SEC,
         )
 
-        if require_aux_sensors and not lidar_ok:
+        if require_aux_sensors_lidar and not lidar_ok:
 
             self._set_lane_veto(
                 side,
@@ -977,7 +977,8 @@ class AutoOvertakeHelper:
 
         base_lane_ok,
 
-        require_aux_sensors,
+        require_aux_sensors_mr76,
+        require_aux_sensors_lidar,
 
         now,
     ):
@@ -1018,7 +1019,7 @@ class AutoOvertakeHelper:
             rear_dist=rear_dist,
             rear_speed=rear_speed,
 
-            require_aux_sensors=require_aux_sensors,
+            require_aux_sensors_mr76=require_aux_sensors_mr76,
 
             now=now,
         ):
@@ -1033,7 +1034,7 @@ class AutoOvertakeHelper:
             lidar_age=lidar_age,
             lidar_obstacle=lidar_obstacle,
 
-            require_aux_sensors=require_aux_sensors,
+            require_aux_sensors_lidar=require_aux_sensors_lidar,
 
             now=now,
         ):
@@ -1557,9 +1558,15 @@ class AutoOvertakeHelper:
         require_lane_gain=AO_GAIN_GATE_DEFAULT,
 
         require_aux_sensors=True,
+        require_aux_sensors_mr76=None,
+        require_aux_sensors_lidar=None,
     ):
 
         now = time.monotonic()
+        if require_aux_sensors_mr76 is None:
+          require_aux_sensors_mr76 = require_aux_sensors
+        if require_aux_sensors_lidar is None:
+          require_aux_sensors_lidar = require_aux_sensors
 
         request = LaneChangeDirection.none
 
@@ -1766,7 +1773,8 @@ class AutoOvertakeHelper:
 
             base_lane_ok=left_base,
 
-            require_aux_sensors=require_aux_sensors,
+            require_aux_sensors_mr76=require_aux_sensors_mr76,
+            require_aux_sensors_lidar=require_aux_sensors_lidar,
 
             now=now,
         )
@@ -1796,7 +1804,8 @@ class AutoOvertakeHelper:
 
             base_lane_ok=right_base,
 
-            require_aux_sensors=require_aux_sensors,
+            require_aux_sensors_mr76=require_aux_sensors_mr76,
+            require_aux_sensors_lidar=require_aux_sensors_lidar,
 
             now=now,
         )

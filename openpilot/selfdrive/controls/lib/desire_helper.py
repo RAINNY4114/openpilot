@@ -1,6 +1,7 @@
 from openpilot.cereal import log, custom
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
+import time
 from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeController, AutoLaneChangeMode
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_turn_desire import LaneTurnController
 
@@ -17,6 +18,11 @@ BSD_EXIST_THRESHOLD = 3
 SIDE_LEAD_DANGER_DIST = 5.0
 
 AUTO_LC_CONFIRM_DELAY_SEC = 3.0
+
+# 2026-11-18: carrot-wip-style time confirmation for manual nudge. Small
+# wheel torque while hands are on the wheel must not become a lane change.
+LANE_CHANGE_NUDGE_TORQUE_MIN = 1.5
+LANE_CHANGE_NUDGE_HOLD_SEC = 0.15
 
 class ExistCounter:
   def __init__(self, threshold: int = BSD_EXIST_THRESHOLD):
@@ -70,6 +76,8 @@ class DesireHelper:
     self._auto_active = False
     self._auto_confirm_timer = 0.0
     self._auto_release = False
+    self._nudge_dir = LaneChangeDirection.none
+    self._nudge_since = 0.0
 
   @staticmethod
   def get_lane_change_direction(CS):
@@ -122,9 +130,25 @@ class DesireHelper:
         # Update lane change direction
         self.lane_change_direction = self.get_lane_change_direction(carstate)
 
-        torque_applied = carstate.steeringPressed and \
-                         ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
-                          (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right))
+        torque_dir = LaneChangeDirection.none
+        if carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left:
+          torque_dir = LaneChangeDirection.left
+        elif carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right:
+          torque_dir = LaneChangeDirection.right
+
+        torque_now = bool(
+          carstate.steeringPressed
+          and torque_dir != LaneChangeDirection.none
+          and abs(carstate.steeringTorque) >= LANE_CHANGE_NUDGE_TORQUE_MIN
+        )
+        _now = time.monotonic()
+        if not torque_now:
+          self._nudge_dir = LaneChangeDirection.none
+          self._nudge_since = 0.0
+        elif torque_dir != self._nudge_dir:
+          self._nudge_dir = torque_dir
+          self._nudge_since = _now
+        torque_applied = torque_now and (_now - self._nudge_since) >= LANE_CHANGE_NUDGE_HOLD_SEC
 
         raw_left_bsd = carstate.leftBlindspot
         raw_right_bsd = carstate.rightBlindspot

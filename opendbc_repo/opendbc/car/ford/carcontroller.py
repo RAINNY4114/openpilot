@@ -6,6 +6,7 @@ from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, apply_hystere
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
+from opendbc.sunnypilot.car.ford.icbm import IntelligentCruiseButtonManagementInterface
 
 try:
   from openpilot.cereal import messaging as _cereal_messaging
@@ -385,9 +386,11 @@ class FordPathAngleGate:
     except Exception:
       pass
 
-class CarController(CarControllerBase):
+class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     super().__init__(dbc_names, CP, CP_SP)
+    IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
+    self.last_button_frame = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.CAN = fordcan.CanBus(CP)
 
@@ -446,6 +449,12 @@ class CarController(CarControllerBase):
     # the stock system checks for steering pressed, and eventually disengages cruise control
     elif CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0 and (self.frame % CarControllerParams.ACC_UI_STEP) == 0:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, tja_toggle=True))
+
+    if (self.CP_SP.intelligentCruiseButtonManagementAvailable and
+        not self.CP.openpilotLongitudinalControl and
+        not CC.cruiseControl.cancel and not CC.cruiseControl.resume):
+      can_sends.extend(IntelligentCruiseButtonManagementInterface.update(
+        self, CS, CC_SP, self.packer, self.frame, self.last_button_frame, self.CAN))
 
     ### lateral control ###
     # send steer msg at 20Hz
