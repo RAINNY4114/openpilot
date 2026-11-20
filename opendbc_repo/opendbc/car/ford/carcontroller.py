@@ -7,6 +7,7 @@ from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 from opendbc.sunnypilot.car.ford.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.ford.lane_center_trim import LaneCenterTrim
 
 try:
   from openpilot.cereal import messaging as _cereal_messaging
@@ -133,6 +134,12 @@ class FordPathAngleGate:
     self.unwind_rate = 0.40
     self.min_v = 9.0
 
+    # LaneCenterTrim (angle-mode lane centering, BluePilot bp-7.0)
+    self.lane_center_trim = LaneCenterTrim()
+    self.enable_lane_positioning = False
+    self.lane_center_offset = 0.0
+    self.lane_center_strength = 0.0
+
     self.model = None
     self.lateral_delay = 0.12
     self.lane_change = False
@@ -162,6 +169,9 @@ class FordPathAngleGate:
     self.humanturn_enable = bool(int(_read_param("dp_ford_angle_humanturn", 1, int)))
     self.unwind_rate = float(np.clip(_read_param("dp_ford_angle_unwind", 0.40, float), 0.10, 1.00))
     self.min_v = float(np.clip(_read_param("dp_ford_angle_min_v", 9.0, float), 0.0, 20.0))
+    self.enable_lane_positioning = bool(int(_read_param("dp_lct_enable", 0, int)))
+    self.lane_center_offset = float(np.clip(_read_param("dp_lct_offset", 0.0, float), -0.5, 0.5))
+    self.lane_center_strength = float(np.clip(_read_param("dp_lct_strength", 0.0, float), 0.0, 1.0))
 
   def set_context(self, model, lateral_delay):
     self.model = model
@@ -288,6 +298,7 @@ class FordPathAngleGate:
       self.human_turn_active = False
 
     if not lat_active:
+      self.lane_center_trim.reset()
       self.in_curve = False
       self.alpha = 0.0
       self.c1 = 0.0
@@ -301,6 +312,7 @@ class FordPathAngleGate:
       return 0.0, kappa
 
     if self.human_turn_active:
+      self.lane_center_trim.reset()
       self.in_curve = False
       self.alpha = 0.0
       self.c1 = 0.0
@@ -312,6 +324,13 @@ class FordPathAngleGate:
       return 0.0, 0.0
 
     kappa = self._shape_kappa(kappa, v, current_curvature)
+
+    # Lane centering trim: curvature-domain nudge toward true lane-line center.
+    # Applied before c1/c2 derivation so it inherits angle-mode's downstream limiters.
+    kappa = self.lane_center_trim.update(
+      kappa, self.model, v, self.enable_lane_positioning,
+      self.lane_center_offset, self.lane_center_strength,
+      bool(lat_active), bool(self.lane_change))
 
     lat_accel = abs(kappa) * v * v
 

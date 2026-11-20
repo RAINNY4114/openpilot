@@ -19,7 +19,7 @@ from opendbc.car.ford.values import DBC, RADAR
 from opendbc.car.interfaces import RadarInterfaceBase
 
 RADAR_LOSS_PARAM = "dp_radar_loss_no_disable"
-RADAR_LOSS_PARAM_DIRS = ("/dev/shm/params", "/data/params/d")
+RADAR_LOSS_PARAM_DIRS = ("/data/ford_params", "/dev/shm/params", "/data/params/d")
 _RADAR_LOSS_REFRESH_SEC = 2.0
 
 _radar_loss_cache = {"t": -1e9, "v": False}

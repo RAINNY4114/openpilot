@@ -42,6 +42,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.obstacle_avoid import ObstacleAvoidPlanner
+from openpilot.selfdrive.controls.lib.road_game_enhance import RoadGameEnhance
 from openpilot.selfdrive.controls.lib.ao_aa_bridge import AoAaBridge
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
 from openpilot.selfdrive.modeld.modeld import ChestnutGpuState
@@ -528,6 +529,7 @@ def main(demo=False):
   blendful_enabled = False
   AOA = AoAaBridge()
   OA = ObstacleAvoidPlanner()
+  RGE = RoadGameEnhance()
   is_rhd = bool(getattr(CP, "isRhd", False))
 
   while True:
@@ -662,8 +664,27 @@ def main(demo=False):
             _pp[0, :, 1] += _oa_off.astype(_pp.dtype)
       except Exception:
         cloudlog.exception('obstacle_avoid wiring failed')
+      # --- road_game_enhance (cpv9-inspired, opt-in, fail-safe) ---
+      _rge_off = None
+      _rge_cap = None
+      try:
+        _rge_off, _rge_cap = RGE.update(sm, model.constants.T_IDXS, v_ego, sm['carControl'].latActive)
+        if _rge_off is not None:
+          _pl = model_output['plan']
+          _pl[0, :, 1] += _rge_off.astype(_pl.dtype)
+          _pp = model_output.get('planplus')
+          if _pp is not None and _pp.shape[1] == _rge_off.shape[0]:
+            _pp[0, :, 1] += _rge_off.astype(_pp.dtype)
+      except Exception:
+        cloudlog.exception('road_game_enhance wiring failed')
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                            partial(blendful.update, model_output, v_ego, blendful_active, enabled=blendful_enabled))
+      if _rge_cap is not None:
+        try:
+          if action.desiredAcceleration > _rge_cap:
+            action.desiredAcceleration = float(_rge_cap)
+        except Exception:
+          pass
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,

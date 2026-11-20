@@ -265,6 +265,29 @@ class LincolnLayout(Widget):
       callback=lambda val: _write_param("ConeDetectionEnabled", 1 if val else 0),
     )
 
+    # Road scenario enhancement toggles (cpv9-inspired, opt-in):
+    # params are direct-read by road_game_enhance.py (/data/ford_params first).
+    self._road_narrow_toggle = toggle_item_sp(
+      title=lambda: tr("Narrow-Road Meeting Slowdown"),
+      description=lambda: tr(
+        "Experimental: when a narrow road is detected (both blind-side zones "
+        "occupied) and an oncoming target approaches, gently cap target speed "
+        "(15 km/h narrow / 25 km/h otherwise). Off = stock."
+      ),
+      initial_state=_get_bool("RoadNarrowEnabled"),
+      callback=lambda val: _write_param("RoadNarrowEnabled", 1 if val else 0),
+    )
+    self._road_shrink_toggle = toggle_item_sp(
+      title=lambda: tr("Roadside Obstacle Lane Shrink"),
+      description=lambda: tr(
+        "Experimental: shrink the corresponding side of the lane when a slow "
+        "roadside obstacle (incl. cone) is detected, nudging the path inward. "
+        "Off = stock."
+      ),
+      initial_state=_get_bool("RoadObsShrinkEnabled"),
+      callback=lambda val: _write_param("RoadObsShrinkEnabled", 1 if val else 0),
+    )
+
     # ---- Longitudinal enhancements (SpysyWeeb) ----
     self._long_header = ListItemSP(title=lambda: tr("### Longitudinal Enhancements ###"))
     self._smooth_stops_toggle = toggle_item_sp(
@@ -307,6 +330,29 @@ class LincolnLayout(Widget):
       label_callback=lambda v: f"{v / 20.0:.2f} s",
     )
 
+    # ---- Lane centering trim (angle mode, BluePilot) ----
+    self._lct_header = ListItemSP(title=lambda: tr("### Lane Centering Trim ###"))
+    self._lct_toggle = toggle_item_sp(
+      title=lambda: tr("Lane Centering Trim"),
+      description=lambda: tr("Nudge toward true lane center in angle mode. Off = stock. Needs lane-line confidence."),
+      initial_state=_get_bool("dp_lct_enable"),
+      callback=lambda val: _write_param("dp_lct_enable", 1 if val else 0),
+    )
+    self._lct_offset_item, self._lct_offset_action = _stepper_item(
+      title=lambda: tr("Lane Position Bias"),
+      description=lambda: tr("Target offset from lane center in meters. + = right, - = left."),
+      key="dp_lct_offset",
+      min_value=-50, max_value=50, step=1, scale=100.0,
+      label_callback=lambda v: f"{v / 100.0:+.2f} m",
+    )
+    self._lct_strength_item, self._lct_strength_action = _stepper_item(
+      title=lambda: tr("Centering Strength"),
+      description=lambda: tr("How much of the centering correction to apply. 0 = detect only."),
+      key="dp_lct_strength",
+      min_value=0, max_value=100, step=5, scale=100.0,
+      label_callback=lambda v: f"{v}%",
+    )
+
     self._seed_values()
 
     return [
@@ -319,6 +365,8 @@ class LincolnLayout(Widget):
       self._oa_header,
       self._oa_toggle,
       self._cone_toggle,
+      self._road_narrow_toggle,
+      self._road_shrink_toggle,
       LineSeparatorSP(40),
       self._long_header,
       self._smooth_stops_toggle,
@@ -327,6 +375,11 @@ class LincolnLayout(Widget):
       self._accel_item,
       self._jerk_item,
       self._follow_item,
+      LineSeparatorSP(40),
+      self._lct_header,
+      self._lct_toggle,
+      self._lct_offset_item,
+      self._lct_strength_item,
     ]
 
   def _seed_values(self):
@@ -335,6 +388,8 @@ class LincolnLayout(Widget):
     self._accel_action.seed(int(_get_float("CustomPersonalityStandardAccel", 1.6) * 10))
     self._jerk_action.seed(int(_get_float("CustomPersonalityStandardJerkMultiplier", 1.0) * 10))
     self._follow_action.seed(int(_get_float("CustomPersonalityStandardFollow", 1.45) * 20))
+    self._lct_offset_action.seed(int(_get_float("dp_lct_offset", 0.0) * 100))
+    self._lct_strength_action.seed(int(_get_float("dp_lct_strength", 0.5) * 100))
 
   def _render(self, rect):
     self._scroller.render(rect)
@@ -344,6 +399,8 @@ class LincolnLayout(Widget):
     self._aa_toggle.action_item.set_state(_get_bool("AutoAvoidanceEnabled"))
     self._oa_toggle.action_item.set_state(_get_bool("ObstacleAvoidEnabled"))
     self._cone_toggle.action_item.set_state(_get_bool("ConeDetectionEnabled"))
+    self._road_narrow_toggle.action_item.set_state(_get_bool("RoadNarrowEnabled"))
+    self._road_shrink_toggle.action_item.set_state(_get_bool("RoadObsShrinkEnabled"))
     self._seed_values()
     self._scroller.show_event()
 
