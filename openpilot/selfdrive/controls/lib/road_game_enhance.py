@@ -11,7 +11,7 @@ Design goals:
   - Independent from ObstacleAvoidPlanner: this module never modifies that code.
 
 Signals used (all present in modeld_v2's SubMaster):
-  - sm['radarState'].leadOne  (dRel, vRel, vLead, yRel)  -> oncoming/lead
+  - AUX cls=oncoming / radarTracks vRel<-3.0 with |y|>1.0 -> true oncoming (NOT leadOne.vRel>0)
   - sm['radarTracks'].points  (dRel, yRel, vRel)         -> static roadside obs
   - sm['amapNavi'].leftBlind / rightBlind (bitmask)      -> narrow-road hint
   - /dev/shm/mr76_targets.json (AUX targets [d,y,vr,cls])-> cone/ped/bike list
@@ -67,10 +67,13 @@ NARROW_LANE_WIDTH_M = 3.0 # cpv9 narrow threshold
 NARROW_SLOW_KPH = 15.0    # cpv9 narrow-road oncoming target
 NORMAL_SLOW_KPH = 25.0    # cpv9 normal-road oncoming target
 ONCOMING_MIN_DIST = 0.5
-ONCOMING_MAX_DIST = 50.0  # cpv9 oncoming dist
-ONCOMING_REL_SPEED = 0.0  # cpv9 relSpeed > 0 (closing)
-BLIND_BOTH_MASK = 0b0101  # bit pattern used by OA for lidar wall
-RELEASE_SEC = 1.5         # cpv9 hold time after oncoming disappears
+ONCOMING_MAX_DIST = 50.0    # cpv9 oncoming dist
+ONCOMING_LAT_MIN = 1.0      # target must be in adjacent/opposite lane (|y| > this), NOT our lane
+ONCOMING_LAT_MAX = 4.0      # beyond this is off-road clutter, not an oncoming vehicle
+ONCOMING_VREL_MARGIN = 2.0  # radarTracks fallback: target abs speed (vRel+vEgo) < -margin => truly oncoming
+ONCOMING_MIN_VEGO = 2.0     # only trust fallback while ego is moving (static objects have vRel=-vEgo)
+BLIND_BOTH_MASK = 0b0101    # bit pattern used by OA for lidar wall
+RELEASE_SEC = 1.5           # cpv9 hold time after oncoming disappears
 
 
 class RoadGameEnhance:
@@ -82,7 +85,7 @@ class RoadGameEnhance:
     self.diag = {
       "enabled": False, "active": False, "why": "init",
       "shrink": 0.0, "vru_shift": 0.0, "accel_cap": None,
-      "narrow": False, "oncoming": False, "n_obs": 0,
+      "narrow": False, "oncoming": False, "oncoming_src": "none", "n_obs": 0,
     }
 
   def _cfg(self):
@@ -198,33 +201,51 @@ class RoadGameEnhance:
           vru_shift = min(vru_shift + VRU_SHIFT_MAX * dw, VRU_SHIFT_MAX)
         target -= vru_shift  # shift left, independent of lane offset
 
-      # --- 3) narrow-road oncoming slowdown (cpv9 road_game) ---
+      # --- 3) oncoming slowdown (fixed judge) ---
+      # FIX: never use same-lane leadOne.vRel>0 -- a following car is NOT oncoming.
+      # Only a TRUE oncoming target in the adjacent/opposite lane (|y| > ONCOMING_LAT_MIN)
+      # may trigger. Source priority: AUX cls=oncoming, then radarTracks vr<-3.0 fallback.
+      # narrow (nav blind bitmask) only selects the target speed, never the trigger.
       narrow = self._narrow_hint(sm)
       oncoming = False
+      oncoming_src = "none"
       if cfg["narrow_on"]:
         now = time.time()
         try:
-          if sm.seen.get("radarState", False) and sm.valid.get("radarState", False):
-            lead = sm["radarState"].leadOne
-            if getattr(lead, "present", False) or getattr(lead, "status", False):
-              d = float(lead.dRel); vr = float(lead.vRel)
-              if ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and vr > ONCOMING_REL_SPEED:
-                oncoming = True
-                self._last_oncoming_ts = now
+          for d, y, vr, cls in obs:
+            if not (ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and abs(y) > ONCOMING_LAT_MIN):
+              continue
+            if cls == "oncoming":
+              oncoming = True; oncoming_src = "aux"; break
+          if not oncoming and v_ego > ONCOMING_MIN_VEGO:
+            # radarTracks points have no DynProp class. A static roadside object has
+            # vRel == -vEgo, while a true oncoming car has vRel < -vEgo - margin
+            # (its absolute speed is negative, heading toward us). Require |y| in the
+            # adjacent-lane band so far off-road clutter is excluded.
+            for d, y, vr, cls in obs:
+              if cls != "":
+                continue  # AUX already classified; fallback only on raw radarTracks points
+              ay = abs(y)
+              if (ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and ONCOMING_LAT_MIN < ay < ONCOMING_LAT_MAX
+                  and vr < -(v_ego + ONCOMING_VREL_MARGIN)):
+                oncoming = True; oncoming_src = "radar"; break
+          if oncoming:
+            self._last_oncoming_ts = now
         except Exception:
           pass
         active = oncoming or (now - self._last_oncoming_ts < RELEASE_SEC)
         if active:
+          # narrow=1 (real narrow road) -> 15 kph; true oncoming w/o nav -> 25 kph
           vmax_kph = NARROW_SLOW_KPH if narrow else NORMAL_SLOW_KPH
           vmax = vmax_kph / 3.6
           if v_ego > vmax:
-            # gentle decel cap: -1.5 m/s^2, never stronger
-            accel_cap = max(-1.5, (vmax - v_ego) / 1.5)
+            accel_cap = max(-1.5, (vmax - v_ego) / 1.5)  # gentle, never stronger
           self.diag["active"] = True
         else:
           self.diag["active"] = False
         self.diag["narrow"] = narrow
         self.diag["oncoming"] = oncoming
+        self.diag["oncoming_src"] = oncoming_src
       else:
         self.diag["active"] = False
 
@@ -247,7 +268,7 @@ class RoadGameEnhance:
         self._last_log_ts = now
         _log(f"[RGE] en={int(self.diag['enabled'])} act={int(self.diag['active'])} "
              f"n={len(obs)} shrink={shrink_total:.2f} vru={vru_shift:.2f} "
-             f"narrow={int(narrow)} oncoming={int(oncoming)} cap={accel_cap}")
+             f"narrow={int(narrow)} oncoming={int(oncoming)} src={oncoming_src} cap={accel_cap}")
 
       lat_out = self._profile.copy() if (cfg["shrink_on"] or cfg["vru_on"]) else None
       return lat_out, accel_cap
