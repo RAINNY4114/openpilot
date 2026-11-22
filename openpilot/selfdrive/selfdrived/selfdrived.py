@@ -57,6 +57,7 @@ _PARAM_DIR = "/data/ford_params"
 LOC_TEMP_DEBOUNCE_SEC = 0.5
 LOC_TEMP_HARD_SEC = 10.0
 BIG_MODEL_SETTLING_MAX_SEC = 120.0
+RADAR_TEMP_DEBOUNCE_SEC = 2.0  # filter short MRR scan-index glitches from UI alert
 
 MODEL_LAG_BIG_PERC = 25.0
 MODEL_LAG_SMALL_PERC = 1.0
@@ -124,6 +125,8 @@ class SelfdriveD:
     self.comm_learner_ignore = True
     self.comm_learner_hard_sec = COMM_ISSUE_LEARNER_HARD_SEC
     self.comm_learner_bad_t = 0.
+    self.radartemp_bad_t = 0.
+    self.radartemp_debounce_sec = RADAR_TEMP_DEBOUNCE_SEC
 
     # Setup sockets
     self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'])
@@ -457,12 +460,26 @@ class SelfdriveD:
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
     if self.CP.openpilotLongitudinalControl:
-      if self.sm['radarState'].radarErrors.canError:
+      _radar_errs = self.sm['radarState'].radarErrors
+      if _radar_errs.canError:
         self.events.add(EventName.canError)
-      elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
-        self.events.add(EventName.radarTempUnavailable)
-      elif any(self.sm['radarState'].radarErrors.to_dict().values()):
-        self.events.add(EventName.radarFault)
+      else:
+        # Debounce radarUnavailableTemporary: short MRR scan-index glitches (<threshold)
+        # must not spam the UI alert. The underlying radar point/cluster clearing in
+        # radar_interface.py is untouched (safety), and the timer resets immediately
+        # when the condition clears (never latch). Other radar faults keep the original
+        # elif semantics: only reported when radarUnavailableTemporary is not the active flag.
+        _now = time.monotonic()
+        _rtmp = bool(_radar_errs.radarUnavailableTemporary)
+        if _rtmp:
+          if self.radartemp_bad_t == 0.:
+            self.radartemp_bad_t = _now
+          if (_now - self.radartemp_bad_t) >= self.radartemp_debounce_sec:
+            self.events.add(EventName.radarTempUnavailable)
+        else:
+          self.radartemp_bad_t = 0.
+        if not _rtmp and any(_radar_errs.to_dict().values()):
+          self.events.add(EventName.radarFault)
     if CS.canTimeout:
       self.events.add(EventName.canBusMissing)
     elif not CS.canValid:
@@ -479,6 +496,7 @@ class SelfdriveD:
       self.loc_debounce_sec = _ford_num("LocTempDebounceSec", LOC_TEMP_DEBOUNCE_SEC, 0.0, 5.0)
       self.loc_hard_sec = _ford_num("LocTempHardSec", LOC_TEMP_HARD_SEC, 3.0, 60.0)
       self.settling_max_sec = _ford_num("BigModelSettlingMaxSec", BIG_MODEL_SETTLING_MAX_SEC, 30.0, 300.0)
+      self.radartemp_debounce_sec = _ford_num("RadarTempDebounceSec", RADAR_TEMP_DEBOUNCE_SEC, 0.0, 10.0)
       self.model_lag_big_perc = _ford_num("ModelLagBigPerc", MODEL_LAG_BIG_PERC, 1.0, 80.0)
       self.model_lag_small_perc = _ford_num("ModelLagSmallPerc", MODEL_LAG_SMALL_PERC, 0.0, 20.0)
       self.model_lag_hard_perc = _ford_num("ModelLagHardPerc", MODEL_LAG_HARD_PERC, 20.0, 100.0)
