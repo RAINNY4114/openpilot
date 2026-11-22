@@ -12,7 +12,7 @@ Design goals:
 
 Signals used (all present in modeld_v2's SubMaster):
   - AUX cls=oncoming / radarTracks vRel<-3.0 with |y|>1.0 -> true oncoming (NOT leadOne.vRel>0)
-  - sm['radarTracks'].points  (dRel, yRel, vRel)         -> static roadside obs
+  - sm['radarTracks'].points  (dRel, yRel, vRel)         -> static roadside obs / oncoming geometry
   - sm['amapNavi'].leftBlind / rightBlind (bitmask)      -> narrow-road hint
   - /dev/shm/mr76_targets.json (AUX targets [d,y,vr,cls])-> cone/ped/bike list
   - sm['carState'].vEgo, sm['carControl'].latActive
@@ -20,7 +20,9 @@ Signals used (all present in modeld_v2's SubMaster):
 Features:
   1) static obstacle lane shrink  (RoadObsShrinkEnabled)
   2) two-wheeler / pedestrian independent left shift (RoadVruShiftEnabled)
-  3) narrow-road oncoming slowdown (RoadNarrowEnabled)
+  3) risk-gated oncoming slowdown (RoadNarrowEnabled):
+     brake only for narrow width / real collision / side-scrape risk.
+     A well-separated oncoming car staying in its own lane never brakes.
 """
 
 import json
@@ -64,16 +66,32 @@ PROFILE_SPAN_IDX = 4
 ROADSIDE_LAT_MIN = 0.8    # |y| above this = roadside
 VRU_LAT_MAX = 1.6         # two-wheeler considered in-path up to this |y|
 NARROW_LANE_WIDTH_M = 3.0 # cpv9 narrow threshold
-NARROW_SLOW_KPH = 15.0    # cpv9 narrow-road oncoming target
+NARROW_SLOW_KPH = 10.0    # narrow road (width insufficient): slow to 10 kph
+COLLISION_SLOW_KPH = 15.0 # real head-on collision risk: slow to 15 kph
 NORMAL_SLOW_KPH = 25.0    # cpv9 normal-road oncoming target
+SCRAPE_SLOW_KPH = 20.0    # side-scrape risk: gentle deceleration
+RELEASE_SEC = 1.5           # cpv9 hold time after risk disappears
+
+# oncoming recognition (unchanged: true oncoming, not same-lane following car)
 ONCOMING_MIN_DIST = 0.5
 ONCOMING_MAX_DIST = 50.0    # cpv9 oncoming dist
 ONCOMING_LAT_MIN = 1.0      # target must be in adjacent/opposite lane (|y| > this), NOT our lane
 ONCOMING_LAT_MAX = 4.0      # beyond this is off-road clutter, not an oncoming vehicle
 ONCOMING_VREL_MARGIN = 2.0  # radarTracks fallback: target abs speed (vRel+vEgo) < -margin => truly oncoming
 ONCOMING_MIN_VEGO = 2.0     # only trust fallback while ego is moving (static objects have vRel=-vEgo)
+
+# oncoming RISK thresholds (new): an oncoming car passing in its own lane is safe.
+# Only when it intrudes laterally into our lane space does TTC/distance matter.
+# Car body half-width ~0.9m, so two cars need >1.8m lateral center separation.
+ONCOMING_SCRAPE_LAT = 1.6   # |y| below this = lateral intrusion / scrape risk (tunable)
+ONCOMING_RISK_TTC = 3.0     # s, closing TTC below this while intruding = collision risk (tunable)
+ONCOMING_NEAR_DIST = 12.0   # m, intruding target this close is risky even at low closing (tunable)
+# Far targets have unreliable lateral precision (radar y jitter seen 1.3~2.8m at
+# 40m in real logs). A distant oncoming car drifting across the |y| threshold
+# must NOT trigger a hard brake -- that was a residual cause of frequent braking.
+# Collision/scrape risk is only trusted inside this longitudinal range.
+ONCOMING_RISK_MAX_DIST = 30.0  # m, ignore risk from targets farther than this (tunable)
 BLIND_BOTH_MASK = 0b0101    # bit pattern used by OA for lidar wall
-RELEASE_SEC = 1.5           # cpv9 hold time after oncoming disappears
 
 
 class RoadGameEnhance:
@@ -85,7 +103,9 @@ class RoadGameEnhance:
     self.diag = {
       "enabled": False, "active": False, "why": "init",
       "shrink": 0.0, "vru_shift": 0.0, "accel_cap": None,
-      "narrow": False, "oncoming": False, "oncoming_src": "none", "n_obs": 0,
+      "narrow": False, "oncoming": False, "oncoming_src": "none",
+      "risk_reason": "none", "risk_lat": None, "risk_ttc": None,
+      "n_obs": 0,
     }
 
   def _cfg(self):
@@ -150,6 +170,62 @@ class RoadGameEnhance:
     except Exception:
       return False
 
+  @staticmethod
+  def _oncoming_targets(obs, v_ego):
+    """Collect TRUE oncoming targets [(d, y, vr, cls)].
+
+    Source priority: AUX cls=oncoming first; radarTracks vRel < -(vEgo+margin)
+    fallback only for unclassified raw points in the adjacent-lane band.
+    Never uses same-lane leadOne.vRel>0 -- a following car is not oncoming.
+    """
+    res = []
+    for d, y, vr, cls in obs:
+      if cls == "oncoming" and ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and abs(y) > ONCOMING_LAT_MIN:
+        res.append((d, y, vr, cls))
+    if not res and v_ego > ONCOMING_MIN_VEGO:
+      for d, y, vr, cls in obs:
+        if cls != "":
+          continue  # AUX already classified; fallback only on raw radarTracks points
+        ay = abs(y)
+        if (ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and ONCOMING_LAT_MIN < ay < ONCOMING_LAT_MAX
+            and vr < -(v_ego + ONCOMING_VREL_MARGIN)):
+          res.append((d, y, vr, cls))
+    return res
+
+  @staticmethod
+  def _oncoming_risk(targets, scrape_lat, risk_ttc, near_dist, risk_max_dist):
+    """Risk level from oncoming geometry. Returns (level, min_lat, min_ttc).
+
+    Key idea: an oncoming car well-separated laterally (|y| >= scrape_lat) is
+    SAFE even with a tiny TTC -- the two vehicles simply pass side by side in
+    separate lanes. Risk only exists when the target intrudes into our lane
+    space (|y| < scrape_lat) AND is genuinely close/closing.
+      - collision: intruding + within risk_max_dist + closing TTC < risk_ttc
+      - scrape:    intruding + within near_dist (even if TTC undefined)
+      - none:      laterally separated, too far, or not closing
+    Remote targets (>risk_max_dist) are ignored: their lateral reading is noisy
+    (real logs show y jitter 1.3~2.8m at 40m), so a distant car crossing the
+    threshold must not cause a hard brake.
+    """
+    level = "none"
+    min_lat = None
+    min_ttc = None
+    for d, y, vr, cls in targets:
+      ay = abs(y)
+      closing = -float(vr)
+      ttc = (float(d) / closing) if closing > 0.01 else None
+      if min_lat is None or ay < min_lat:
+        min_lat = ay
+      if ttc is not None and (min_ttc is None or ttc < min_ttc):
+        min_ttc = ttc
+      if ay >= scrape_lat or float(d) > risk_max_dist:
+        continue  # laterally separated OR too far to trust: no risk
+      if ttc is not None and ttc < risk_ttc:
+        level = "collision"
+      elif float(d) < near_dist and level != "collision":
+        level = "scrape"
+    return level, min_lat, min_ttc
+
   def update(self, sm, t_idxs, v_ego, lat_active):
     """Return (lateral_offset_array_or_None, accel_cap_or_None)."""
     try:
@@ -201,42 +277,53 @@ class RoadGameEnhance:
           vru_shift = min(vru_shift + VRU_SHIFT_MAX * dw, VRU_SHIFT_MAX)
         target -= vru_shift  # shift left, independent of lane offset
 
-      # --- 3) oncoming slowdown (fixed judge) ---
-      # FIX: never use same-lane leadOne.vRel>0 -- a following car is NOT oncoming.
-      # Only a TRUE oncoming target in the adjacent/opposite lane (|y| > ONCOMING_LAT_MIN)
-      # may trigger. Source priority: AUX cls=oncoming, then radarTracks vr<-3.0 fallback.
-      # narrow (nav blind bitmask) only selects the target speed, never the trigger.
+      # --- 3) RISK-GATED oncoming slowdown (fixed judge) ---
+      # Old behaviour braked on ANY true oncoming target (narrow=0 oncoming=1
+      # cap=-1.5 in logs) -> frequent braking on normal two-lane meetings.
+      # New behaviour: recognize oncoming, then brake ONLY if one of:
+      #   (a) narrow road (nav blind bitmask) -> width insufficient to pass
+      #   (b) collision risk: intruding |y| + short closing TTC
+      #   (c) side-scrape risk: intruding |y| + close distance
+      # A well-separated oncoming car in its own lane (|y| >= scrape_lat) is safe.
       narrow = self._narrow_hint(sm)
       oncoming = False
       oncoming_src = "none"
+      risk_reason = "none"
+      risk_lat = None
+      risk_ttc = None
       if cfg["narrow_on"]:
         now = time.time()
         try:
-          for d, y, vr, cls in obs:
-            if not (ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and abs(y) > ONCOMING_LAT_MIN):
-              continue
-            if cls == "oncoming":
-              oncoming = True; oncoming_src = "aux"; break
-          if not oncoming and v_ego > ONCOMING_MIN_VEGO:
-            # radarTracks points have no DynProp class. A static roadside object has
-            # vRel == -vEgo, while a true oncoming car has vRel < -vEgo - margin
-            # (its absolute speed is negative, heading toward us). Require |y| in the
-            # adjacent-lane band so far off-road clutter is excluded.
-            for d, y, vr, cls in obs:
-              if cls != "":
-                continue  # AUX already classified; fallback only on raw radarTracks points
-              ay = abs(y)
-              if (ONCOMING_MIN_DIST < d < ONCOMING_MAX_DIST and ONCOMING_LAT_MIN < ay < ONCOMING_LAT_MAX
-                  and vr < -(v_ego + ONCOMING_VREL_MARGIN)):
-                oncoming = True; oncoming_src = "radar"; break
+          targets = self._oncoming_targets(obs, v_ego)
+          oncoming = bool(targets)
           if oncoming:
+            oncoming_src = "aux" if targets[0][3] == "oncoming" else "radar"
+          scrape_lat = _read_num("OncomingScrapeLat", ONCOMING_SCRAPE_LAT, float)
+          risk_ttc_cfg = _read_num("OncomingRiskTtc", ONCOMING_RISK_TTC, float)
+          near_dist = _read_num("OncomingNearDist", ONCOMING_NEAR_DIST, float)
+          risk_max_dist = _read_num("OncomingRiskMaxDist", ONCOMING_RISK_MAX_DIST, float)
+          risk_level, risk_lat, risk_ttc = self._oncoming_risk(
+            targets, scrape_lat, risk_ttc_cfg, near_dist, risk_max_dist)
+          if oncoming and narrow:
+            risk_reason = "narrow"
+          elif oncoming and risk_level != "none":
+            risk_reason = risk_level
+          if risk_reason != "none":
             self._last_oncoming_ts = now
         except Exception:
           pass
-        active = oncoming or (now - self._last_oncoming_ts < RELEASE_SEC)
+        active = (risk_reason != "none") or (now - self._last_oncoming_ts < RELEASE_SEC)
         if active:
-          # narrow=1 (real narrow road) -> 15 kph; true oncoming w/o nav -> 25 kph
-          vmax_kph = NARROW_SLOW_KPH if narrow else NORMAL_SLOW_KPH
+          # narrow (width insufficient) -> 10 kph; collision -> 15 kph;
+          # scrape -> 20 kph; held after risk clears -> normal 25 kph
+          if risk_reason == "narrow":
+            vmax_kph = NARROW_SLOW_KPH
+          elif risk_reason == "collision":
+            vmax_kph = COLLISION_SLOW_KPH
+          elif risk_reason == "scrape":
+            vmax_kph = SCRAPE_SLOW_KPH
+          else:
+            vmax_kph = NORMAL_SLOW_KPH
           vmax = vmax_kph / 3.6
           if v_ego > vmax:
             accel_cap = max(-1.5, (vmax - v_ego) / 1.5)  # gentle, never stronger
@@ -248,6 +335,10 @@ class RoadGameEnhance:
         self.diag["oncoming_src"] = oncoming_src
       else:
         self.diag["active"] = False
+
+      self.diag["risk_reason"] = risk_reason
+      self.diag["risk_lat"] = risk_lat
+      self.diag["risk_ttc"] = risk_ttc
 
       # --- smooth + rate-limit lateral profile (same as OA) ---
       if cfg["shrink_on"] or cfg["vru_on"]:
@@ -266,9 +357,12 @@ class RoadGameEnhance:
       now = time.monotonic()
       if now - self._last_log_ts >= 1.0:
         self._last_log_ts = now
+        _lat = "na" if risk_lat is None else f"{risk_lat:.2f}"
+        _ttc = "na" if risk_ttc is None else f"{risk_ttc:.2f}"
         _log(f"[RGE] en={int(self.diag['enabled'])} act={int(self.diag['active'])} "
              f"n={len(obs)} shrink={shrink_total:.2f} vru={vru_shift:.2f} "
-             f"narrow={int(narrow)} oncoming={int(oncoming)} src={oncoming_src} cap={accel_cap}")
+             f"narrow={int(narrow)} oncoming={int(oncoming)} src={oncoming_src} "
+             f"risk={risk_reason} lat={_lat} ttc={_ttc} cap={accel_cap}")
 
       lat_out = self._profile.copy() if (cfg["shrink_on"] or cfg["vru_on"]) else None
       return lat_out, accel_cap
