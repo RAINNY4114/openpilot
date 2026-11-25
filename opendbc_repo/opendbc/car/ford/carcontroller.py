@@ -115,7 +115,7 @@ class FordPathAngleGate:
 
   def __init__(self):
     self.mode = 0
-    self.gain = 1.00
+    self.gain = 1.05
     self.enter = 1.20
     self.exit = 0.70
     self.in_curve = False
@@ -126,13 +126,13 @@ class FordPathAngleGate:
     self._n = 0
     self._log_n = 0
 
-    self.blend = 0.25
+    self.blend = 0.65
     self.vlt_extra_max = 0.05
     self.lc_factor = 1.00
     self.damp = 1.00
     self.humanturn_enable = True
-    self.unwind_rate = 0.40
-    self.min_v = 9.0
+    self.unwind_rate = 0.55
+    self.min_v = 11.0
 
     # LaneCenterTrim (angle-mode lane centering, BluePilot bp-7.0)
     self.lane_center_trim = LaneCenterTrim()
@@ -158,17 +158,17 @@ class FordPathAngleGate:
 
   def reload(self):
     self.mode = int(_read_param("dp_ford_angle_mode", 0, int))
-    self.gain = float(np.clip(_read_param("dp_ford_angle_gain", 1.00, float), 0.5, 2.0))
+    self.gain = float(np.clip(_read_param("dp_ford_angle_gain", 1.05, float), 0.5, 2.0))
     self.enter = float(np.clip(_read_param("dp_ford_angle_enter", 1.20, float), 0.30, 3.0))
     lo = float(np.clip(_read_param("dp_ford_angle_exit", 0.70, float), 0.10, 2.90))
     self.exit = min(lo, self.enter - 0.05)
-    self.blend = float(np.clip(_read_param("dp_ford_angle_blend", 0.25, float), 0.0, 1.0))
+    self.blend = float(np.clip(_read_param("dp_ford_angle_blend", 0.65, float), 0.0, 1.0))
     self.vlt_extra_max = float(np.clip(_read_param("dp_ford_angle_vlt", _VLT_T_EXTRA_MAX, float), 0.0, 0.20))
     self.lc_factor = float(np.clip(_read_param("dp_ford_angle_lc", 1.00, float), 0.85, 1.50))
     self.damp = float(np.clip(_read_param("dp_ford_angle_damp", 1.00, float), 0.50, 1.25))
     self.humanturn_enable = bool(int(_read_param("dp_ford_angle_humanturn", 1, int)))
-    self.unwind_rate = float(np.clip(_read_param("dp_ford_angle_unwind", 0.40, float), 0.10, 1.00))
-    self.min_v = float(np.clip(_read_param("dp_ford_angle_min_v", 9.0, float), 0.0, 20.0))
+    self.unwind_rate = float(np.clip(_read_param("dp_ford_angle_unwind", 0.55, float), 0.10, 1.00))
+    self.min_v = float(np.clip(_read_param("dp_ford_angle_min_v", 11.0, float), 0.0, 20.0))
     self.enable_lane_positioning = bool(int(_read_param("dp_lct_enable", 0, int)))
     self.lane_center_offset = float(np.clip(_read_param("dp_lct_offset", 0.0, float), -0.5, 0.5))
     self.lane_center_strength = float(np.clip(_read_param("dp_lct_strength", 0.0, float), 0.0, 1.0))
@@ -359,7 +359,14 @@ class FordPathAngleGate:
     if a_target == 0.0 and self.alpha <= 1e-9:
       self.c1 = 0.0
       if self.mode >= 2:
-        self.c2 = self._move(self.c2, kappa_passthrough, self._curv_step(v))
+        # P3: below min_v relax c2 toward zero instead of tracking planner
+        # curvature. At launch alpha=0 and a_target=0, so this branch is taken;
+        # residual curvature_cmd combined with low-speed vehicle-model angle
+        # distortion produced a rightward pull on startup.
+        if v < self.min_v:
+          self.c2 = self._move(self.c2, 0.0, self._curv_step(v))
+        else:
+          self.c2 = self._move(self.c2, kappa_passthrough, self._curv_step(v))
       else:
         self.c2 = kappa
       self._k_last = kappa
