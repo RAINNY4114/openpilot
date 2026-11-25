@@ -91,6 +91,11 @@ ONCOMING_NEAR_DIST = 12.0   # m, intruding target this close is risky even at lo
 # must NOT trigger a hard brake -- that was a residual cause of frequent braking.
 # Collision/scrape risk is only trusted inside this longitudinal range.
 ONCOMING_RISK_MAX_DIST = 30.0  # m, ignore risk from targets farther than this (tunable)
+# Radar fallback has noisier lateral data (y jitter 1.3~2.8m) than AUX cls=oncoming.
+# Use TIGHTER scrape/ttc thresholds for radar-only targets to stop lateral-jitter
+# false braking; AUX-tagged oncoming keeps the original (looser) thresholds above.
+RADAR_SCRAPE_LAT = 1.3   # tighter |y| for raw-radar fallback (tunable)
+RADAR_RISK_TTC = 2.0     # tighter closing TTC for raw-radar fallback (tunable)
 BLIND_BOTH_MASK = 0b0101    # bit pattern used by OA for lidar wall
 
 
@@ -193,7 +198,8 @@ class RoadGameEnhance:
     return res
 
   @staticmethod
-  def _oncoming_risk(targets, scrape_lat, risk_ttc, near_dist, risk_max_dist):
+  def _oncoming_risk(targets, scrape_lat, risk_ttc, near_dist, risk_max_dist,
+                     radar_scrape_lat=None, radar_risk_ttc=None):
     """Risk level from oncoming geometry. Returns (level, min_lat, min_ttc).
 
     Key idea: an oncoming car well-separated laterally (|y| >= scrape_lat) is
@@ -207,6 +213,10 @@ class RoadGameEnhance:
     (real logs show y jitter 1.3~2.8m at 40m), so a distant car crossing the
     threshold must not cause a hard brake.
     """
+    if radar_scrape_lat is None:
+      radar_scrape_lat = scrape_lat
+    if radar_risk_ttc is None:
+      radar_risk_ttc = risk_ttc
     level = "none"
     min_lat = None
     min_ttc = None
@@ -218,9 +228,13 @@ class RoadGameEnhance:
         min_lat = ay
       if ttc is not None and (min_ttc is None or ttc < min_ttc):
         min_ttc = ttc
-      if ay >= scrape_lat or float(d) > risk_max_dist:
+      # AUX-tagged oncoming (cls=="oncoming") has stable lateral data -> looser thresholds;
+      # raw radar fallback (cls=="") has jittery y -> tighter thresholds to avoid false brake.
+      s_lat = scrape_lat if cls == "oncoming" else radar_scrape_lat
+      r_ttc = risk_ttc if cls == "oncoming" else radar_risk_ttc
+      if ay >= s_lat or float(d) > risk_max_dist:
         continue  # laterally separated OR too far to trust: no risk
-      if ttc is not None and ttc < risk_ttc:
+      if ttc is not None and ttc < r_ttc:
         level = "collision"
       elif float(d) < near_dist and level != "collision":
         level = "scrape"
@@ -302,8 +316,11 @@ class RoadGameEnhance:
           risk_ttc_cfg = _read_num("OncomingRiskTtc", ONCOMING_RISK_TTC, float)
           near_dist = _read_num("OncomingNearDist", ONCOMING_NEAR_DIST, float)
           risk_max_dist = _read_num("OncomingRiskMaxDist", ONCOMING_RISK_MAX_DIST, float)
+          radar_scrape_lat = _read_num("OncomingRadarScrapeLat", RADAR_SCRAPE_LAT, float)
+          radar_risk_ttc = _read_num("OncomingRadarRiskTtc", RADAR_RISK_TTC, float)
           risk_level, risk_lat, risk_ttc = self._oncoming_risk(
-            targets, scrape_lat, risk_ttc_cfg, near_dist, risk_max_dist)
+            targets, scrape_lat, risk_ttc_cfg, near_dist, risk_max_dist,
+            radar_scrape_lat, radar_risk_ttc)
           if oncoming and narrow:
             risk_reason = "narrow"
           elif oncoming and risk_level != "none":

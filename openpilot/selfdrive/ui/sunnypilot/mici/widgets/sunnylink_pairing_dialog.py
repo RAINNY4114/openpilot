@@ -53,7 +53,7 @@ class SunnylinkPairingDialog(NavWidget):
     try:
       if self._qr_texture and self._qr_texture.id != 0:
         rl.unload_texture(self._qr_texture)
-      self._qr_texture = make_texture(self._get_pairing_url(), inverted=True)
+      self._qr_texture = make_texture(self._get_pairing_url(), inverted=False)
     except Exception as e:
       cloudlog.warning(f"QR code generation failed: {e}")
       self._qr_texture = None

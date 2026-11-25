@@ -226,10 +226,6 @@ def make_texture(data: str, inverted: bool = False) -> rl.Texture:
   """Render a URL as the RGBA QR texture used by the UI. The texture upload
   copies the pixels, so the intermediate image/array don't need to outlive it."""
   raw = data.encode()
-  # Full QR spec supports up to version 40 (L-level capacity ~2956 bytes).
-  # The sunnylink sponsor-pairing URL (base64 JWT state) is ~1176 chars and
-  # needs version >=25; the old cap of 20 (861 bytes) made it raise
-  # "QR URL is too long" and show "QR Code Error" in the pairing dialog.
   for version in range(1, 41):
     count_bits = 8 if version <= 9 else 16
     if 4 + count_bits + len(raw) * 8 <= _capacity(version) * 8:

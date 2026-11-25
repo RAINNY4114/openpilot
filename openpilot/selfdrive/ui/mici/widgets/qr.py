@@ -19,7 +19,7 @@ class QR(Widget):
 
   def _generate_qr_code(self):
     try:
-      return make_texture(self._url, inverted=True)
+      return make_texture(self._url, inverted=False)
     except Exception as e:
       cloudlog.warning(f"QR code generation failed: {e}")
       return None

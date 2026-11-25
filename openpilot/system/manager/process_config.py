@@ -206,7 +206,7 @@ procs += [
   PythonProcess("mapd_manager", "openpilot.sunnypilot.mapd.mapd_manager", always_run),
 
   # locationd
-  NativeProcess("locationd_llk", "openpilot/sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad),
+  PythonProcess("gps_fuser", "openpilot.sunnypilot.selfdrive.locationd.gps_fuser", only_onroad),
 ]
 
 if os.path.exists("../../sunnypilot/sunnylink/uploader.py"):
